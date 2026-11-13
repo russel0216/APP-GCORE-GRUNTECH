@@ -145,6 +145,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'employment_contract', code: 'EC', label: 'Employment Contract' },
   // G-HR › Attendance Corrections (2026-10-23): GT-ATC-2026-0001.
   { type: 'attendance_correction', code: 'ATC', label: 'Attendance Correction' },
+  // G-HR › Asset Management (2026-11-13): several assets issued on one slip, GT-AIS-2026-0001.
+  { type: 'asset_slip', code: 'AIS', label: 'Asset Issuance Slip' },
 ];
 
 /** `2026` for a yearly counter, `2026-09` for a monthly one, '' for a flat one. */

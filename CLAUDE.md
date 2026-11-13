@@ -715,6 +715,32 @@ four databases and four copies of "customer".
   whoever may change the contract) — a 400 otherwise; the hire copies it
   into the employee's 201 file (`employee_201`). verify-hr pins both.
 
+## The owner's G-HR batch of 2026-11-13 — push 2: assets on one slip
+
+- **Several assets go out on ONE slip, acknowledged by the holder** (the
+  owner's call: "issuance of tools can be list … they have to acknowledge,
+  and a PDF document stored on asset management linking to who acknowledged
+  it"). `AssetSlip` (numbering `asset_slip`, GT-AIS-2026-0001; the employee,
+  the issuer, condition, remarks, `acknowledgedAt` / `acknowledgedById`,
+  `pdfAttachmentId`) groups `AssetIssuance` rows by `slipId` — each asset is
+  still issued and RETURNED on its own record. `POST /assets/issue-batch {
+  employeeId, assetIds, issuedOn?, conditionOut?, remarks? }` (Edit, each
+  asset AVAILABLE and the caller's to issue, claimed one by one in one
+  transaction; the holder's bell links the slip). `POST
+  /assets/slips/:id/acknowledge` — the holder's own login alone, once (a
+  conditional claim, a second is a 409); the slip's PDF (`slipPdf()`: every
+  asset, Issued by, "Received and acknowledged by" with the date and time as
+  the digital signature) is then filed as an attachment on `asset_slip`
+  (written by nobody through the generic routes), the issuer told. `GET
+  /assets/slips` (HR every slip, else one's own; `?pending=true`), `/:id`,
+  `/:id/pdf`, all above `/:id`. The web: "Issue several…" and the bulk
+  "Issue the available ones together" on Asset Management
+  (`IssueBatchModal`, a searchable `TickPicker` of available assets),
+  **Issuance Slips** (`/g-hr/assets/slips`, Awaiting acknowledgement), the
+  slip page (`/g-hr/assets/slips/:id`, no Guard — the holder reads it;
+  Acknowledge receipt, Print, the filed PDF), and the slip number on the
+  asset's history and the employee's Assets tab. verify-hr pins it.
+
 ## The delete rule (2026-11-13)
 
 The owner's call: "make all the Delete function only by the one who created

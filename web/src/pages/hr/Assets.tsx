@@ -12,6 +12,7 @@ import { PhotoCard } from '../../components/PhotoCard';
 import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, ProductPicture, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
+import { IssueBatchModal } from './AssetSlips';
 
 /**
  * G-HR › Records › Asset Management (2026-10-21, the owner's Asset
@@ -94,6 +95,7 @@ interface AssetDetail extends AssetRow {
     receivedBy: string | null;
     conditionBack: string | null;
     returnNote: string | null;
+    slip: { id: string; number: string; acknowledgedAt: string | null } | null;
   }[];
   canIssue: boolean;
   canReturn: boolean;
@@ -182,7 +184,9 @@ export function Assets() {
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
+  const [batch, setBatch] = useState<string[] | null>(null);
   const mayAdd = can('ghr.assets.create');
+  const mayIssue = can('ghr.assets.edit_all') || can('ghr.assets.edit_own');
   return (
     <div>
       <div className="page-head">
@@ -237,13 +241,42 @@ export function Assets() {
           { key: 'retired', label: 'Retired', options: [{ value: 'true', label: 'Include retired' }] },
         ]}
         actions={
-          mayAdd ? (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-              + New asset
-            </button>
-          ) : null
+          <>
+            {mayAdd && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
+                + New asset
+              </button>
+            )}
+            {mayIssue && (
+              <button type="button" className="btn btn-sm" onClick={() => setBatch([])}>
+                Issue several…
+              </button>
+            )}
+            <Link className="btn btn-sm" to="/g-hr/assets/slips">
+              Issuance slips
+            </Link>
+          </>
+        }
+        bulkActions={
+          mayIssue
+            ? (ctx) => (
+                <button type="button" className="btn btn-sm" onClick={() => setBatch(ctx.rows.filter((r) => r.state === 'AVAILABLE').map((r) => r.id))}>
+                  Issue the available ones together
+                </button>
+              )
+            : undefined
         }
       />
+      {batch && (
+        <IssueBatchModal
+          preset={batch}
+          onClose={() => setBatch(null)}
+          onDone={(slipId) => {
+            setBatch(null);
+            navigate(`/g-hr/assets/slips/${slipId}`);
+          }}
+        />
+      )}
       <section className="alert warn asset-policy">
         <strong>Exit clearance and asset return.</strong> When an employee files for separation, every asset under their name shows here as Pending return and as a line on their clearance, which
         stays open until the asset is taken back. <Link to="/g-hr/clearances">Turnover &amp; Clearance →</Link>
@@ -764,9 +797,18 @@ export function AssetPage() {
                         {h.returnNote && <div className="faint">{h.returnNote}</div>}
                       </td>
                       <td>
-                        <button type="button" className="btn btn-sm" onClick={() => slip(h.id)}>
-                          Print
-                        </button>
+                        {h.slip ? (
+                          <>
+                            <Link to={`/g-hr/assets/slips/${h.slip.id}`} className="mono">
+                              {h.slip.number}
+                            </Link>
+                            <div className="faint">{h.slip.acknowledgedAt ? `acknowledged ${formatDate(h.slip.acknowledgedAt)}` : 'awaiting acknowledgement'}</div>
+                          </>
+                        ) : (
+                          <button type="button" className="btn btn-sm" onClick={() => slip(h.id)}>
+                            Print
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -824,6 +866,7 @@ interface HeldRow {
   conditionBack: string | null;
   receivedBy: { name: string } | null;
   asset: { id: string; tag: string; brandModel: string; details: string; assetType: { name: string } };
+  slip: { id: string; number: string; acknowledgedAt: string | null } | null;
 }
 
 export function EmployeeAssets({ employeeId }: { employeeId: string }) {
@@ -846,6 +889,7 @@ export function EmployeeAssets({ employeeId }: { employeeId: string }) {
             <th>Asset</th>
             <th>Issued</th>
             <th>Returned</th>
+            <th>Slip</th>
           </tr>
         </thead>
         <tbody>
@@ -862,6 +906,18 @@ export function EmployeeAssets({ employeeId }: { employeeId: string }) {
                 {h.conditionOut && <div className="faint">{h.conditionOut}</div>}
               </td>
               <td>{h.returnedOn ? `${formatDate(h.returnedOn)}${h.receivedBy ? ` — ${h.receivedBy.name}` : ''}` : <StatusBadge status="ISSUED" extra={ASSET_TONES} label="Still holds it" />}</td>
+              <td>
+                {h.slip ? (
+                  <>
+                    <Link to={`/g-hr/assets/slips/${h.slip.id}`} className="mono">
+                      {h.slip.number}
+                    </Link>
+                    <div className="faint">{h.slip.acknowledgedAt ? 'acknowledged' : 'awaiting acknowledgement'}</div>
+                  </>
+                ) : (
+                  <span className="faint">—</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

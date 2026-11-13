@@ -84,6 +84,7 @@ import { Plantilla } from './pages/hr/Plantilla';
 import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
 import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { OrgChartPage, HierarchyChartPage } from './pages/hr/Charts';
+import { AssetSlips, AssetSlipPage } from './pages/hr/AssetSlips';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -1055,6 +1056,16 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* Issuance slips (2026-11-13): no Guard on the slip — its holder reads it; the API decides. */}
+        <Route
+          path="/g-hr/assets/slips"
+          element={
+            <GuardAny permissions={['ghr.assets.view_all', 'ghr.assets.view_team', 'ghr.assets.view_own']}>
+              <AssetSlips />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-hr/assets/slips/:id" element={<AssetSlipPage />} />
         <Route
           path="/g-hr/assets/:id"
           element={

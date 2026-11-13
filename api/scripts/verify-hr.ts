@@ -189,6 +189,10 @@ async function cleanup() {
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Company assets (2026-10-21): their issuances hold employees and users by a Restrict.
   await prisma.companyAsset.deleteMany({ where: { OR: [{ brandModel: { startsWith: TAG } }, { createdBy: { email: { endsWith: '@verifyhr.local' } } }] } });
+  // Issuance slips (2026-11-13) hold their employee and issuer by a Restrict; the stamped PDFs are files.
+  const testSlips = await prisma.assetSlip.findMany({ where: { OR: [{ employee: { employeeNo: { startsWith: TAG } } }, { issuedBy: { email: { endsWith: '@verifyhr.local' } } }] }, select: { id: true } });
+  for (const f of await prisma.attachment.findMany({ where: { entityType: 'asset_slip', entityId: { in: testSlips.map((x) => x.id) } }, select: { id: true } })) await deleteAttachment(f.id);
+  await prisma.assetSlip.deleteMany({ where: { id: { in: testSlips.map((x) => x.id) } } });
   // Hiring (2026-10-21): contract → candidate → request, each held by a Restrict.
   const hiringRequests = await prisma.manpowerRequest.findMany({ where: { OR: [{ title: { startsWith: TAG } }, { requestedBy: { email: { endsWith: '@verifyhr.local' } } }] }, select: { id: true } });
   if (hiringRequests.length) {
@@ -5202,6 +5206,30 @@ async function main() {
     check('one never issued is deleted', (await api(hrT, 'DELETE', `/assets/${String(spare.body.id)}`)).status === 200);
     const paper = await printed(hrT, `/assets/pdf?search=${encodeURIComponent(TAG)}&retired=true`);
     check('the register prints', paper.status === 200 && /COMPANY ASSETS/i.test(flat(paper.text)));
+
+    // Several on one slip, acknowledged by the holder (2026-11-13).
+    const a1 = await api(hrT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Impact drill` });
+    const a2 = await api(hrT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Multimeter` });
+    const ids = [String(a1.body.id), String(a2.body.id)];
+    const issuedTwo = await api(hrT, 'POST', '/assets/issue-batch', { employeeId: holder.id, assetIds: ids, conditionOut: 'Good' });
+    const slipId = String(issuedTwo.body.id);
+    const nowIssued = await prisma.companyAsset.count({ where: { id: { in: ids }, status: 'ISSUED' } });
+    const onSlip = await prisma.assetIssuance.count({ where: { slipId } });
+    const bell = await prisma.notification.count({ where: { userId: holderUser.id, link: `/g-hr/assets/slips/${slipId}` } });
+    check('several available assets go out on one slip: each issued with its own record, the holder asked to acknowledge', issuedTwo.status === 201 && nowIssued === 2 && onSlip === 2 && bell === 1, `${issuedTwo.status} ${nowIssued} ${onSlip} ${bell} ${JSON.stringify(issuedTwo.body).slice(0, 160)} a1 ${a1.status}`);
+    check('an asset already out is refused on a slip — nothing issued', (await api(hrT, 'POST', '/assets/issue-batch', { employeeId: holder.id, assetIds: [ids[0]] })).status === 409);
+    check('a colleague does not open the slip', (await api(oT, 'GET', `/assets/slips/${slipId}`)).status === 404);
+    check('HR does not acknowledge for the holder', (await api(hrT, 'POST', `/assets/slips/${slipId}/acknowledge`, {})).status === 403);
+    const seen = await api(hT, 'GET', `/assets/slips/${slipId}`);
+    check('the holder opens their slip and is offered Acknowledge', seen.status === 200 && seen.body.canAcknowledge === true && (seen.body.items as unknown[]).length === 2);
+    const ack = await api(hT, 'POST', `/assets/slips/${slipId}/acknowledge`, {});
+    const filed = await prisma.attachment.findMany({ where: { entityType: 'asset_slip', entityId: slipId } });
+    check('acknowledged once: dated, and the stamped PDF filed on the slip — a second time is a 409', ack.status === 200 && !!ack.body.acknowledgedAt && filed.length === 1 && ack.body.pdfAttachmentId === filed[0]?.id && (await api(hT, 'POST', `/assets/slips/${slipId}/acknowledge`, {})).status === 409);
+    const slipPaper = await printed(hrT, `/assets/slips/${slipId}/pdf`);
+    check('the slip prints every asset and who acknowledged it', slipPaper.status === 200 && flat(slipPaper.text).includes('Impact drill') && flat(slipPaper.text).includes('Multimeter') && /acknowledged by/i.test(flat(slipPaper.text)));
+    check('the stored PDF is never added through the generic attachment routes', (await apiForm(hrT, `/attachments/asset_slip/${slipId}`, Buffer.from('x'), {}, 'files')).status === 403);
+    for (const id of ids) await api(hrT, 'POST', `/assets/${id}/return`, { conditionBack: 'Good' });
+    check('each asset on a slip is still returned on its own', (await prisma.companyAsset.count({ where: { id: { in: ids }, status: 'AVAILABLE' } })) === 2);
     await prisma.employeeClearance.delete({ where: { id: clearance.id } });
   }
 

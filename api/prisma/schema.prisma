@@ -192,6 +192,8 @@ model User {
   @@index([isActive])
   @@index([supervisorId])
   overtimeAllocated OvertimeRequest[] @relation("OvertimeAllocatedBy")
+  assetSlipsIssued AssetSlip[] @relation("AssetSlipIssuer")
+  assetSlipsAcknowledged AssetSlip[] @relation("AssetSlipAcknowledger")
 }
 
 enum AccountTokenPurpose {
@@ -1040,6 +1042,7 @@ model Employee {
   @@index([lastName, firstName])
   @@index([positionId])
   @@index([industryId])
+  assetSlips AssetSlip[]
 }
 
 /// The five cost buckets every costing, budget and cost-ledger row uses
@@ -6508,10 +6511,41 @@ model AssetIssuance {
   receivedBy    User?        @relation("AssetReceiver", fields: [receivedById], references: [id], onDelete: SetNull)
   conditionBack String?
   returnNote    String?
+  /// The slip it was issued on with others (2026-11-13), acknowledged once by the holder.
+  slipId        String?
+  slip          AssetSlip?   @relation(fields: [slipId], references: [id], onDelete: SetNull)
   createdAt     DateTime     @default(now())
 
   @@index([assetId])
   @@index([employeeId])
+  @@index([slipId])
+}
+
+/// Several assets issued to one employee at once, on ONE slip (2026-11-13, the
+/// owner's call: "issuance of tools can be list … they have to acknowledge, and
+/// a PDF document stored on asset management linking to who acknowledged it").
+/// Each asset keeps its own AssetIssuance (returned one by one); the slip is
+/// what the holder acknowledges, and its PDF is filed on `asset_slip` then.
+model AssetSlip {
+  id               String          @id @default(cuid())
+  number           String          @unique
+  employeeId       String
+  employee         Employee        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  issuedOn         DateTime        @db.Date
+  issuedById       String
+  issuedBy         User            @relation("AssetSlipIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  conditionOut     String?
+  remarks          String?
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  acknowledgedBy   User?           @relation("AssetSlipAcknowledger", fields: [acknowledgedById], references: [id], onDelete: SetNull)
+  /// The acknowledged slip's PDF, filed as an attachment on `asset_slip`.
+  pdfAttachmentId  String?
+  createdAt        DateTime        @default(now())
+  issuances        AssetIssuance[]
+
+  @@index([employeeId])
+  @@index([acknowledgedAt])
 }
 
 // ── G-HR › Hiring (2026-10-21, the owner's Hiring module) ───────────────────

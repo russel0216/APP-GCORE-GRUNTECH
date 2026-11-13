@@ -70,6 +70,7 @@ const DETAIL: Record<string, string> = {
   attendance_correction: '/g-hr/attendance-corrections',
   // G-HR › Records › Asset Management (2026-10-21).
   company_asset: '/g-hr/assets',
+  asset_slip: '/g-hr/assets/slips',
   manpower_request: '/g-hr/hiring/mpr',
   candidate: '/g-hr/hiring/candidates',
   employment_contract: '/g-hr/hiring/contracts',

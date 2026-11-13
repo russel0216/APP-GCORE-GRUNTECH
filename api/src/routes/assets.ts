@@ -4,7 +4,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, forbidden, idsFilter, deleteOrRefuse } from '../http/kit';
 import fs from 'fs';
-import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/attachments';
+import { deleteAttachmentsOf, registerAttachmentGuard, saveAttachmentBytes, upload } from '../shared/attachments';
+import { notify } from '../shared/notifications';
 import { clearPhoto, setPhoto } from '../shared/catalogue';
 import { authenticate, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
@@ -248,7 +249,11 @@ assetRoutes.get(
     const rows = await prisma.assetIssuance.findMany({
       where: { employeeId: employee.id },
       orderBy: [{ returnedOn: { sort: 'asc', nulls: 'first' } }, { issuedOn: 'desc' }],
-      include: { asset: { select: { id: true, tag: true, brandModel: true, serialNo: true, plateNo: true, assetType: { select: { name: true } } } }, receivedBy: { select: { name: true } } },
+      include: {
+        asset: { select: { id: true, tag: true, brandModel: true, serialNo: true, plateNo: true, assetType: { select: { name: true } } } },
+        receivedBy: { select: { name: true } },
+        slip: { select: { id: true, number: true, acknowledgedAt: true } },
+      },
     });
     res.json({
       rows: rows.map((r) => ({ ...r, asset: { ...r.asset, details: detailsOf(r.asset) } })),
@@ -278,6 +283,247 @@ async function checkType(id: string | undefined) {
 }
 
 const blank = (v: string | null | undefined) => (v && v.trim() ? v.trim() : null);
+
+// ── Several assets on one slip, acknowledged (2026-11-13) ────────────────────
+//
+// The owner's call: "issuance of tools can be list — one issuance to one
+// employee lists many tools; they have to acknowledge, and a PDF document is
+// stored on asset management linking to who acknowledged it". Each asset
+// still gets its own AssetIssuance (returned one by one, as before); the slip
+// groups them, the holder acknowledges it ONCE from their own login, and the
+// slip's PDF — their name, the date and time as the digital signature — is
+// filed on `asset_slip` then. Declared above `/:id`.
+
+const SLIP = 'asset_slip';
+const SLIP_PATH = '/g-hr/assets/slips';
+
+const slipInclude = {
+  employee: { select: personSelect },
+  issuedBy: { select: { id: true, name: true } },
+  acknowledgedBy: { select: { id: true, name: true } },
+  issuances: {
+    orderBy: { createdAt: 'asc' },
+    include: { asset: { select: { id: true, tag: true, brandModel: true, serialNo: true, plateNo: true, assetType: { select: { name: true } } } }, receivedBy: { select: { name: true } } },
+  },
+} satisfies Prisma.AssetSlipInclude;
+type SlipRow = Prisma.AssetSlipGetPayload<{ include: typeof slipInclude }>;
+
+/** HR reads every slip; the holder reads their own. */
+function mayReadSlip(me: ResolvedUser, slip: { employee: { userId: string | null } }): boolean {
+  return me.isSuperAdmin || can(me, 'ghr.assets.view_all') || can(me, 'ghr.assets.edit_all') || slip.employee.userId === me.id;
+}
+
+async function loadSlip(me: ResolvedUser, id: string): Promise<SlipRow> {
+  const slip = await prisma.assetSlip.findUnique({ where: { id }, include: slipInclude });
+  if (!slip || !mayReadSlip(me, slip)) throw notFound('Issuance slip not found');
+  return slip;
+}
+
+function presentSlip(me: ResolvedUser, slip: SlipRow) {
+  return {
+    id: slip.id,
+    number: slip.number,
+    issuedOn: slip.issuedOn,
+    conditionOut: slip.conditionOut,
+    remarks: slip.remarks,
+    createdAt: slip.createdAt,
+    issuedBy: slip.issuedBy,
+    employee: { id: slip.employee.id, name: nameOf(slip.employee), employeeNo: slip.employee.employeeNo, title: slip.employee.position, team: slip.employee.industry?.code ?? null },
+    acknowledgedAt: slip.acknowledgedAt,
+    acknowledgedBy: slip.acknowledgedBy,
+    pdfAttachmentId: slip.pdfAttachmentId,
+    items: slip.issuances.map((h) => ({
+      issuanceId: h.id,
+      assetId: h.asset.id,
+      tag: h.asset.tag,
+      type: h.asset.assetType.name,
+      brandModel: h.asset.brandModel,
+      details: detailsOf(h.asset),
+      returnedOn: h.returnedOn,
+      conditionBack: h.conditionBack,
+    })),
+    canAcknowledge: !slip.acknowledgedAt && slip.employee.userId === me.id,
+  };
+}
+
+/** The slip on paper: every asset on it, Issued by and the holder's acknowledgement, dated. */
+async function slipPdf(slip: SlipRow): Promise<Buffer> {
+  const signatories: Signatory[] = [
+    { role: 'Issued by', name: slip.issuedBy.name, ...(await contactOf(slip.issuedBy.id)), at: slip.createdAt },
+    slip.acknowledgedAt ? { role: 'Received and acknowledged by', name: nameOf(slip.employee), at: slip.acknowledgedAt } : { role: 'Received and acknowledged by', name: nameOf(slip.employee) },
+  ];
+  return renderDocument({
+    title: 'Asset Issuance Slip',
+    documentNumber: slip.number,
+    date: slip.issuedOn,
+    reference: `${slip.issuances.length} asset${slip.issuances.length === 1 ? '' : 's'} to ${nameOf(slip.employee)}`,
+    sections: [
+      {
+        kind: 'fields',
+        columns: 2,
+        fields: [
+          { label: 'Issued to', value: `${nameOf(slip.employee)}${slip.employee.employeeNo ? ` (${slip.employee.employeeNo})` : ''}` },
+          { label: 'Team / title', value: [slip.employee.industry?.code, slip.employee.position].filter(Boolean).join(' · ') || '—' },
+          { label: 'Date issued', value: formatDate(slip.issuedOn) },
+          { label: 'Condition out', value: slip.conditionOut ?? '—' },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Assets issued',
+        head: ['No.', 'Tag', 'Type', 'Brand & model', 'Serial / plate', 'Returned'],
+        rows: slip.issuances.map((h, i) => [
+          String(i + 1),
+          h.asset.tag,
+          h.asset.assetType.name,
+          h.asset.brandModel,
+          detailsOf(h.asset) || '—',
+          h.returnedOn ? `${formatShortDate(h.returnedOn)}${h.conditionBack ? ` — ${h.conditionBack}` : ''}` : '—',
+        ]),
+      },
+      ...(slip.remarks ? [{ kind: 'text' as const, title: 'Remarks', body: slip.remarks }] : []),
+      {
+        kind: 'text',
+        title: 'Acknowledgement',
+        body: slip.acknowledgedAt
+          ? `Received in the condition stated and acknowledged by ${nameOf(slip.employee)} in G-CORE on ${formatDate(slip.acknowledgedAt)} at ${slip.acknowledgedAt.toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })}. The name, date and time are considered a digital signature. The holder answers for each asset until it is received back, and returns it before their exit clearance closes.`
+          : 'Not yet acknowledged by the holder.',
+      },
+    ],
+    signatories,
+  });
+}
+
+assetRoutes.get(
+  '/slips',
+  requireView('ghr', 'assets'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const hr = me.isSuperAdmin || can(me, 'ghr.assets.view_all') || can(me, 'ghr.assets.edit_all');
+    const where: Prisma.AssetSlipWhereInput = {
+      ...(hr ? {} : { employee: { userId: me.id } }),
+      ...(req.query.pending === 'true' ? { acknowledgedAt: null } : {}),
+      ...(typeof req.query.employeeId === 'string' && req.query.employeeId ? { employeeId: req.query.employeeId } : {}),
+    };
+    const rows = await prisma.assetSlip.findMany({ where, include: slipInclude, orderBy: { createdAt: 'desc' }, take: 200 });
+    res.json({ rows: rows.map((r) => presentSlip(me, r)), pending: await prisma.assetSlip.count({ where: { ...where, acknowledgedAt: null } }) });
+  }),
+);
+
+assetRoutes.get(
+  '/slips/:id',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    res.json(presentSlip(me, await loadSlip(me, req.params.id)));
+  }),
+);
+
+assetRoutes.get(
+  '/slips/:id/pdf',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await loadSlip(me, req.params.id);
+    const pdf = await slipPdf(slip);
+    await audit({ entityType: SLIP, entityId: slip.id, action: 'EXPORTED', summary: `Printed issuance slip ${slip.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Asset Issuance Slip', number: slip.number, author: slip.issuedBy.name, date: slip.issuedOn })));
+    res.send(pdf);
+  }),
+);
+
+/** Several available assets to one employee, on one slip; each asset ISSUED with its own issuance row. */
+assetRoutes.post(
+  '/issue-batch',
+  requireEdit('ghr', 'assets'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        employeeId: z.string().min(1, 'Issue them to whom?'),
+        assetIds: z.array(z.string().min(1)).min(1, 'Tick at least one asset').max(100),
+        issuedOn: z.string().regex(DAY).optional(),
+        conditionOut: z.string().trim().max(200).optional().nullable(),
+        remarks: z.string().trim().max(2000).optional().nullable(),
+      }),
+      req.body,
+    );
+    const on = body.issuedOn ?? today();
+    if (on > today()) throw badRequest('Assets are issued on a day that has come');
+    const ids = [...new Set(body.assetIds)];
+    const employee = await prisma.employee.findUnique({ where: { id: body.employeeId }, select: personSelect });
+    if (!employee) throw badRequest('That employee is not on the register');
+    if (!employee.isActive) throw badRequest(`${nameOf(employee)} is no longer active`);
+    const assets = await prisma.companyAsset.findMany({ where: { id: { in: ids } }, select: { id: true, tag: true, status: true, createdById: true } });
+    if (assets.length !== ids.length) throw badRequest('One of the assets is no longer on file');
+    for (const a of assets) {
+      if (!canEditRecord(me, 'ghr', 'assets', a.createdById)) throw forbidden(`${a.tag} is not yours to issue`);
+      if (a.status !== 'AVAILABLE') throw conflict(`${a.tag} is ${statusLabel(a.status).toLowerCase()} — only available assets are issued`);
+    }
+    const slip = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('asset_slip', tx);
+      const created = await tx.assetSlip.create({
+        data: { number, employeeId: employee.id, issuedOn: dayOf(on), issuedById: me.id, conditionOut: blank(body.conditionOut), remarks: blank(body.remarks) },
+      });
+      for (const a of assets) {
+        const claimed = await tx.companyAsset.updateMany({ where: { id: a.id, status: 'AVAILABLE' }, data: { status: 'ISSUED' } });
+        if (!claimed.count) throw conflict(`${a.tag} was issued a moment ago — reload and tick again`);
+        await tx.assetIssuance.create({
+          data: { assetId: a.id, employeeId: employee.id, issuedOn: dayOf(on), issuedById: me.id, conditionOut: blank(body.conditionOut), remarks: blank(body.remarks), slipId: created.id },
+        });
+      }
+      return created;
+    });
+    for (const a of assets) await audit({ entityType: DOC, entityId: a.id, action: 'UPDATED', summary: `Issued ${a.tag} to ${nameOf(employee)} on slip ${slip.number}` }, req);
+    await audit({ entityType: SLIP, entityId: slip.id, action: 'CREATED', summary: `${slip.number}: ${assets.length} asset(s) issued to ${nameOf(employee)}` }, req);
+    if (employee.userId) {
+      await notify({
+        userId: employee.userId,
+        type: 'system',
+        title: `Acknowledge ${assets.length} asset${assets.length === 1 ? '' : 's'} issued to you`,
+        body: `${slip.number} — open it, check the list and acknowledge receipt`,
+        link: `${SLIP_PATH}/${slip.id}`,
+      });
+    }
+    res.status(201).json(presentSlip(me, await loadSlip(me, slip.id)));
+  }),
+);
+
+/** The holder acknowledges the slip once; its PDF, stamped, is filed on the slip. */
+assetRoutes.post(
+  '/slips/:id/acknowledge',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await loadSlip(me, req.params.id);
+    if (slip.employee.userId !== me.id) throw forbidden('Only the person the assets were issued to acknowledges them');
+    const claimed = await prisma.assetSlip.updateMany({ where: { id: slip.id, acknowledgedAt: null }, data: { acknowledgedAt: new Date(), acknowledgedById: me.id } });
+    if (!claimed.count) throw conflict(`${slip.number} is acknowledged already`);
+    const signed = await loadSlip(me, slip.id);
+    const pdf = await slipPdf(signed);
+    const file = await saveAttachmentBytes({
+      entityType: SLIP,
+      entityId: slip.id,
+      bytes: pdf,
+      fileName: paperFileName({ kind: 'Asset Issuance Slip', number: slip.number, author: nameOf(slip.employee), date: signed.acknowledgedAt! }),
+      mimeType: 'application/pdf',
+      uploadedById: me.id,
+      caption: `Acknowledged by ${nameOf(slip.employee)}`,
+    });
+    await prisma.assetSlip.update({ where: { id: slip.id }, data: { pdfAttachmentId: file.id } });
+    await audit({ entityType: SLIP, entityId: slip.id, action: 'APPROVED', summary: `${slip.number} acknowledged by ${nameOf(slip.employee)}` }, req);
+    await notify({ userId: slip.issuedBy.id, type: 'system', title: `${nameOf(slip.employee)} acknowledged ${slip.number}`, body: `${slip.issuances.length} asset(s)`, link: `${SLIP_PATH}/${slip.id}` });
+    res.json(presentSlip(me, await loadSlip(me, slip.id)));
+  }),
+);
+
+registerAttachmentGuard(
+  SLIP,
+  async (user, id) => {
+    const slip = await prisma.assetSlip.findUnique({ where: { id }, select: { employee: { select: { userId: true } } } });
+    return !!slip && mayReadSlip(user, slip);
+  },
+  // The stamped PDF is written by the acknowledgement alone, never through the generic routes.
+  { write: async () => false },
+);
 
 assetRoutes.post(
   '/',
@@ -325,7 +571,12 @@ assetRoutes.get(
     const history = await prisma.assetIssuance.findMany({
       where: { assetId: row.id },
       orderBy: { issuedOn: 'desc' },
-      include: { employee: { select: personSelect }, issuedBy: { select: { name: true } }, receivedBy: { select: { name: true } } },
+      include: {
+        employee: { select: personSelect },
+        issuedBy: { select: { name: true } },
+        receivedBy: { select: { name: true } },
+        slip: { select: { id: true, number: true, acknowledgedAt: true } },
+      },
     });
     const [shown] = await present(me, [row]);
     const mayEdit = shown.canEdit;
@@ -347,6 +598,8 @@ assetRoutes.get(
         receivedBy: h.receivedBy?.name ?? null,
         conditionBack: h.conditionBack,
         returnNote: h.returnNote,
+        // The slip it went out on with others (2026-11-13), and whether the holder acknowledged it.
+        slip: h.slip,
       })),
       canIssue: mayEdit && row.status === 'AVAILABLE',
       canReturn: mayEdit && row.status === 'ISSUED',
@@ -584,7 +837,12 @@ assetRoutes.get(
     }
     const h = await prisma.assetIssuance.findFirst({
       where: { id: req.params.issuanceId, assetId: row.id },
-      include: { employee: { select: personSelect }, issuedBy: { select: { id: true, name: true } }, receivedBy: { select: { id: true, name: true } } },
+      include: {
+        employee: { select: personSelect },
+        issuedBy: { select: { id: true, name: true } },
+        receivedBy: { select: { id: true, name: true } },
+        slip: { select: { id: true, number: true, acknowledgedAt: true } },
+      },
     });
     if (!h) throw notFound('That issuance is not on this asset');
     const currency = await companyCurrency();
