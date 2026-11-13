@@ -646,6 +646,26 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* A travel request's own pages (2026-11-14): the budget request's, under Sales › Travel
+            Requests — they used to open under Project Management. */}
+        <Route
+          path="/g-ops/travel-requests/new"
+          element={
+            <Guard permission="gops.budget_requests.create">
+              <BudgetRequestEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/travel-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gops.budget_requests.edit_own', 'gops.budget_requests.edit_all']}>
+              <BudgetRequestEditor />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-ops/travel-requests/:id" element={<BudgetRequestDetail />} />
+        <Route path="/g-fin/travel-requests/:id" element={<BudgetRequestDetail />} />
         {/* The request page (2026-10-19): New and Modify, header and breakdown in one save. Above `:id`. */}
         <Route
           path="/g-ops/budget-requests/new"

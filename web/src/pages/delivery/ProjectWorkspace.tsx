@@ -697,7 +697,7 @@ export function ProjectWorkspace() {
           reloadToken={reloadToken}
           onRaise={
             can('gops.budget_requests.create') && job.status !== 'CANCELLED'
-              ? () => navigate(`/g-ops/budget-requests/new?kind=travel&jobId=${job.id}`)
+              ? () => navigate(`/g-ops/travel-requests/new?kind=travel&jobId=${job.id}`)
               : undefined
           }
         />

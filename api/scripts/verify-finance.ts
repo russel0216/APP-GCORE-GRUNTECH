@@ -5013,6 +5013,11 @@ async function main() {
             inTravel.body.total === 1 && inCash.body.total === 0,
           `${tr.status} ${tr.body.number} ${backwards.status} ${notTravel.status} ${inTravel.body.total} ${inCash.body.total} ${JSON.stringify(tr.body).slice(0, 160)}`,
         );
+        // One place at a time (2026-11-14): being requested, with finance once approved, closed once liquidated.
+        const stageCount = async (stage: string) =>
+          (await fin('GET', `/budget-requests?travel=yes&stage=${stage}&search=${encodeURIComponent(`${TAG} site survey trip`)}`)).body.total;
+        const asDraft = [await stageCount('request'), await stageCount('money'), await stageCount('closed')];
+        const badStage = await fin('GET', '/budget-requests?travel=yes&stage=somewhere');
         const trSent = await eng('POST', `/budget-requests/${trId}/submit`);
         const trApproval = await prisma.approvalRequest.findFirst({
           where: { documentId: trId, status: 'PENDING' },
@@ -5026,6 +5031,7 @@ async function main() {
         );
         if (trApproval) await prisma.approvalRequest.update({ where: { id: trApproval.id }, data: { status: 'APPROVED' } });
         await prisma.budgetRequest.update({ where: { id: trId }, data: { status: 'APPROVED', approvedAt: new Date() } });
+        const asApproved = [await stageCount('request'), await stageCount('money'), await stageCount('closed')];
         const overBook = await fin('POST', `/budget-requests/${trId}/book`, { amount: 5_500, method: 'CREDIT_CARD' });
         const strangerBook = await eng('POST', `/budget-requests/${trId}/book`, { amount: 4_200, method: 'CREDIT_CARD' });
         const booked = await fin('POST', `/budget-requests/${trId}/book`, { amount: 4_200, method: 'CREDIT_CARD', reference: 'ZZ-PNR-1' });
@@ -5041,6 +5047,12 @@ async function main() {
             money(await ledgerOf('INCURRED'), 4_200) && money(await ledgerOf('COMMITTED'), 0) &&
             voucher?.method === 'CREDIT_CARD' && voucher.kind === 'DISBURSEMENT' && money(Number(voucher.amount), 4_200),
           `${overBook.status} ${strangerBook.status} ${booked.status} ${JSON.stringify(booked.body).slice(0, 160)} ${again.status} ${trRow.status} ${trRow.paidDirect} ${Number(trRow.amountSpent)} ${await ledgerOf('INCURRED')} ${voucher?.method}`,
+        );
+        const asPaid = [await stageCount('request'), await stageCount('money'), await stageCount('closed')];
+        check(
+          'a travel request is listed in one place at a time: being requested, then with finance once approved, then closed once paid or liquidated',
+          asDraft.join() === '1,0,0' && asApproved.join() === '0,1,0' && asPaid.join() === '0,0,1' && badStage.status === 400,
+          `${asDraft.join()} | ${asApproved.join()} | ${asPaid.join()} | ${badStage.status}`,
         );
         const trPaper = await fetch(`${BASE}/budget-requests/${trId}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
         const trText = (trPaper.ok ? pdfText(Buffer.from(await trPaper.arrayBuffer())) : '').replace(/\s+/g, ' ');

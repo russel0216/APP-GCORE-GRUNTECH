@@ -8754,6 +8754,31 @@ on the project management menu, it should be inside the individual project";
   The Budget requests card on a sales order, quotation and costing keeps
   both kinds and gains "+ New travel request" (`onRaiseTravel`).
 
+## Travel requests, one place at a time (2026-11-14)
+
+The owner's calls: "why when a travel request is clicked it goes to Project
+Management", "default view Mine", "after it is approved it should no longer
+be listed here, it goes to G-FIN Money Out, then a liquidation; when
+liquidated it no longer exists on the travel request".
+
+- **A travel request's pages are its own**: `/g-ops/travel-requests/new`,
+  `/:id/edit`, `/:id`, and `/g-fin/travel-requests/:id` — the budget
+  request's `BudgetRequestEditor` / `BudgetRequestDetail` under the Travel
+  Requests entry, so the strip is Sales' (or Money out's) and the Shell's
+  Back reads "Travel Requests". Opened by a budget-request address (a bell,
+  an older link), the page moves itself there (`replace`, the query kept);
+  the editor on a travel path is a travel request without `?kind=travel`.
+  The page sets no back link of its own for a travel request.
+- **`?stage=request|money|closed`** on `GET /budget-requests`
+  (`REQUEST_STAGES` in routes/budgetRequests.ts; an unknown one a 400):
+  request = DRAFT, PENDING_APPROVAL, REJECTED; money = APPROVED, RELEASED,
+  REFUND_DUE; closed = LIQUIDATED, CANCELLED. Declared ("Where it stands")
+  on the two travel lists only. **Sales › Travel Requests opens on Mine and
+  `stage=request`**, G-FIN › Money out › Travel Requests on `stage=money` —
+  `defaultFilters`, a bare visit only, the chip removed lists everything.
+  Sales' list shows two cards (Travel requests, Pending approval); the money
+  cards are G-FIN's. verify-finance pins the three stages.
+
 ## A reimbursement against the project budget (2026-11-09)
 
 The owner's question: "how can we see if the request in Reimbursement

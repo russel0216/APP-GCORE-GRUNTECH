@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines } from '../../components/OfficeLine';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
@@ -213,7 +213,8 @@ export function BudgetRequestEditor() {
   }, [header.kind, search, existing]);
 
   // A travel request: opened as one (`?kind=travel`), or the draft is one.
-  const travel = existing ? !!existing.isTravel : params.get('kind') === 'travel';
+  const onTravelPath = useLocation().pathname.includes('/travel-requests/');
+  const travel = existing ? !!existing.isTravel : params.get('kind') === 'travel' || onTravelPath;
   const word = travel ? 'travel request' : 'budget request';
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);

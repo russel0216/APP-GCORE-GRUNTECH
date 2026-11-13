@@ -211,6 +211,10 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   if (f.released === 'true') and.push({ status: { in: [...RELEASED_STATES] } });
   if (f.pending === 'true') and.push({ status: 'PENDING_APPROVAL' });
   if (f.approved === 'true') and.push({ status: { in: [...APPROVED_STATES] } });
+  // One place at a time (2026-11-14, the owner's call for travel requests):
+  // being requested, with finance once approved, and closed once liquidated.
+  const stage = choice(f.stage, Object.keys(REQUEST_STAGES) as RequestStage[], 'Stage', (v) => v);
+  if (stage) and.push({ status: { in: [...REQUEST_STAGES[stage]] } });
   if (and.length) where.AND = [...((where.AND as Prisma.BudgetRequestWhereInput[] | undefined) ?? []), ...and];
   const status = choice(q.filters.status, RequestStatus, 'Status');
   if (status) where.status = status;
@@ -242,6 +246,18 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
 
 /** Approved funds: approved, and every state after it. */
 const APPROVED_STATES = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'] as const;
+/**
+ * Where a request stands (`?stage=`): `request` — still the requester's
+ * (a rejected one stays theirs to read, and to delete); `money` — approved,
+ * finance's to release or book and the requester's to liquidate; `closed` —
+ * liquidated or cancelled, history.
+ */
+export const REQUEST_STAGES = {
+  request: ['DRAFT', 'PENDING_APPROVAL', 'REJECTED'],
+  money: ['APPROVED', 'RELEASED', 'REFUND_DUE'],
+  closed: ['LIQUIDATED', 'CANCELLED'],
+} as const;
+type RequestStage = keyof typeof REQUEST_STAGES;
 /** The cash went out. */
 const RELEASED_STATES = ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] as const;
 

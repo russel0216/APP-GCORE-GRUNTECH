@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, type ListResult, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
@@ -271,6 +271,19 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
   ];
 
   const filters: FilterDef[] = [
+    ...(travel
+      ? [
+          {
+            key: 'stage',
+            label: 'Where it stands',
+            options: [
+              { value: 'request', label: 'Being requested — not yet approved' },
+              { value: 'money', label: 'With finance — approved, to release or liquidate' },
+              { value: 'closed', label: 'Closed — liquidated or cancelled' },
+            ],
+          } as FilterDef,
+        ]
+      : []),
     { key: 'status', label: 'Status', options: STATUSES },
     { key: 'pending', label: 'Pending', options: [{ value: 'true', label: 'Pending approval' }] },
     { key: 'approved', label: 'Approved funds', options: [{ value: 'true', label: 'Approved and after' }] },
@@ -307,9 +320,15 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
         columns={columns}
         rowKey={(r) => r.id}
         scoped={!finance}
+        // A travel request, one place at a time (2026-11-14, the owner's call):
+        // Sales lists one's own while it is being requested; approved, it is
+        // G-FIN › Money out's until it is liquidated. A bare visit only — the
+        // chip removed lists everything.
+        defaultScope={travel && !finance ? 'mine' : undefined}
+        defaultFilters={travel ? { stage: finance ? 'money' : 'request' } : undefined}
         selectable
         searchPlaceholder={travel ? 'Search TR no., purpose, route, carrier, requester…' : 'Search BR no., purpose, project, requester…'}
-        onRowClick={(r) => navigate(`/g-ops/budget-requests/${r.id}`)}
+        onRowClick={(r) => navigate(travel ? `${base}/${r.id}` : `/g-ops/budget-requests/${r.id}`)}
         emptyTitle={`No ${word}s`}
         emptyHint={
           travel
@@ -320,6 +339,22 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
         summary={(raw) => {
           const sum = raw as unknown as RequestsSummary | undefined;
           if (!sum) return null;
+          // Sales' travel list holds what is still being requested: the money
+          // cards belong to G-FIN's.
+          if (travel && !finance)
+            return (
+              <>
+                <Stat label="Travel requests" value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'} listed`} />
+                <Stat
+                  label="Pending approval"
+                  value={formatMoney(sum.pending)}
+                  figure
+                  accent={sum.pending > 0 ? 'warn' : undefined}
+                  sub={`${sum.pendingCount} waiting`}
+                  to={`${base}?pending=true`}
+                />
+              </>
+            );
           return (
             <>
               <Stat label={`Sum of all ${word}s`} value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'}, rejected and cancelled left out`} />
@@ -344,7 +379,7 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
         }}
         actions={
           can('gops.budget_requests.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => navigate(`/g-ops/budget-requests/new${travel ? '?kind=travel' : ''}`)}>
+            <button className="btn btn-primary btn-sm" onClick={() => navigate(travel ? '/g-ops/travel-requests/new' : '/g-ops/budget-requests/new')}>
               + New {word}
             </button>
           ) : null
@@ -835,8 +870,19 @@ export function BudgetRequestDetail() {
     (can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own')) &&
     (can('gops.projects.view_all') || can('gops.projects.view_own'));
   const financeSide = can('gfin.budget_requests.view_all');
+  // A travel request lives under Travel Requests (2026-11-14): opened by a
+  // budget-request address — a bell, an older link — it moves to its own, and
+  // the Shell's Back goes to that list.
+  const { pathname, search } = useLocation();
+  const onTravelPath = pathname.includes('/travel-requests/');
+  useEffect(() => {
+    if (!row?.isTravel || onTravelPath) return;
+    const side = can('gops.travel_requests.view_all') || can('gops.travel_requests.view_own') || !can('gfin.travel_requests.view_all') ? '/g-ops' : '/g-fin';
+    navigate(`${side}/travel-requests/${row.id}${search}`, { replace: true });
+  }, [row, onTravelPath, search, navigate, can]);
+  const ownBack = !!row && !row.isTravel && !onTravelPath;
   useBackLink(
-    row && projectSide && row.job ? `/g-ops/projects/${row.job.id}?tab=requests` : row && (projectSide || !financeSide) && row.for ? row.for.link : row && financeSide ? '/g-fin/budget-requests' : null,
+    !ownBack ? null : row && projectSide && row.job ? `/g-ops/projects/${row.job.id}?tab=requests` : row && (projectSide || !financeSide) && row.for ? row.for.link : row && financeSide ? '/g-fin/budget-requests' : null,
     row && projectSide && row.job ? `${row.job.number} Budget Requests` : row && (projectSide || !financeSide) && row.for ? row.for.number : row && financeSide ? 'Budget Requests' : null,
   );
 
@@ -994,7 +1040,7 @@ export function BudgetRequestDetail() {
               },
             },
         ]}
-        modify={canModify ? `/g-ops/budget-requests/${row.id}/edit` : undefined}
+        modify={canModify ? `/g-ops/${row.isTravel ? 'travel' : 'budget'}-requests/${row.id}/edit` : undefined}
         confirm={confirm}
       />
 
@@ -1261,7 +1307,7 @@ export function RecordBudgetRequests({
       // A journey charged to the same record (2026-11-11).
       onRaiseTravel={
         open && can('gops.budget_requests.create')
-          ? () => navigate(`/g-ops/budget-requests/new?kind=travel&${record.key}=${record.id}`)
+          ? () => navigate(`/g-ops/travel-requests/new?kind=travel&${record.key}=${record.id}`)
           : undefined
       }
     />
