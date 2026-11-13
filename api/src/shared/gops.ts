@@ -271,7 +271,23 @@ export function canSeeSales(me: ResolvedUser): boolean {
   return canSee(me, 'sales_orders');
 }
 
-export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: unknown }, narrow?: (rows: OrderRow[]) => Promise<OrderRow[]>): Promise<GopsSales> {
+/**
+ * `focusOwnerIds` (2026-11-13, the owner's call: "show Gruntech > all team >
+ * then the specific salesperson; don't show the other salespeople when I
+ * filter"): the two flows keep the WHOLE of what `narrow` admits in their
+ * first two columns — Gruntech and every team at their own totals — and
+ * list in the last column only these salespeople (and only THEIR customers),
+ * each as a share of Gruntech's. The last column then adds up to less than
+ * the teams', on purpose. Every other figure (months, people, customers,
+ * total) is untouched by it: a caller that focuses reads the flows alone.
+ */
+export async function gopsSales(
+  me: ResolvedUser,
+  query: { from?: unknown; to?: unknown },
+  narrow?: (rows: OrderRow[]) => Promise<OrderRow[]>,
+  focusOwnerIds?: string[],
+): Promise<GopsSales> {
+  const focus = focusOwnerIds?.length ? new Set(focusOwnerIds) : null;
   const range = parseRange(typeof query.from === 'string' ? query.from : undefined, typeof query.to === 'string' ? query.to : undefined);
   const year = range.to.getUTCFullYear();
   const yearStart = new Date(Date.UTC(year - 1, 0, 1));
@@ -347,8 +363,8 @@ export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: 
     teams: [...teams.entries()]
       .sort((a, b) => b[1].value - a[1].value)
       .map(([id, t]) => ({ id, label: t.label, name: t.name, value: cents(t.value), pct: share(t.value, total), to: listLink({ teamId: id }) })),
-    people: people.map((p) => ({ id: p.id, label: p.name, value: p.range, pct: share(p.range, total), to: p.to })),
-    links: [...links.entries()].map(([k, v]) => {
+    people: people.filter((p) => !focus || focus.has(p.id)).map((p) => ({ id: p.id, label: p.name, value: p.range, pct: share(p.range, total), to: p.to })),
+    links: [...links.entries()].filter(([k]) => !focus || focus.has(k.split(' ')[1])).map(([k, v]) => {
       const [team, person] = k.split('\u0000');
       return { team, person, value: cents(v) };
     }),
@@ -362,6 +378,7 @@ export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: 
   // `of` is the customer, for ranking the top n.
   const byTeamCustomer = new Map<string, { team: string; customerId: string; name: string; value: number }>();
   for (const o of inRange) {
+    if (focus && !focus.has(o.ownerId)) continue;
     const team = o.team ? o.team.id : 'none';
     const k = `${team}:${o.customerId}`;
     const cur = byTeamCustomer.get(k) ?? { team, customerId: o.customerId, name: o.customerName, value: 0 };

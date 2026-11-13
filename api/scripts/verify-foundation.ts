@@ -2850,6 +2850,36 @@ async function main() {
   // ── The Sankey layout (web/src/lib/sankey.ts, 2026-11-08) ──────────────────
   {
     console.log('\nThe Sankey layout');
+    {
+      // A last column holding part of the flow (2026-11-13: salespeople ticked on
+      // the Sales Order report): Gruntech and the teams at full height, the one
+      // person level with the top of their own team, on the teams' own scale.
+      const part = layoutSankey(
+        {
+          root: { label: 'Gruntech', value: 1000 },
+          teams: [
+            { id: 'hit', label: 'HIT', value: 600 },
+            { id: 'kat', label: 'KAT', value: 400 },
+          ],
+          people: [{ id: 'eri', label: 'Erica', value: 100 }],
+          links: [{ team: 'kat', person: 'eri', value: 100 }],
+        },
+        { width: 600, height: 300 },
+      );
+      const node = (id: string) => part.nodes.find((n) => n.id === id)!;
+      const [kat, hit, eri] = [node('1:kat'), node('1:hit'), node('2:eri')];
+      check(
+        'a partial last column keeps the teams whole and stands each node at its own team: same scale, level with the team, one band, its share of the whole',
+        part.nodes.length === 4 &&
+          Math.abs(eri.h / kat.h - 0.25) < 0.01 &&
+          Math.abs(hit.h / kat.h - 1.5) < 0.01 &&
+          Math.abs(eri.y - kat.y) < 0.5 &&
+          eri.pct === 10 &&
+          part.links.filter((l) => l.target === '2:eri').length === 1 &&
+          part.links.length === 3,
+        JSON.stringify(part.nodes.map((n) => [n.id, n.y, n.h])),
+      );
+    }
     const lay = layoutSankey(
       {
         root: { label: 'Gruntech', value: 1000 },

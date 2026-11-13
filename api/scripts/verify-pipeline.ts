@@ -1189,17 +1189,36 @@ async function main() {
       `${flows.status} ${noFlows.status}`,
     );
     const oneFlow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&ownerId=${manager.id}`);
-    const oneBody = oneFlow.body as unknown as { total: number; sankey: Sales['sankey']; owners: { id: string }[]; filterLine: string };
+    const oneBody = oneFlow.body as unknown as { total: number; focused: boolean; sankey: Sales['sankey']; customerSankey: Sales['customerSankey']; owners: { id: string }[]; filterLine: string };
     const mineOnly = d.people.find((p) => p.id === manager.id)?.range ?? -1;
+    // Salespeople ticked (2026-11-13): Gruntech and every team stay the whole
+    // company's, the last column is the ticked people and their customers alone.
     check(
-      "the report's pictures follow its salesperson filter: one person's flow is their own figure, the picker still lists everyone who booked",
+      "ticking a salesperson keeps the whole company in view: Gruntech and the teams as unfiltered, the last column that person (and their customers) alone, at their share of the whole; the picker still lists everyone who booked",
       oneFlow.status === 200 &&
-        Math.abs(oneBody.total - mineOnly) < 0.01 &&
+        oneBody.focused === true &&
+        Math.abs(oneBody.sankey.root.value - d.total) < 0.01 &&
+        JSON.stringify(oneBody.sankey.teams) === JSON.stringify(d.sankey.teams) &&
         oneBody.sankey.people.length === 1 &&
         oneBody.sankey.people[0].id === manager.id &&
+        Math.abs(oneBody.sankey.people[0].value - mineOnly) < 0.01 &&
+        oneBody.sankey.links.every((l) => l.person === manager.id) &&
+        Math.abs(sum(oneBody.customerSankey.people) - mineOnly) < 0.01 &&
+        JSON.stringify(oneBody.customerSankey.teams) === JSON.stringify(d.sankey.teams) &&
         oneBody.owners.length === d.people.length &&
         oneBody.filterLine.length > 0,
-      `${oneFlow.status} ${oneBody?.total} vs ${mineOnly}`,
+      `${oneFlow.status} root ${oneBody?.sankey?.root?.value} vs ${d.total}; person ${oneBody?.sankey?.people?.[0]?.value} vs ${mineOnly}`,
+    );
+    // Several in one box (2026-11-13): `a,b` — a ticked id nobody booked under changes nothing.
+    const twoFlow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&ownerId=${manager.id},nobody-such`);
+    const twoRep = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}&ownerId=${manager.id},nobody-such`);
+    check(
+      'several salespeople are ticked in one box: the pictures and the report read the same list',
+      twoFlow.status === 200 &&
+        JSON.stringify((twoFlow.body as unknown as typeof oneBody).sankey.people) === JSON.stringify(oneBody.sankey.people) &&
+        twoRep.status === 200 &&
+        Math.abs(((twoRep.body as unknown as { cards: { label: string; value: number }[] }).cards.find((c) => c.label === 'Before VAT')?.value ?? -1) - mineOnly) < 0.01,
+      `${twoFlow.status} ${twoRep.status}`,
     );
     // The report's customer and product-group filters (2026-11-12).
     type Rep = { cards: { label: string; value: number }[]; tables: { title: string; rows: (string | number | null)[][]; links?: (string | null)[] }[] };
@@ -1213,6 +1232,21 @@ async function main() {
       "the customer filter narrows the report and its pictures to that customer's own figure",
       !!custId && byCust.status === 200 && Math.abs(beforeVatOf(byCust.body as unknown as Rep) - Number(custTable?.rows[0]?.[3])) < 0.01 && Math.abs(Number(custFlow.body.total) - Number(custTable?.rows[0]?.[3])) < 0.01,
       `${byCust.status} ${custId}`,
+    );
+    // Two customers ticked: one report, a row each, adding up to the cards.
+    const custLinks = (custTable?.links ?? []).map((l) => new URLSearchParams((l ?? '').split('?')[1] ?? '').get('customerId') ?? '');
+    const pair = custLinks.length >= 2 ? [custLinks[0], custLinks[1]] : [custId, 'nobody-such'];
+    const pairWant = custLinks.length >= 2 ? Number(custTable?.rows[0]?.[3]) + Number(custTable?.rows[1]?.[3]) : Number(custTable?.rows[0]?.[3]);
+    const byPair = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}&customerId=${pair.join(',')}`);
+    const pairFlow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&customerId=${pair.join(',')}`);
+    const pairRows = (byPair.body as unknown as Rep).tables?.find((t) => t.title === 'By customer')?.rows ?? [];
+    check(
+      'two customers ticked run as one report: a row each, the cards and the pictures their sum',
+      byPair.status === 200 &&
+        pairRows.length === Math.min(2, custLinks.length) &&
+        Math.abs(beforeVatOf(byPair.body as unknown as Rep) - pairWant) < 0.02 &&
+        Math.abs(Number(pairFlow.body.total) - pairWant) < 0.02,
+      `${byPair.status} ${pairRows.length} rows; ${beforeVatOf(byPair.body as unknown as Rep)} vs ${pairWant}`,
     );
     const groupTable = whole.tables.find((t) => t.title.startsWith('By product group'));
     const groupRows = (groupTable?.rows ?? []).slice(0, 3);
@@ -1231,6 +1265,15 @@ async function main() {
       seenGroups.push(`${name}: ${got} vs ${want} (flow ${flow.body.total})`);
     }
     check("the product group filter leaves each order its share of that group: the report and the pictures come to the group's own row", groupsOk, seenGroups.join('; '));
+    {
+      // Two groups ticked (`X|Y`): each order's share of the two together.
+      const names = (groupTable?.rows ?? []).slice(0, 2).map((g) => String(g[0]));
+      const keys = names.map((n) => (n === 'No group' ? 'none' : n));
+      const want = (groupTable?.rows ?? []).slice(0, 2).reduce((n, g) => n + Number(g[1]), 0);
+      const both = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}&group=${encodeURIComponent(keys.join('|'))}`);
+      const got = beforeVatOf(both.body as unknown as Rep);
+      check('several product groups ticked leave each order its share of them together', both.status === 200 && Math.abs(got - want) <= 0.01 * Math.max(1, d.orders) * 2, `${both.status} ${got} vs ${want}`);
+    }
     const narrowPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf?from=${day}&to=${day}&ownerId=${manager.id}`, { headers: { Authorization: `Bearer ${managerToken}` } });
     check('the paper prints narrowed to one salesperson', narrowPaper.status === 200, `${narrowPaper.status}`);
     check(

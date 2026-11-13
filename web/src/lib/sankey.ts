@@ -131,11 +131,26 @@ export function layoutSankey(input: SankeyInput, opts: { width: number; height: 
     });
   };
   const xs: [number, number, number] = [0, Math.round((opts.width - nodeWidth) / 2), opts.width - nodeWidth];
-  const nodes = [
-    ...stack([{ id: 'root', label: input.root.label, value: total }], 0, xs[0]),
-    ...stack(teams, 1, xs[1]),
-    ...stack(people, 2, xs[2]),
-  ];
+  const teamNodes = stack(teams, 1, xs[1]);
+  // A last column that holds only PART of the flow (2026-11-13: the report
+  // filtered to salespeople keeps Gruntech and every team in view and lists
+  // only the ticked people or their customers) is not centred: each node
+  // starts level with the top of its own team, where its band leaves, and
+  // the rest of the team's bar stands with nothing flowing out of it.
+  const partial = people.reduce((sum, p) => sum + p.value, 0) < total * 0.999;
+  const anchored = (): SankeyNode[] => {
+    let y = 0;
+    const placed = people.map((p) => {
+      const h = p.value * scale;
+      const top = Math.max(y, teamNodes[p.at]?.y ?? 0);
+      y = top + step(h);
+      return { p, top, h };
+    });
+    const last = placed[placed.length - 1];
+    const over = last ? Math.max(0, last.top + last.h - opts.height) : 0;
+    return placed.map(({ p, top, h }) => ({ id: `2:${p.id}`, column: 2 as const, label: p.label, value: round(p.value), pct: share(p.value, total), x: xs[2], y: round(Math.max(0, top - over)), h: round(h), to: p.to }));
+  };
+  const nodes = [...stack([{ id: 'root', label: input.root.label, value: total }], 0, xs[0]), ...teamNodes, ...(partial ? anchored() : stack(people, 2, xs[2]))];
   const byId = new Map(nodes.map((n) => [n.id, n]));
 
   // Bands: root → each team (in team order), team → each of its people (in

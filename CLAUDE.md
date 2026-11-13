@@ -6474,6 +6474,33 @@ alone; the other reports keep theirs in the page head. verify-pipeline pins
 the customer filter, the group filter against the group's own row, the
 narrowed paper and the five pages.
 
+**Several ticks in a box, and the whole company in view** (2026-11-13, the
+owner's calls: "combine filter — My San Calamba and My San Cainta in one
+report; Ivan and Erica in one report; tick boxes, searchable, as customer has
+a long list" and "on an individual salesperson show Gruntech > all teams >
+then the specific salesperson — don't show the other salespeople"). The
+Sales Order report's Personnel, Team, Customer and Product group boxes are
+`TickPicker`s with `search` (a search box over the list, blind to capitals
+and spaces, the ticked ones listed first, Enter taking the only match);
+Status stays one. In the address a box is `a,b` (`ownerId`, `teamId` with
+`none`, `customerId`) and product groups `X|Y` (`GROUP_SEPARATOR` — a name
+may hold a comma); `listParam()` reads them and `RowFilter` holds
+`ownerIds`, `teamIds`, `customerIds`, `groups` — an order passes a box on
+ANY of its ticks, and every ticked box must pass; several groups leave an
+order its share of them together. One report, a row each: the cards are the
+ticked ones' sum, By salesperson / By customer and the paper's month tables
+list each. A link to the Sales Orders list carries a box only while it has
+one tick. **With salespeople ticked the two flows keep the company in view**
+(`flowsFor()` in routes/salesReports.ts → `gopsSales(…, focusOwnerIds)`):
+Gruntech and every team are what the OTHER filters admit, the last column
+only the ticked people (picture 1) and only their customers (picture 2),
+each as a share of Gruntech's; `/flows` answers `focused`. `layoutSankey`
+(both copies) stands a last column that holds only part of the flow level
+with the top of each node's own team, the rest of the team's bar with
+nothing flowing out. The dashboard's flows, and a report with no
+salesperson ticked, are as before. verify-pipeline pins the focus, the two
+customers and the two groups; verify-foundation the partial column.
+
 ## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
 
 The owner approved the review's A3–A5 (2026-10-10). Rule 6 is the dress;

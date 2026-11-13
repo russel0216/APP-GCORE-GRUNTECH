@@ -19,6 +19,12 @@ export interface TickChoice {
  * closes it. The button carries `aria-expanded`; the panel is a group named
  * by the picker's label. Inside a `Field` it is wired like a select
  * (`fieldControl`): the label points at the button.
+ *
+ * `search` (2026-11-13, the owner's call: "easy to search, as customer has
+ * a long list") puts a search box over the list: typing narrows the choices
+ * as it is typed, blind to capitals and to extra spaces, and what is ticked
+ * stays listed first so the choice is always in view. Opening the picker
+ * puts the cursor in the box.
  */
 export function TickPicker({
   choices,
@@ -27,6 +33,7 @@ export function TickPicker({
   none,
   noun,
   label,
+  search,
   id,
   'aria-describedby': describedBy,
 }: {
@@ -39,12 +46,15 @@ export function TickPicker({
   noun: string;
   /** The panel's accessible name; defaults to `noun`. */
   label?: string;
+  /** A search box over the list — for a long one. */
+  search?: boolean;
   /** Set by `Field`. */
   id?: string;
   /** Set by `Field`. */
   'aria-describedby'?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [term, setTerm] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -60,9 +70,16 @@ export function TickPicker({
   const shown =
     value.length === 0 ? none : value.length <= 2 && names.length === value.length ? names.join(', ') : `${value.length} ${noun}`;
 
+  // What the search leaves, the ticked ones first (in the order they are listed).
+  const fold = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+  const wanted = fold(term);
+  const matching = search && wanted ? choices.filter((c) => fold(`${c.label} ${c.hint ?? ''}`).includes(wanted)) : choices;
+  const listed = search ? [...matching.filter((c) => ticked.has(c.value)), ...matching.filter((c) => !ticked.has(c.value))] : matching;
+
   const toggle = (v: string) => onChange(ticked.has(v) ? value.filter((x) => x !== v) : [...value, v]);
   const close = (refocus: boolean) => {
     setOpen(false);
+    setTerm('');
     if (refocus) buttonRef.current?.focus();
   };
   const onBlur = (e: FocusEvent<HTMLDivElement>) => {
@@ -103,11 +120,32 @@ export function TickPicker({
       </button>
       {open && (
         <div className="tick-menu" id={panelId} ref={panelRef} role="group" aria-label={label ?? noun}>
+          {search && choices.length > 0 && (
+            <div className="tick-menu-search">
+              <input
+                type="search"
+                value={term}
+                placeholder={`Search ${noun}`}
+                aria-label={`Search ${label ?? noun}`}
+                onChange={(e) => setTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter ticks the only match left, so a name is typed and taken without the mouse.
+                  if (e.key === 'Enter' && listed.length === 1) {
+                    e.preventDefault();
+                    toggle(listed[0].value);
+                    setTerm('');
+                  }
+                }}
+              />
+            </div>
+          )}
           {choices.length === 0 ? (
             <p className="muted tick-menu-empty">Nothing to choose from in this view.</p>
+          ) : listed.length === 0 ? (
+            <p className="muted tick-menu-empty">No {noun} match “{term.trim()}”.</p>
           ) : (
             <ul>
-              {choices.map((c) => (
+              {listed.map((c) => (
                 <li key={c.value}>
                   <label className="checkbox">
                     <input type="checkbox" checked={ticked.has(c.value)} onChange={() => toggle(c.value)} />

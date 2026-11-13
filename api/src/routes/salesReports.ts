@@ -14,7 +14,7 @@ import { type Range } from '../shared/insights';
 import { statusLabel } from '../shared/pdf';
 import { quotationTotals } from '../shared/quotation';
 import { orderTeamWhere } from '../shared/team';
-import { NO_GROUP, groupKeyOf, groupSharesOf, isNarrowed, live as liveRows, narrowRows, salesOrderRows, type RowFilter } from '../shared/salesFigures';
+import { GROUP_SEPARATOR, NO_GROUP, groupKeyOf, groupSharesOf, isNarrowed, listParam, live as liveRows, narrowRows, salesOrderRows, type RowFilter } from '../shared/salesFigures';
 import { salesMatrix } from '../shared/gops';
 import { badRequest } from '../http/kit';
 import { Series, byValue, cents, linkTo, monthsOf, mountReports, num, pct, table, tally, type Cell, type Report, type ReportContext } from '../shared/reportKit';
@@ -43,33 +43,22 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const me = currentUser(ctx.req);
   const q = ctx.query;
   const and: Prisma.SalesOrderWhereInput[] = [{ orderDate: { gte: range.from, lte: range.to } }];
-  const words: string[] = [];
-  if (q.ownerId) {
-    and.push({ ownerId: q.ownerId });
-    const owner = await prisma.user.findUnique({ where: { id: q.ownerId }, select: { name: true } });
-    words.push(`booked by ${owner?.name ?? 'someone not on file'}`);
+  // Several of each (2026-11-13): `ownerId=a,b`, `teamId=a,none`,
+  // `customerId=a,b`, `group=X|Y` — the pictures' and the paper's own filter.
+  const f = rowFilterOf(q);
+  const words = await filterWords(f);
+  if (f.ownerIds) and.push({ ownerId: { in: f.ownerIds } });
+  if (f.teamIds) {
+    and.push({
+      OR: f.teamIds.map((t) =>
+        t === 'none' ? { teamId: null, quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } } : orderTeamWhere(t),
+      ),
+    });
   }
-  if (q.teamId === 'none') {
-    and.push({ teamId: null, quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
-    words.push('no team');
-  } else if (q.teamId) {
-    and.push(orderTeamWhere(q.teamId));
-    const team = await prisma.industry.findUnique({ where: { id: q.teamId }, select: { code: true } });
-    words.push(`team ${team?.code ?? 'not found'}`);
-  }
-  if (q.status) {
-    if (!(STATUSES as readonly string[]).includes(q.status)) throw badRequest(`Status is one of ${STATUSES.map(statusLabel).join(', ')}`);
-    and.push({ status: q.status as (typeof STATUSES)[number] });
-    words.push(`status ${statusLabel(q.status)}`);
-  }
-  if (q.customerId) {
-    and.push({ customerId: q.customerId });
-    const customer = await prisma.customer.findUnique({ where: { id: q.customerId }, select: { name: true } });
-    words.push(`customer ${customer?.name ?? 'not on file'}`);
-  }
-  // A product group narrows each order to that group's SHARE of it (below).
-  const wantGroup = q.group ? groupKeyOf(q.group === 'none' ? NO_GROUP : q.group) : null;
-  if (q.group) words.push(`product group ${q.group === 'none' ? NO_GROUP : q.group} (each order's share of it)`);
+  if (f.status) and.push({ status: f.status as (typeof STATUSES)[number] });
+  if (f.customerIds) and.push({ customerId: { in: f.customerIds } });
+  // Product groups narrow each order to the ticked groups' SHARE of it (below).
+  const wantGroups = f.groups ? new Set(f.groups.map((g) => groupKeyOf(g === 'none' ? NO_GROUP : g))) : null;
 
   // The rows and their pesos are shared/salesFigures.ts — the G-OPS dashboard
   // reads the same, so the two cannot disagree (2026-11-08). The range's
@@ -118,11 +107,11 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   // With a product group chosen, an order keeps the fraction its lines under
   // that group make of its subtotal — of its total, net, invoiced and margin
   // alike — and an order with none of it drops out.
-  const figures = !wantGroup
+  const figures = !wantGroups
     ? wholeFigures
     : wholeFigures.flatMap((x) => {
-        const mine = x.groups.filter((g) => groupKeyOf(g.group) === wantGroup);
-        const share = x.subtotalRaw > 0 ? mine.reduce((n, g) => n + g.amount, 0) / x.subtotalRaw : wantGroup === groupKeyOf(NO_GROUP) ? 1 : 0;
+        const mine = x.groups.filter((g) => wantGroups.has(groupKeyOf(g.group)));
+        const share = x.subtotalRaw > 0 ? mine.reduce((n, g) => n + g.amount, 0) / x.subtotalRaw : wantGroups.has(groupKeyOf(NO_GROUP)) ? 1 : 0;
         if (!(share > 0)) return [];
         return [{ ...x, total: cents(x.total * share), net: cents(x.net * share), invoiced: cents(x.invoiced * share), margin: cents(x.margin * share), marginBase: cents(x.marginBase * share), groups: mine }];
       });
@@ -171,10 +160,11 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       dateFrom: day(range.from),
       dateTo: day(range.to),
       scope: 'all',
-      ownerId: q.ownerId || null,
-      teamId: q.teamId || null,
-      customerId: q.customerId || null,
-      ...(q.status ? { status: q.status } : { booked: 'yes' }),
+      // The list's filters take one value each: a box with several ticks is left to the row's own link.
+      ownerId: f.ownerIds?.length === 1 ? f.ownerIds[0] : null,
+      teamId: f.teamIds?.length === 1 ? f.teamIds[0] : null,
+      customerId: f.customerIds?.length === 1 ? f.customerIds[0] : null,
+      ...(f.status ? { status: f.status } : { booked: 'yes' }),
       ...extra,
     });
   const teamRows = shareRows(byTeam, 10);
@@ -195,7 +185,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
 
   const byStatus = new Map<string, number[]>();
   // With a product group chosen only the orders holding it are counted, at their share.
-  for (const o of wantGroup ? figures.map((x) => ({ status: x.o.status, total: x.total })) : orders) {
+  for (const o of wantGroups ? figures.map((x) => ({ status: x.o.status, total: x.total })) : orders) {
     const cur = byStatus.get(o.status) ?? [0, 0];
     byStatus.set(o.status, [cur[0] + 1, cur[1] + o.total]);
   }
@@ -223,7 +213,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     ),
   ];
 
-  const cancelled = wantGroup ? 0 : orders.length - live.length;
+  const cancelled = wantGroups ? 0 : orders.length - live.length;
   const notes: string[] = [];
   if (cancelled) notes.push(`${cancelled} cancelled order${cancelled === 1 ? '' : 's'} in the period book${cancelled === 1 ? 's' : ''} nothing and ${cancelled === 1 ? 'is' : 'are'} counted under By status only.`);
   if (figures.some((x) => x.o.currency !== 'PHP')) notes.push('Orders in a foreign currency are converted to pesos at their quotation’s own rate.');
@@ -365,23 +355,61 @@ salesReportRoutes.put(
   }),
 );
 
-/** The report's filters off a query, checked: the pictures and the paper read them alike. */
+/** The report's filters off a query, checked: the report, the pictures and the paper read them alike. */
 function rowFilterOf(query: Record<string, unknown>): RowFilter {
-  const one = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
-  const status = one(query.status);
+  const status = typeof query.status === 'string' && query.status ? query.status : undefined;
   if (status && !(STATUSES as readonly string[]).includes(status)) throw badRequest(`Status is one of ${STATUSES.map(statusLabel).join(', ')}`);
-  return { ownerId: one(query.ownerId), teamId: one(query.teamId), customerId: one(query.customerId), status, group: one(query.group) };
+  return {
+    ownerIds: listParam(query.ownerId),
+    teamIds: listParam(query.teamId),
+    customerIds: listParam(query.customerId),
+    status,
+    groups: listParam(query.group, GROUP_SEPARATOR),
+  };
+}
+
+/** Names in a line: every one up to four, then "A, B, C and 5 more". */
+function namesLine(names: string[], noun: string): string {
+  if (names.length <= 4) return names.join(', ');
+  return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more ${noun}`;
 }
 
 /** What a filter narrowed to, in words. */
 async function filterWords(f: RowFilter): Promise<string[]> {
   const words: string[] = [];
-  if (f.ownerId) words.push((await prisma.user.findUnique({ where: { id: f.ownerId }, select: { name: true } }))?.name ?? 'one salesperson');
-  if (f.teamId) words.push(f.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? ''}`.trim());
-  if (f.customerId) words.push((await prisma.customer.findUnique({ where: { id: f.customerId }, select: { name: true } }))?.name ?? 'one customer');
-  if (f.group) words.push(`product group ${f.group === 'none' ? NO_GROUP : f.group}`);
+  if (f.ownerIds) {
+    const rows = await prisma.user.findMany({ where: { id: { in: f.ownerIds } }, select: { id: true, name: true } });
+    const name = new Map(rows.map((r) => [r.id, r.name]));
+    words.push(namesLine(f.ownerIds.map((id) => name.get(id) ?? 'someone not on file'), 'salespeople'));
+  }
+  if (f.teamIds) {
+    const ids = f.teamIds.filter((t) => t !== 'none');
+    const rows = ids.length ? await prisma.industry.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } }) : [];
+    const code = new Map(rows.map((r) => [r.id, r.code]));
+    words.push(`team ${namesLine(f.teamIds.map((t) => (t === 'none' ? 'none' : code.get(t) ?? 'not found')), 'teams')}`);
+  }
+  if (f.customerIds) {
+    const rows = await prisma.customer.findMany({ where: { id: { in: f.customerIds } }, select: { id: true, name: true } });
+    const name = new Map(rows.map((r) => [r.id, r.name]));
+    words.push(namesLine(f.customerIds.map((id) => name.get(id) ?? 'a customer not on file'), 'customers'));
+  }
+  if (f.groups) words.push(`product group ${namesLine(f.groups.map((g) => (g === 'none' ? NO_GROUP : g)), 'groups')}${f.groups.length > 1 ? ' (each order\u2019s share of them)' : ''}`);
   if (f.status) words.push(statusLabel(f.status));
   return words;
+}
+
+/**
+ * The two flows for a filter (2026-11-13). With salespeople ticked they keep
+ * the whole company in view: Gruntech and every team at what the OTHER
+ * filters admit, the last column only the ticked people and their customers
+ * (`gopsSales`' focus). With none ticked, the filter's own slice as before.
+ */
+function flowsFor(me: ReturnType<typeof currentUser>, range: { from?: unknown; to?: unknown }, f: RowFilter) {
+  if (f.ownerIds?.length) {
+    const rest: RowFilter = { ...f, ownerIds: undefined };
+    return gopsSales(me, range, isNarrowed(rest) ? (rows) => narrowRows(rows, rest) : undefined, f.ownerIds);
+  }
+  return gopsSales(me, range, isNarrowed(f) ? (rows) => narrowRows(rows, f) : undefined);
 }
 
 // The two flows as figures (2026-11-12, the owner's call: "on sales order
@@ -400,7 +428,7 @@ salesReportRoutes.get(
     const f = rowFilterOf(req.query);
     const narrowed = isNarrowed(f);
     const range = { from: req.query.from, to: req.query.to };
-    const sales = await gopsSales(me, range, narrowed ? (rows) => narrowRows(rows, f) : undefined);
+    const sales = await flowsFor(me, range, f);
     // Everyone who booked and every customer of these days, whatever the
     // narrowing — the page's pickers list them (a salesperson even once gone).
     const everyone = narrowed ? await gopsSales(me, range) : sales;
@@ -414,6 +442,8 @@ salesReportRoutes.get(
       sankey: sales.sankey,
       customerSankey: sales.customerSankey,
       filterLine: (await filterWords(f)).join(' · '),
+      // The flows keep the whole company in view while salespeople are ticked.
+      focused: !!f.ownerIds?.length,
       owners: everyone.people.map((p) => ({ id: p.id, name: p.name })),
       customers: [...customers.entries()].map(([id, name]) => ({ id, name })).sort((x, y) => x.name.localeCompare(y.name)),
     });
@@ -469,7 +499,9 @@ salesReportRoutes.get(
     ].map((t) => ({ ...t, values: t.values.map(cents), total: cents(t.total) }));
     const grand = cents(total.reduce((a, b) => a + b, 0));
 
-    const sales = await gopsSales(me, { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` }, narrowed ? (all) => narrowRows(all, f) : undefined);
+    const yearRange = { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` };
+    const sales = await gopsSales(me, yearRange, narrowed ? (all) => narrowRows(all, f) : undefined);
+    const flows = f.ownerIds?.length ? await flowsFor(me, yearRange, f) : sales;
     // `customers=10|25|50` prints the top customers on the flow's page, the
     // rest gathered per team; anything else prints them all.
     const topN = ['10', '25', '50'].includes(q.customers ?? '') ? Number(q.customers) : 0;
@@ -498,10 +530,19 @@ salesReportRoutes.get(
     }
     // By product group, by month: each order's net spread over its groups (an
     // order narrowed to one group is already that group's share).
-    const shares = f.group ? null : await groupSharesOf(rows.map((o) => o.id));
+    // One group ticked: every order is already that group's share. Several: split what is left over the ticked ones.
+    const oneGroup = f.groups?.length === 1 ? f.groups[0] : null;
+    const wanted = f.groups && f.groups.length > 1 ? new Set(f.groups.map((g) => groupKeyOf(g === 'none' ? NO_GROUP : g))) : null;
+    const shares = oneGroup ? null : await groupSharesOf(rows.map((o) => o.id));
     const byGroup = new Map<string, { name: string; values: number[]; total: number }>();
     for (const o of rows) {
-      const parts = shares ? shares.get(o.id) ?? [{ group: NO_GROUP, share: 1 }] : [{ group: f.group === 'none' ? NO_GROUP : f.group!, share: 1 }];
+      let parts = shares ? shares.get(o.id) ?? [{ group: NO_GROUP, share: 1 }] : [{ group: oneGroup === 'none' ? NO_GROUP : oneGroup!, share: 1 }];
+      if (wanted) {
+        // The order's net is already the ticked groups' together: spread it over them alone.
+        const kept = parts.filter((p) => wanted.has(groupKeyOf(p.group)));
+        const sum = kept.reduce((n, p) => n + p.share, 0);
+        parts = sum > 0 ? kept.map((p) => ({ group: p.group, share: p.share / sum })) : parts;
+      }
       for (const part of parts) {
         const g = byGroup.get(groupKeyOf(part.group)) ?? { name: part.group, values: zero(), total: 0 };
         g.values[month(o.orderDate)] += o.net * part.share;
@@ -541,8 +582,8 @@ salesReportRoutes.get(
       barSeries: [`${year}`, `${year - 1}`],
       customerTable: customerRows,
       productTable: productRows,
-      sankey: sales.sankey.root.value > 0 ? sales.sankey : null,
-      customerSankey: sales.customerSankey.root.value > 0 ? topOfFlow(sales.customerSankey, topN) : null,
+      sankey: flows.sankey.root.value > 0 ? flows.sankey : null,
+      customerSankey: flows.customerSankey.root.value > 0 ? topOfFlow(flows.customerSankey, topN) : null,
     });
     await audit({ entityType: 'sales_report', entityId: 'sales-orders', action: 'EXPORTED', summary: `${year} sales report printed (one page)` }, req);
     res.setHeader('Content-Type', 'application/pdf');

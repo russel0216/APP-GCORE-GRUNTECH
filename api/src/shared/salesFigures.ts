@@ -119,20 +119,35 @@ export const orderMonth = (d: Date) => d.toISOString().slice(0, 7);
  * An order with no priced lines stands whole under "No group".
  */
 export interface RowFilter {
-  ownerId?: string;
-  /** A team's id, or `none`. */
-  teamId?: string;
-  customerId?: string;
+  /**
+   * Several of each since 2026-11-13 (the owner's call: "combine filter —
+   * My San Calamba and My San Cainta in one report; Ivan and Erica in one
+   * report"): an order passes a box when it matches ANY value ticked in it,
+   * and every box that has a tick must pass.
+   */
+  ownerIds?: string[];
+  /** Team ids; `none` is an order with no team. */
+  teamIds?: string[];
+  customerIds?: string[];
   status?: string;
-  /** A product group's name (case- and space-blind), or `none` for "No group". */
-  group?: string;
+  /** Product group names (case- and space-blind); `none` is "No group". */
+  groups?: string[];
 }
+
+/** `a,b` → ['a', 'b'], trimmed, each once; nothing → undefined. */
+export function listParam(v: unknown, separator = ','): string[] | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const out = [...new Set(v.split(separator).map((x) => x.trim()).filter(Boolean))];
+  return out.length ? out : undefined;
+}
+/** Product group names may hold a comma, so their list is split on `|`. */
+export const GROUP_SEPARATOR = '|';
 
 export const NO_GROUP = 'No group';
 export const groupKeyOf = (name: string | null | undefined) => (name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 const wantedGroup = (group: string) => (group === 'none' ? groupKeyOf(NO_GROUP) : groupKeyOf(group));
 
-export const isNarrowed = (f: RowFilter) => !!(f.ownerId || f.teamId || f.customerId || f.status || f.group);
+export const isNarrowed = (f: RowFilter) => !!(f.ownerIds?.length || f.teamIds?.length || f.customerIds?.length || f.status || f.groups?.length);
 
 /** Each order's product groups as fractions of its subtotal (adding up to 1), named as its lines spell them. */
 export async function groupSharesOf(orderIds: string[]): Promise<Map<string, { group: string; share: number }[]>> {
@@ -155,20 +170,23 @@ export async function groupSharesOf(orderIds: string[]): Promise<Map<string, { g
   return out;
 }
 
-/** The rows a filter admits; a product group leaves each order its share of that group. */
+/** The rows a filter admits; product groups leave each order its share of the ticked groups together. */
 export async function narrowRows(rows: OrderRow[], f: RowFilter): Promise<OrderRow[]> {
+  const owners = f.ownerIds?.length ? new Set(f.ownerIds) : null;
+  const teams = f.teamIds?.length ? new Set(f.teamIds) : null;
+  const customers = f.customerIds?.length ? new Set(f.customerIds) : null;
   let out = rows.filter(
     (o) =>
-      (!f.ownerId || o.ownerId === f.ownerId) &&
-      (!f.teamId || (o.team ? o.team.id : 'none') === f.teamId) &&
-      (!f.customerId || o.customerId === f.customerId) &&
+      (!owners || owners.has(o.ownerId)) &&
+      (!teams || teams.has(o.team ? o.team.id : 'none')) &&
+      (!customers || customers.has(o.customerId)) &&
       (!f.status || o.status === f.status),
   );
-  if (f.group) {
-    const want = wantedGroup(f.group);
+  if (f.groups?.length) {
+    const want = new Set(f.groups.map(wantedGroup));
     const shares = await groupSharesOf(out.map((o) => o.id));
     out = out.flatMap((o) => {
-      const share = (shares.get(o.id) ?? []).filter((g) => groupKeyOf(g.group) === want).reduce((s, g) => s + g.share, 0);
+      const share = (shares.get(o.id) ?? []).filter((g) => want.has(groupKeyOf(g.group))).reduce((s, g) => s + g.share, 0);
       return share > 0 ? [{ ...o, total: cents(o.total * share), net: cents(o.net * share) }] : [];
     });
   }

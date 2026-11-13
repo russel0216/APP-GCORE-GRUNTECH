@@ -1,5 +1,6 @@
 import { ReportPage, type ReportKind } from '../../components/ReportPage';
-import { PersonSelect, usePeople } from '../../components/People';
+import { usePeople } from '../../components/People';
+import { TickPicker } from '../../components/TickPicker';
 import { useEffect, useState } from 'react';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -24,6 +25,9 @@ const STATUSES = [
   { value: 'ISSUED', label: 'Issued' },
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
+
+/** A box's ticks off the address: `a,b` → ['a', 'b']. */
+const listOf = (v: string | null, separator = ',') => (v ? v.split(separator).map((x) => x.trim()).filter(Boolean) : []);
 
 interface Team {
   id: string;
@@ -69,40 +73,49 @@ export function SalesOrderReports() {
           <div className="rep-row">
             <span className="rep-label">Filter by</span>
             <div className="rep-grid">
-            <PersonSelect people={people} placeholder="All personnel" value={params.get('ownerId') ?? ''} onChange={(v) => set({ ownerId: v })} />
-            <select aria-label="Team" value={params.get('teamId') ?? ''} onChange={(e) => set({ teamId: e.target.value })}>
-              <option value="">All teams</option>
-              {myTeam && (
-                <option value={myTeam.id}>
-                  My team — {myTeam.code}
-                </option>
-              )}
-              {teams
-                .filter((t) => t.id !== myTeam?.id)
-                .map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.code} — {t.name}
-                  </option>
-                ))}
-              <option value="none">No team</option>
-            </select>
-            <select aria-label="Customer" value={params.get('customerId') ?? ''} onChange={(e) => set({ customerId: e.target.value })}>
-              <option value="">All customers</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-            <select aria-label="Product group" value={params.get('group') ?? ''} onChange={(e) => set({ group: e.target.value })}>
-              <option value="">All product groups</option>
-              {groups.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-              <option value="none">No group</option>
-            </select>
+            {/* Tick several of each (2026-11-13, the owner's call): two customers or two
+                salespeople in one report, a row each. In the address a box is `a,b`
+                (product groups `X|Y`, a name may hold a comma). */}
+            <TickPicker
+              search
+              label="Personnel"
+              none="All personnel"
+              noun="salespeople"
+              choices={people.map((p) => ({ value: p.id, label: p.name }))}
+              value={listOf(params.get('ownerId'))}
+              onChange={(v) => set({ ownerId: v.join(',') })}
+            />
+            <TickPicker
+              search
+              label="Team"
+              none="All teams"
+              noun="teams"
+              choices={[
+                ...(myTeam ? [{ value: myTeam.id, label: `My team — ${myTeam.code}` }] : []),
+                ...teams.filter((t) => t.id !== myTeam?.id).map((t) => ({ value: t.id, label: t.code, hint: t.name })),
+                { value: 'none', label: 'No team' },
+              ]}
+              value={listOf(params.get('teamId'))}
+              onChange={(v) => set({ teamId: v.join(',') })}
+            />
+            <TickPicker
+              search
+              label="Customer"
+              none="All customers"
+              noun="customers"
+              choices={customers.map((c) => ({ value: c.id, label: c.name }))}
+              value={listOf(params.get('customerId'))}
+              onChange={(v) => set({ customerId: v.join(',') })}
+            />
+            <TickPicker
+              search
+              label="Product group"
+              none="All product groups"
+              noun="product groups"
+              choices={[...groups.map((g) => ({ value: g, label: g })), { value: 'none', label: 'No group' }]}
+              value={listOf(params.get('group'), '|')}
+              onChange={(v) => set({ group: v.join('|') })}
+            />
             <select aria-label="Status" value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
               <option value="">Every status</option>
               {STATUSES.map((s) => (
@@ -192,6 +205,8 @@ interface Flows {
   to: string;
   total: number;
   filterLine?: string;
+  /** Salespeople are ticked: Gruntech and the teams are the whole company's, the last column theirs alone. */
+  focused?: boolean;
   owners?: { id: string; name: string }[];
   customers?: { id: string; name: string }[];
   sankey: SankeyInput;
@@ -244,7 +259,7 @@ function SalesFlows({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [from, to, ownerId, teamId, status, customerId, group]);
   if (!flows) return null;
-  const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}${flows.filterLine ? ` · ${flows.filterLine}` : ''}`;
+  const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}${flows.filterLine ? ` · ${flows.focused ? `${flows.filterLine} — shown against the whole company` : flows.filterLine}` : ''}`;
   const customers = topOfFlow(flows.customerSankey, top);
   const count = new Set(flows.customerSankey.people.map((p) => p.of ?? p.id)).size;
   return (
