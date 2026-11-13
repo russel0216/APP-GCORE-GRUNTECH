@@ -6,6 +6,8 @@ import { parseDay } from '../../lib/day';
 import { Stat } from '../../components/charts';
 import { Empty, ErrorBox, Loading, StatusBadge, durationLabel, formatDate, formatTime, type Tone } from '../../components/ui';
 import { PriorModal } from './Overtime';
+import { AttendanceIssues } from './AttendanceIssues';
+import { Attachments } from '../../components/Attachments';
 import { MemosReceived } from './Memos';
 
 /**
@@ -72,6 +74,7 @@ interface Records {
   year: number;
   overtime: OtRow[];
   file: {
+    employeeId: string;
     employeeNo: string | null;
     name: string;
     title: string | null;
@@ -225,6 +228,8 @@ function AttendanceTab({ data, onCutoff, onFiled }: { data: Records; onCutoff: (
         </div>
       )}
 
+      <AttendanceIssues />
+
       <div className="card">
         <div className="card-head">
           <h3 className="card-title">
@@ -363,6 +368,7 @@ function FileTab({ file }: { file: Records['file'] }) {
     ? [file.service.years ? `${file.service.years} year${file.service.years === 1 ? '' : 's'}` : null, `${file.service.months} month${file.service.months === 1 ? '' : 's'}`].filter(Boolean).join(', ')
     : null;
   return (
+    <div className="stack">
     <div className="grid grid-2">
       <div className="card">
         <h3 className="card-title">Employment</h3>
@@ -424,6 +430,14 @@ function FileTab({ file }: { file: Records['file'] }) {
           Your mobile, address, birthday and emergency contact are yours to keep up to date on <Link to="/account">My Account</Link>.
         </p>
       </div>
+    </div>
+    <Attachments
+      entityType="employee_201"
+      entityId={file.employeeId}
+      title="201 File documents"
+      hint="Your contract, IDs and certificates on file — HR adds and removes them"
+      canEdit={false}
+    />
     </div>
   );
 }

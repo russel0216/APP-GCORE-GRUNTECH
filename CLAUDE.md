@@ -671,6 +671,50 @@ four databases and four copies of "customer".
       API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
       old `?payment=` link redirects there.
 
+## The owner's G-HR batch of 2026-11-13 — push 1
+
+- **Overtime is charged where the SUPERIOR says.** The filing form's project
+  and budget line are optional ("the person you report to sets or corrects
+  it"); a project named without a budget line goes to Labor (`laborCategoryId()`,
+  code LAB). `POST /overtime/:id/allocate { jobId, costCategoryId,
+  salesOrderId, quotationId }` — at most one — by `mayAllocateOvertime()`: the
+  employee's "Reports to", whoever decides or decided its approval, Edit All
+  or a super admin, never the employee alone, not on a cancelled or rejected
+  one. `OvertimeRequest.salesOrderId` / `quotationId` are REFERENCE only (only
+  a project has a cost ledger); `allocatedById` / `allocatedAt` say who set
+  it. On an APPROVED filing the posted cost is reversed by negative INCURRED
+  rows and posted again at the new project at the approved `amount`. The
+  record's "Charged to" card has the panel (`AllocatePanel`), fed by `GET
+  /overtime/allocation-options` (open projects, budget lines, sales orders,
+  live quotations; above `/:id`). verify-hr pins it.
+- **My attendance issues** (`GET /my-records/issues?days=`, 60 by default,
+  120 at most, the caller's own): the daily time record's rule (`dtrDay`)
+  over the span — its own day list, `daysOf` stops at 62 — keeping a late
+  clock-in, a missed clock-out (an open day before today) and an absence,
+  newest first, each with its latest Attendance Correction and the step it
+  waits on. The card (`pages/hr/AttendanceIssues.tsx`) sits on Clock In/Out
+  and My Records; "Request adjustment" opens `/g-hr/attendance-corrections?new=1&date=`.
+  The menu entry reads **Time Appeals** (the key and path unchanged).
+- **201 File documents**: attachments on `employee_201` (the employee's id) —
+  read and written by `ghr.employees.edit_all` (HR Officer, HR Manager),
+  read by the employee's own login (My Records › 201 File), nobody else;
+  deleted with the employee. The employee record's **201 File** tab.
+- **The charts in G-HR**: `ghr.org_chart` and `ghr.hierarchy_chart`
+  (`view_all`), G-HR › People › Organizational Chart / Hierarchy Chart
+  (`pages/hr/Charts.tsx`): `OrgChart readOnly` — the slim `GET
+  /users/org-chart` (name, title, roles with level, team, picture, "Reports
+  to"; no email or right; above `/:id`), cards that open nothing.
+  `/roles/chart` takes the chart keys too. `splitBorrowedRights()`
+  (`org-charts`) gave both, once, to whoever holds My Records — every employee.
+- **Hiring's flow**: `HiringFlow` (Man power request approved › Applicants ›
+  Exam › Interview › Contract approved › Signed by both › Hired) on the
+  request, the applicant and the contract. The add-applicant form says when
+  no request is approved and links to `/g-hr/hiring/mpr?new=1`, which opens
+  the form. **"Mark signed" needs the scan signed by both parties** on its
+  own card, `employment_contract_signed` (written only while APPROVED by
+  whoever may change the contract) — a 400 otherwise; the hire copies it
+  into the employee's 201 file (`employee_201`). verify-hr pins both.
+
 ## The delete rule (2026-11-13)
 
 The owner's call: "make all the Delete function only by the one who created

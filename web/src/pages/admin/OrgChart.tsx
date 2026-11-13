@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -30,6 +30,13 @@ export interface Person {
   /** Their highest role — the title on documents. */
   title?: string | null;
   supportTeams?: { industryId: string; industry?: { code: string } }[];
+}
+
+/** G-HR's read-only charts (2026-11-13): a card opens nothing there. */
+const ReadOnlyChart = createContext(false);
+
+function CardLink({ to, className, children }: { to: string; className: string; children: ReactNode }) {
+  return useContext(ReadOnlyChart) ? <span className={className}>{children}</span> : <Link to={to} className={className}>{children}</Link>;
 }
 
 export interface Node {
@@ -96,7 +103,7 @@ function Card({ node, depth, meId, search, only }: { node: Node; depth: number; 
   return (
     <span className={`org-person org-depth-${Math.min(depth, 3)}`}>
       {tiles.map((t) => (
-        <Link key={t.key || 'none'} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(t.key) ? ' is-key' : ''}`}>
+        <CardLink key={t.key || 'none'} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(t.key) ? ' is-key' : ''}`}>
           <Avatar name={p.name} photoId={p.photoPath} size={36} />
           <span className="org-card-text">
             {p.team && (
@@ -110,7 +117,7 @@ function Card({ node, depth, meId, search, only }: { node: Node; depth: number; 
               {p.id === meId && <span className="org-you"> (you)</span>}
             </span>
           </span>
-        </Link>
+        </CardLink>
       ))}
       {node.reports.length > 0 && <span className="visually-hidden">, {node.reports.length} direct reports</span>}
     </span>
@@ -264,15 +271,17 @@ function Tree({ head, meId, search }: { head: Node; meId?: string; search: strin
  * view's one read of the admin user list (the only screen allowed it: it
  * needs every Reports to).
  */
-export function useOrgPeople(): { people: Person[] | null; error: unknown } {
+export function useOrgPeople(readOnly = false): { people: Person[] | null; error: unknown } {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
+    // G-HR's charts (2026-11-13) read the slim people list every employee may;
+    // Admin › Users keeps its own list.
     api
-      .get<{ rows: Person[] }>('/users?pageSize=200&isActive=true')
+      .get<{ rows: Person[] }>(readOnly ? '/users/org-chart' : '/users?pageSize=200&isActive=true')
       .then((r) => setPeople(r.rows))
       .catch(setError);
-  }, []);
+  }, [readOnly]);
   return { people, error };
 }
 
@@ -343,7 +352,7 @@ function RoleTile({ node, holders, names, meId, search, rolesOnly }: { node: Rol
         </span>
       ) : (
         holders.map((p) => (
-          <Link key={p.id} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
+          <CardLink key={p.id} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
             <Avatar name={p.name} photoId={p.photoPath} size={36} />
             <span className="org-card-text">
               {p.team && (
@@ -357,7 +366,7 @@ function RoleTile({ node, holders, names, meId, search, rolesOnly }: { node: Rol
                 {p.id === meId && <span className="org-you"> (you)</span>}
               </span>
             </span>
-          </Link>
+          </CardLink>
         ))
       )}
       {also.length > 0 && <span className="org-also">Also reports to {also.join(' and ')}</span>}
@@ -461,10 +470,10 @@ function RoleChart({ people, meId, search, onReady, rolesOnly }: { people: Perso
   );
 }
 
-export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
+export function OrgChart({ rolesOnly, readOnly }: { rolesOnly?: boolean; readOnly?: boolean } = {}) {
   const { me } = useAuth();
   const location = useLocation();
-  const { people, error } = useOrgPeople();
+  const { people, error } = useOrgPeople(readOnly);
   // By role is the chart (2026-10-20); by person is the "Reports to" lines.
   const [byPerson, setByPerson] = useState(false);
 
@@ -548,6 +557,7 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
   if (forest.length === 0) return <Empty title="Nobody to chart yet" hint="Add users, then set who each reports to." />;
 
   return (
+    <ReadOnlyChart.Provider value={!!readOnly}>
     <div className="card org-card-wrap" ref={wrap}>
       {!rolesOnly && (
       <div className="row org-switch">
@@ -631,5 +641,6 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
         </div>
       )}
     </div>
+    </ReadOnlyChart.Provider>
   );
 }

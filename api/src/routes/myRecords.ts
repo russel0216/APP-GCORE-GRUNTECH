@@ -34,6 +34,91 @@ myRecordsRoutes.use(authenticate);
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
+/**
+ * The days that need explaining (2026-11-13, the owner's call: "the
+ * requestor can easily check — a list of what he/she late clock in or missed
+ * clock out"): the caller's own last `days` days (60 by default, 120 at most)
+ * read through the daily time record's own rule (`dtrDay`), keeping a late
+ * clock-in, a missed clock-out (an open day before today) and an absence,
+ * newest first, each with its latest time appeal (Attendance Correction) —
+ * number, status and the step it waits on — so the person sees which are
+ * still to explain. Only ever the caller's own.
+ */
+myRecordsRoutes.get(
+  '/issues',
+  requireAny('ghr.my_records.view_own', 'ghr.clock.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const employee = await prisma.employee.findUnique({ where: { userId: me.id }, select: { id: true, dateHired: true } });
+    if (!employee) {
+      res.json({ employee: false, rows: [] });
+      return;
+    }
+    const span = Math.min(120, Math.max(7, Number(req.query.days) || 60));
+    const now = new Date();
+    const today = manilaDayKey(now);
+    const fromKey = new Date(Date.parse(`${today}T00:00:00Z`) - (span - 1) * 86_400_000).toISOString().slice(0, 10);
+    const from = new Date(`${fromKey}T00:00:00Z`);
+    const to = new Date(`${today}T00:00:00Z`);
+    const [punches, leaves, holidayList, appeals] = await Promise.all([
+      prisma.attendance.findMany({ where: { employeeId: employee.id, date: { gte: from, lte: to } } }),
+      prisma.leaveRequest.findMany({
+        where: { employeeId: employee.id, status: 'APPROVED', startDate: { lte: to }, endDate: { gte: from } },
+        select: { startDate: true, endDate: true, leaveType: { select: { name: true } } },
+      }),
+      holidays(),
+      prisma.attendanceCorrection.findMany({
+        where: { employeeId: employee.id, date: { gte: from, lte: to } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, date: true, status: true },
+      }),
+    ]);
+    const byDay = new Map(punches.map((p) => [day(p.date)!, p]));
+    const holidayByDay = new Map(holidayList.map((h) => [h.date, h.name]));
+    const leaveByDay = new Map<string, string>();
+    for (const l of leaves) for (const k of daysOf(day(l.startDate)!, day(l.endDate)!)) leaveByDay.set(k, l.leaveType.name);
+    const appealOf = new Map<string, (typeof appeals)[number]>();
+    for (const a of appeals) if (!appealOf.has(day(a.date)!)) appealOf.set(day(a.date)!, a);
+    const waiting = await openSteps('attendance_correction', appeals.filter((a) => a.status === 'PENDING_APPROVAL').map((a) => a.id));
+
+    // Every day of the span (daysOf stops at a cutoff's 62).
+    const span_days = Array.from({ length: span }, (_, i) => new Date(Date.parse(`${fromKey}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
+    const rows = span_days
+      .map((date) => dtrDay({ date, today, now, punch: byDay.get(date) ?? null, holiday: holidayByDay.get(date) ?? null, leave: leaveByDay.get(date) ?? null, hired: day(employee.dateHired) }))
+      .flatMap((d) => {
+        const issues: string[] = [];
+        if (d.lateMinutes > 0) issues.push('LATE');
+        if (d.status === 'OPEN' && !d.open) issues.push('NO_CLOCK_OUT');
+        if (d.status === 'ABSENT') issues.push('ABSENT');
+        if (!issues.length) return [];
+        const a = appealOf.get(d.date);
+        return [
+          {
+            date: d.date,
+            weekday: d.weekday,
+            issues,
+            lateMinutes: d.lateMinutes,
+            timeIn: d.timeIn,
+            timeOut: d.timeOut,
+            appeal: a ? { id: a.id, number: a.number, status: a.status, statusLabel: statusLabel(a.status), waitingOn: waiting.get(a.id) ?? null } : null,
+          },
+        ];
+      })
+      .reverse();
+    res.json({
+      employee: true,
+      days: span,
+      rows,
+      counts: {
+        late: rows.filter((r) => r.issues.includes('LATE')).length,
+        noClockOut: rows.filter((r) => r.issues.includes('NO_CLOCK_OUT')).length,
+        absent: rows.filter((r) => r.issues.includes('ABSENT')).length,
+        unexplained: rows.filter((r) => !r.appeal || ['REJECTED', 'CANCELLED'].includes(r.appeal.status)).length,
+      },
+    });
+  }),
+);
+
 myRecordsRoutes.get(
   '/',
   requireAny('ghr.my_records.view_own'),
@@ -168,6 +253,7 @@ myRecordsRoutes.get(
       year,
       overtime: overtimeRows,
       file: {
+        employeeId: employee.id,
         employeeNo: employee.employeeNo,
         name: [employee.firstName, employee.middleName, employee.lastName, employee.suffix].filter(Boolean).join(' '),
         title: employee.position,

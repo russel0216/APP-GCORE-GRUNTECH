@@ -63,6 +63,36 @@ export const CANDIDATE_LABEL: Record<string, string> = {
 export const CONTRACT_TONES: Record<string, Tone> = { DRAFT: '', PENDING_APPROVAL: 'warn', APPROVED: 'info', SIGNED: 'ok', CANCELLED: '' };
 const CONTRACT_LABEL: Record<string, string> = { DRAFT: 'Draft', PENDING_APPROVAL: 'Pending approval', APPROVED: 'Approved — to sign', SIGNED: 'Signed', CANCELLED: 'Cancelled' };
 
+/**
+ * Where a hire stands, start to finish (2026-11-13, the owner's call: "check
+ * again how this flow — from Manpower to Contract & Approval"): the same
+ * seven steps on the request, the applicant and the contract.
+ */
+const FLOW = ['Man power request approved', 'Applicants', 'Exam', 'Interview', 'Contract approved', 'Signed by both', 'Hired'];
+
+function HiringFlow({ at, note }: { at: number; note?: string }) {
+  return (
+    <div className="card">
+      <ol className="po-steps hiring-flow" aria-label="How a hire goes">
+        {FLOW.map((t, n) => (
+          <li key={t} className={n < at ? 'is-done' : n === at ? 'is-now' : ''}>
+            <span className="po-step-no">{n < at ? '✓' : n + 1}</span>
+            {t}
+          </li>
+        ))}
+      </ol>
+      {note && <p className="faint hraud-flush">{note}</p>}
+    </div>
+  );
+}
+
+/** Where an applicant's status stands on the strip. */
+const candidateStep = (status: string) =>
+  status === 'HIRED' ? 7 : status === 'CONTRACT_STAGE' ? 4 : status.startsWith('INTERVIEW') ? 3 : status.startsWith('EXAM') ? 2 : 1;
+
+/** Where a contract's status stands on the strip. */
+const contractStep = (status: string) => (status === 'SIGNED' ? 6 : status === 'HIRED' ? 7 : status === 'APPROVED' ? 5 : 4);
+
 const candidateBadge = (s: string) => <StatusBadge status={s} extra={CANDIDATE_TONES} label={CANDIDATE_LABEL[s] ?? s} />;
 const typeLabel = (t: string) => EMPLOYMENT_TYPES.find(([k]) => k === t)?.[1] ?? t;
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
@@ -182,7 +212,17 @@ export function ManpowerRequests() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const teams = useTeams();
-  const [adding, setAdding] = useState(false);
+  // `?new=1` opens the form (the add-applicant form links here when nothing is approved).
+  const [params, setParams] = useSearchParams();
+  const [adding, setAdding] = useState(() => params.get('new') === '1' && can('ghr.manpower_requests.create'));
+  useEffect(() => {
+    if (params.get('new') === '1') {
+      const next = new URLSearchParams(params);
+      next.delete('new');
+      setParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div>
       <div className="page-head">
@@ -494,6 +534,10 @@ export function ManpowerRequestPage() {
         modify={r.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
+      <HiringFlow
+        at={r.status === 'APPROVED' || r.status === 'FILLED' ? (r.status === 'FILLED' ? 7 : 1) : 0}
+        note={r.status === 'APPROVED' ? 'Approved — add applicants against it below.' : r.status === 'FILLED' ? 'Filled — every opening is hired.' : 'Applicants are added once this request is approved.'}
+      />
       {r.status === 'DRAFT' && <RoutePreview route={r.approvalRoute} />}
       <DecisionNote documentType="manpower_request" documentId={r.id} reloadToken={reload} />
       {r.status !== 'DRAFT' && r.status !== 'CANCELLED' && <DocumentApproval documentType="manpower_request" documentId={r.id} reloadToken={reload} />}
@@ -737,6 +781,7 @@ function CandidateModal({ mprId, existing, onClose, onSaved }: { mprId?: string;
   const toast = useToast();
   const idBase = useId();
   const [mprs, setMprs] = useState<OpenMpr[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState(() => ({
@@ -758,6 +803,7 @@ function CandidateModal({ mprId, existing, onClose, onSaved }: { mprId?: string;
       .get<OpenMpr[]>('/hiring/mprs/open')
       .then((rows) => {
         setMprs(rows);
+        setLoaded(true);
         setForm((f) => (f.mprId || !rows.length ? f : { ...f, mprId: rows[0].id }));
       })
       .catch(setError);
@@ -808,6 +854,11 @@ function CandidateModal({ mprId, existing, onClose, onSaved }: { mprId?: string;
       }
     >
       <ErrorBox error={error} />
+      {loaded && !mprs.length && !existing && (
+        <div className="alert warn">
+          No approved man power request yet. Applicants are added against one — <Link to="/g-hr/hiring/mpr?new=1">raise a man power request</Link> and have it approved first.
+        </div>
+      )}
       <Field label="Position applied" htmlFor={`${idBase}-mpr`} hint="An approved man power request">
         <select id={`${idBase}-mpr`} value={form.mprId} onChange={(e) => set('mprId', e.target.value)}>
           {existing && !mprs.some((m) => m.id === existing.mpr.id) && <option value={existing.mpr.id}>{`${existing.mpr.number} — ${existing.mpr.title}`}</option>}
@@ -1085,6 +1136,7 @@ export function CandidatePage() {
         modify={c.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
+      <HiringFlow at={candidateStep(c.status)} />
       <ErrorBox error={error} />
 
       <div className="stack">
@@ -1899,12 +1951,15 @@ export function ContractPage() {
         modify={k.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
+      <HiringFlow at={contractStep(k.status)} />
       {k.status === 'DRAFT' && <RoutePreview route={k.approvalRoute} />}
       <DecisionNote documentType="employment_contract" documentId={k.id} reloadToken={reload} />
       {k.status !== 'DRAFT' && k.status !== 'CANCELLED' && <DocumentApproval documentType="employment_contract" documentId={k.id} reloadToken={reload} />}
       <ErrorBox error={error} />
       {k.status === 'APPROVED' && (
-        <div className="alert info">Approved. Print it for the wet signature, then mark it signed and attach the signed copy under Attachments.</div>
+        <div className="alert info">
+          Approved. Print it, have the hire and the company sign it, upload the scan under Signed contract, then Mark signed. Hire opens once it is signed; the scan goes into the employee&rsquo;s 201 file.
+        </div>
       )}
 
       <div className="stack">
@@ -1971,7 +2026,16 @@ export function ContractPage() {
             <p className="hiring-terms">{k.terms}</p>
           </section>
         )}
-        <Attachments entityType="employment_contract" entityId={k.id} hint="The signed copy, the offer, IDs" canEdit={k.canEdit || k.canSign || k.canHire} />
+        {k.status !== 'DRAFT' && k.status !== 'PENDING_APPROVAL' && k.status !== 'CANCELLED' && (
+          <Attachments
+            entityType="employment_contract_signed"
+            entityId={k.id}
+            title="Signed contract"
+            hint="The scan with both wet signatures — needed before Mark signed, and filed in the 201 at the hire"
+            canEdit={k.canSign}
+          />
+        )}
+        <Attachments entityType="employment_contract" entityId={k.id} hint="The offer, IDs and anything else that goes with the contract" canEdit={k.canEdit || k.canSign || k.canHire} />
       </div>
 
       {modifying && (

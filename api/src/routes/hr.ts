@@ -2811,6 +2811,35 @@ overtimeRoutes.get(
   }),
 );
 
+/**
+ * What the superior may charge overtime to (POST /:id/allocate): open
+ * projects, the budget lines, issued sales orders and live quotations —
+ * numbers and names only, to anyone signed in (the route itself decides who
+ * may allocate). Declared above `/:id`.
+ */
+overtimeRoutes.get(
+  '/allocation-options',
+  handler(async (_req, res) => {
+    const [jobs, categories, salesOrders, quotations] = await Promise.all([
+      prisma.job.findMany({ where: { status: { notIn: ['CANCELLED', 'TURNED_OVER'] } }, select: { id: true, number: true, name: true }, orderBy: { createdAt: 'desc' }, take: 300 }),
+      prisma.costCategory.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true }, orderBy: { sortOrder: 'asc' } }),
+      prisma.salesOrder.findMany({ where: { status: { in: ['ISSUED', 'PENDING_APPROVAL', 'DRAFT'] } }, select: { id: true, number: true, customer: { select: { name: true } } }, orderBy: { orderDate: 'desc' }, take: 300 }),
+      prisma.quotation.findMany({
+        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] } },
+        select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 300,
+      }),
+    ]);
+    res.json({
+      jobs,
+      categories,
+      salesOrders: salesOrders.map((o) => ({ id: o.id, number: o.number, name: o.customer.name })),
+      quotations: quotations.map((q) => ({ id: q.id, number: q.number, name: q.subject ? `${q.customer.name} — ${q.subject}` : q.customer.name })),
+    });
+  }),
+);
+
 overtimeRoutes.get(
   '/route',
   requireAny('ghr.overtime.create', 'ghr.overtime.edit_own', 'ghr.overtime.edit_all'),
@@ -2833,6 +2862,9 @@ overtimeRoutes.get(
         },
         job: { select: { id: true, number: true, name: true } },
         costCategory: { select: { id: true, name: true } },
+        salesOrder: { select: { id: true, number: true } },
+        quotation: { select: { id: true, number: true, subject: true } },
+        allocatedBy: { select: { id: true, name: true } },
       },
     });
     if (!ot) throw notFound('Overtime request not found');
@@ -2878,6 +2910,8 @@ overtimeRoutes.get(
       // The viewer's own filing — a form modifying somebody else's speaks of
       // them, and prices at their rate (`rate`), never the viewer's.
       own,
+      // POST /:id/allocate — the superior, an approver of it, or Edit All.
+      canAllocate: await mayAllocateOvertime(me, ot),
     });
   }),
 );
@@ -2927,7 +2961,9 @@ async function priorFields(body: PriorBody, keepJobId: string | null = null) {
   if (hours <= 0) throw badRequest('That range is zero hours once the break is deducted');
 
   const jobId = body.jobId || null;
-  const costCategoryId = body.costCategoryId || null;
+  // A project named without a budget line goes to Labor (2026-11-13): the
+  // budget line is not asked of the person filing any more.
+  const costCategoryId = jobId ? body.costCategoryId || (await laborCategoryId()) : null;
   await checkCharge(jobId, costCategoryId, keepJobId);
 
   return {
@@ -2960,6 +2996,138 @@ async function overtimeForEdit(me: ResolvedUser, id: string) {
 
 const priorSubject = (employee: { firstName: string; lastName: string }, hours: number, date: string) =>
   `${employee.firstName} ${employee.lastName} — ${hours}h prior approval for ${date}`;
+
+/** The Labor budget line (code LAB), where overtime on a project goes unless another is named. */
+async function laborCategoryId(): Promise<string | null> {
+  return (await prisma.costCategory.findFirst({ where: { code: 'LAB' }, select: { id: true } }))?.id ?? null;
+}
+
+/**
+ * Who sets or corrects where overtime is charged (2026-11-13, the owner's
+ * call: "the one who prepared reports to will be the one who will allocate or
+ * correct the project, sales order or quotation"): the employee's superior
+ * ("Reports to"), whoever decides or decided its approval, Edit All, or a
+ * super admin — never the employee alone. Not on a cancelled or rejected one.
+ */
+async function mayAllocateOvertime(me: ResolvedUser, ot: { id: string; employeeId: string; stage: OtStage }): Promise<boolean> {
+  if (ot.stage === 'CANCELLED' || ot.stage === 'REJECTED') return false;
+  if (me.isSuperAdmin || can(me, 'ghr.overtime.edit_all')) return true;
+  if (await isDirectReport(me.id, ot.employeeId)) return true;
+  return isApproverOf(me.id, ['overtime_prior', 'overtime_request'], ot.id);
+}
+
+const allocateSchema = z.object({
+  jobId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
+  quotationId: z.string().optional().nullable(),
+});
+
+/**
+ * Where the overtime is charged, set or corrected by the superior — a
+ * project (with its budget line, Labor unless named), a sales order or a
+ * quotation for reference, or nothing. At most one. On an APPROVED filing
+ * the cost it posted is reversed (a negative INCURRED row, the ledger is a
+ * history) and posted again at the new project, at the amount approved; a
+ * sales order or quotation posts nothing. One audit row naming the change.
+ */
+overtimeRoutes.post(
+  '/:id/allocate',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(allocateSchema, req.body);
+    const ot = await prisma.overtimeRequest.findUnique({
+      where: { id: req.params.id },
+      include: { employee: true, job: { select: { number: true } }, salesOrder: { select: { number: true } }, quotation: { select: { number: true } } },
+    });
+    if (!ot) throw notFound('Overtime request not found');
+    if (!(await mayAllocateOvertime(me, ot))) {
+      throw forbidden(ot.stage === 'CANCELLED' || ot.stage === 'REJECTED' ? 'A cancelled or rejected filing charges nothing' : 'Only the employee’s superior, its approver or HR sets where overtime is charged');
+    }
+    const jobId = body.jobId || null;
+    const salesOrderId = body.salesOrderId || null;
+    const quotationId = body.quotationId || null;
+    if ([jobId, salesOrderId, quotationId].filter(Boolean).length > 1) throw badRequest('Charge it to one place: a project, a sales order or a quotation');
+    const costCategoryId = jobId ? body.costCategoryId || (await laborCategoryId()) : null;
+    await checkCharge(jobId, costCategoryId, ot.jobId);
+    if (jobId && !costCategoryId) throw badRequest('Choose the budget line');
+    if (salesOrderId) {
+      const so = await prisma.salesOrder.findUnique({ where: { id: salesOrderId }, select: { status: true } });
+      if (!so) throw badRequest('That sales order does not exist');
+      if (so.status === 'CANCELLED') throw badRequest('That sales order is cancelled');
+    }
+    if (quotationId && !(await prisma.quotation.findUnique({ where: { id: quotationId }, select: { id: true } }))) {
+      throw badRequest('That quotation does not exist');
+    }
+
+    const describe = (x: { job?: string | null; so?: string | null; qt?: string | null }) =>
+      x.job ? `project ${x.job}` : x.so ? `sales order ${x.so}` : x.qt ? `quotation ${x.qt}` : 'nothing';
+    const before = describe({ job: ot.job?.number, so: ot.salesOrder?.number, qt: ot.quotation?.number });
+    const [newJob, newSo, newQt] = await Promise.all([
+      jobId ? prisma.job.findUnique({ where: { id: jobId }, select: { number: true } }) : null,
+      salesOrderId ? prisma.salesOrder.findUnique({ where: { id: salesOrderId }, select: { number: true } }) : null,
+      quotationId ? prisma.quotation.findUnique({ where: { id: quotationId }, select: { number: true } }) : null,
+    ]);
+    const after = describe({ job: newJob?.number, so: newSo?.number, qt: newQt?.number });
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.overtimeRequest.updateMany({
+        where: { id: ot.id, stage: ot.stage, updatedAt: ot.updatedAt },
+        data: {
+          jobId,
+          costCategoryId,
+          salesOrderId,
+          quotationId,
+          allocatedById: me.id,
+          allocatedAt: new Date(),
+          ...(ot.stage === 'APPROVED' ? { postedAt: jobId ? new Date() : null } : {}),
+        },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (ot.stage !== 'APPROVED') return;
+      // What it stands charged with now, reversed; then posted at the new project.
+      const posted = await tx.jobCostEntry.groupBy({
+        by: ['jobId', 'costCategoryId'],
+        where: { sourceType: 'overtime_request', sourceId: ot.id, state: 'INCURRED' },
+        _sum: { amount: true },
+      });
+      for (const row of posted) {
+        const net = row._sum.amount == null ? 0 : num(row._sum.amount);
+        if (Math.abs(net) < 0.005) continue;
+        await postJobCost(tx, {
+          jobId: row.jobId,
+          costCategoryId: row.costCategoryId,
+          state: 'INCURRED',
+          amount: -net,
+          sourceType: 'overtime_request',
+          sourceId: ot.id,
+          sourceNumber: ot.number,
+          description: `${ot.number} moved by ${me.name} — overtime cost reversed here`,
+          createdById: me.id,
+        });
+      }
+      const amount = ot.amount == null ? 0 : num(ot.amount);
+      if (jobId && costCategoryId && amount > 0) {
+        await postJobCost(tx, {
+          jobId,
+          costCategoryId,
+          state: 'INCURRED',
+          amount,
+          sourceType: 'overtime_request',
+          sourceId: ot.id,
+          sourceNumber: ot.number,
+          description: `${ot.employee.firstName} ${ot.employee.lastName} — ${num(ot.actualHours)}h overtime (allocated by ${me.name})`,
+          createdById: me.id,
+        });
+      }
+    });
+    await audit(
+      { entityType: 'overtime_request', entityId: ot.id, action: 'UPDATED', summary: `${ot.number} charged to ${after} (was ${before}) — set by ${me.name}` },
+      req,
+    );
+    res.json({ ok: true, chargedTo: after });
+  }),
+);
 
 /** Preview the hours a prior filing would claim, before it is filed. */
 overtimeRoutes.post(

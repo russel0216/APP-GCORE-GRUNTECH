@@ -16,7 +16,7 @@ import {
   forbidden,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
 import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } from '../shared/accounts';
@@ -274,6 +274,42 @@ userRoutes.get(
   from everybody who can read projects). Super admins are not added — a role
   is a job, not a right.
 */
+/**
+ * The people on the two charts, read-only (2026-11-13: the Organizational and
+ * Hierarchy Charts in G-HR, for every employee): each active login's name,
+ * title, roles with their level, team, picture and "Reports to" — what the
+ * chart draws and nothing else (no email, number, phone or rights). Admin ›
+ * Users' readers read it too. Declared above `/:id`.
+ */
+userRoutes.get(
+  '/org-chart',
+  requireAny('admin.users.view_all', 'admin.users.view_own', 'ghr.org_chart.view_all', 'ghr.hierarchy_chart.view_all'),
+  handler(async (_req, res) => {
+    const rows = await prisma.user.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        name: true,
+        position: true,
+        isActive: true,
+        photoPath: true,
+        supervisor: { select: { id: true, name: true } },
+        roles: { select: { role: { select: { key: true, name: true, rank: true, sortOrder: true } } } },
+        employee: { select: { industry: { select: { id: true, code: true, name: true } } } },
+      },
+      orderBy: { name: 'asc' },
+    });
+    res.json({
+      rows: rows.map(({ employee, roles, ...r }) => ({
+        ...r,
+        roles: roles.map((x) => x.role),
+        title: titleFromRoles(roles.map((x) => x.role)),
+        team: employee?.industry ?? null,
+      })),
+    });
+  }),
+);
+
 userRoutes.get(
   '/lookup',
   handler(async (req, res) => {
@@ -1047,7 +1083,7 @@ roleRoutes.put(
 /** The roles for the Organizational Chart (Admin › Users' right, not Roles'). */
 roleRoutes.get(
   '/chart',
-  requireView('admin', 'users'),
+  requireAny('admin.users.view_all', 'admin.users.view_own', 'ghr.org_chart.view_all', 'ghr.hierarchy_chart.view_all'),
   handler(async (_req, res) => {
     const roles = await prisma.role.findMany({
       select: { id: true, key: true, name: true, rank: true, sortOrder: true, reportsToRoleId: true, alsoReportsToRoleIds: true },

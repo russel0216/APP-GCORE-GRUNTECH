@@ -19,7 +19,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
-import { deleteAttachment } from '../shared/attachments';
+import { deleteAttachment, deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
 import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, editScope } from '../shared/ownScope';
@@ -978,6 +978,7 @@ employeeRoutes.delete(
     // record that no longer exists — nor the account picture cut from one.
     const samples = await prisma.faceEnrollment.findMany({ where: { employeeId: employee.id }, select: { id: true } });
     await prisma.employee.delete({ where: { id: req.params.id } });
+    await deleteAttachmentsOf('employee_201', [req.params.id]);
     await dropAccountPhotoFromSamples(
       employee.userId,
       samples.map((s) => s.id),
@@ -1004,4 +1005,22 @@ employeeRoutes.delete(
     );
     res.json({ ok: true });
   }),
+);
+
+/**
+ * The 201 file's documents (2026-11-13, the owner's call: "Employees 201
+ * File, attachment can be uploaded by HR Officer or HR Manager"; his answer:
+ * HR and the employee see them). Attachments on `employee_201`, the
+ * employee's id: HR — Employees › Manage All, which the HR Officer and HR
+ * Manager roles carry — uploads, reads and removes; the employee's own login
+ * reads them on My Records; nobody else.
+ */
+const HR_201 = 'ghr.employees.edit_all';
+registerAttachmentGuard(
+  'employee_201',
+  async (user, employeeId) => {
+    if (can(user, HR_201)) return true;
+    return !!(await prisma.employee.findFirst({ where: { id: employeeId, userId: user.id }, select: { id: true } }));
+  },
+  { write: async (user) => user.isSuperAdmin || can(user, HR_201) },
 );

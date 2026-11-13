@@ -45,6 +45,8 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   { key: 'assets', from: 'ghr.employees.edit_all', to: ['ghr.assets.view_all', 'ghr.assets.create', 'ghr.assets.edit_all'] },
   // …and everyone who reads their own records reads the property issued to them.
   { key: 'assets-own', from: 'ghr.my_records.view_own', to: ['ghr.assets.view_own'] },
+  // The two charts in G-HR (2026-11-13): every employee reads them.
+  { key: 'org-charts', from: 'ghr.my_records.view_own', to: ['ghr.org_chart.view_all', 'ghr.hierarchy_chart.view_all'] },
   // G-HR › Hiring (2026-10-21): HR runs it — whoever edits every employee
   // record gets every Hiring box; anyone may raise their own Man Power
   // Request (the hiring manager), so those holding My Records get its own pair.

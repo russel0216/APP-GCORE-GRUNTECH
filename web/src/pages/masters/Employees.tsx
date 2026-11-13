@@ -14,6 +14,7 @@ import { EmployeeAssets } from '../hr/Assets';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
+import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
 
 /** The BIR tax status codes — the API's `TAX_STATUSES` (shared/records.ts). */
@@ -427,7 +428,7 @@ export function Employees() {
   );
 }
 
-type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow' | 'memos' | 'assets';
+type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow' | 'memos' | 'assets' | 'file201';
 
 /**
  * Which door a new person comes in by (2026-10-10, the owner's call: "unite
@@ -558,6 +559,8 @@ function EmployeeForm({
   const seeMemos = !!employee && can('ghr.memos.view_all');
   // The company property issued to this person, and what they returned (2026-10-21).
   const seeAssets = !!employee && can('ghr.assets.view_all');
+  // The 201 file's documents (2026-11-13): HR — Employees › Manage All.
+  const see201 = !!employee && can('ghr.employees.edit_all');
   // The samples the clock matches this person against: HR's to look at and
   // remove (a blurred one, or someone else's); they are only ever ADDED by
   // the person on the Clock page.
@@ -1015,6 +1018,11 @@ function EmployeeForm({
               Assets
             </button>
           )}
+          {see201 && (
+            <button className={tab === 'file201' ? 'active' : ''} onClick={() => setTab('file201')}>
+              201 File
+            </button>
+          )}
           {seeFaces && (
             <button className={tab === 'face' ? 'active' : ''} onClick={() => setTab('face')}>
               Face samples
@@ -1337,6 +1345,15 @@ function EmployeeForm({
       {tab === 'flow' && seeFlow && employee && <EmployeeFlowTab employeeId={employee.id} />}
       {tab === 'memos' && seeMemos && employee && <MemosReceived employeeId={employee.id} />}
       {tab === 'assets' && seeAssets && employee && <EmployeeAssets employeeId={employee.id} />}
+      {tab === 'file201' && see201 && employee && (
+        <Attachments
+          entityType="employee_201"
+          entityId={employee.id}
+          title="201 File documents"
+          hint="Contract, IDs, certificates, clearances — HR uploads and removes; the employee sees them on My Records"
+          canEdit={can('ghr.employees.edit_all')}
+        />
+      )}
 
       {tab === 'evaluations' && seeEvaluations && employee && (
         <EmployeeEvaluationsTab

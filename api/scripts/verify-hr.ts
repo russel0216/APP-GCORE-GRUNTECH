@@ -1679,6 +1679,34 @@ async function main() {
     return row?.state === 'INCURRED';
   })()));
 
+  // Where it is charged is the superior's to set or correct (2026-11-13, the
+  // owner's call): the employee alone may not; taken off the project the
+  // cost is reversed, put back it posts again at the approved amount, the
+  // budget line Labor when none is named.
+  {
+    const supTok = signToken(supervisor.id, supervisor.email);
+    const workTok = signToken(worker.id, worker.email);
+    const byEmployee = await api(workTok, 'POST', `/overtime/${ot.id}/allocate`, {});
+    const off = await api(supTok, 'POST', `/overtime/${ot.id}/allocate`, {});
+    const offLedger = await ledger();
+    const back = await api(supTok, 'POST', `/overtime/${ot.id}/allocate`, { jobId: job.id });
+    const backLedger = await ledger();
+    const after = await prisma.overtimeRequest.findUnique({ where: { id: ot.id } });
+    const lab = await prisma.costCategory.findFirst({ where: { code: 'LAB' }, select: { id: true } });
+    check(
+      'the superior sets where approved overtime is charged: off the project the cost is reversed, back on it posts again at the approved amount, Labor by default — never the employee alone',
+      byEmployee.status === 403 &&
+        off.status === 200 &&
+        money(offLedger.total, 0) &&
+        back.status === 200 &&
+        money(backLedger.total, expected) &&
+        after?.jobId === job.id &&
+        after?.costCategoryId === (lab?.id ?? null) &&
+        after?.allocatedById === supervisor.id,
+      `${byEmployee.status} ${off.status} ${offLedger.total} ${back.status} ${backLedger.total} ${after?.costCategoryId}`,
+    );
+  }
+
   // A second overtime, rejected by HR after the supervisor approved.
   const ot2 = await prisma.overtimeRequest.create({
     data: {
@@ -1712,7 +1740,8 @@ async function main() {
   check('an HR rejection after a supervisor approval rejects the whole thing', rejected?.stage === 'REJECTED');
   check(
     'a rejection at the last step posts no cost',
-    rejectedLedger.count === 1,
+    // Counted on this filing alone: the first one's rows include its allocation's reversal and repost.
+    (await prisma.jobCostEntry.count({ where: { sourceType: 'overtime_request', sourceId: ot2.id } })) === 0 && rejectedLedger.count >= 1,
     `${rejectedLedger.count} entries — the rejected one should not have added a second`,
   );
 
@@ -5309,6 +5338,11 @@ async function main() {
       kPaper.status === 200 && /EMPLOYMENT CONTRACT/i.test(flat(kPaper.text)) && flat(kPaper.text).includes('55,000.00') && flat(kPaper.text).includes('Cara CEO') && /Signature over printed name/.test(flat(kPaper.text)),
     );
     check('signed, it is recorded on a day that has come', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/signed`, { signedOn: '2099-01-01' })).status === 400);
+    // The scan signed by both parties first (2026-11-13), in its own card.
+    const unsigned = await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/signed`, {});
+    check('it is not marked signed before the scan signed by both parties is uploaded', unsigned.status === 400 && String(unsigned.body.error ?? '').includes('signed by both parties'), `${unsigned.status} ${JSON.stringify(unsigned.body).slice(0, 120)}`);
+    const scan = await apiForm(T(hr1), `/attachments/employment_contract_signed/${contractId}`, Buffer.from('signed contract scan'), {}, 'files');
+    check('the signed scan is uploaded under Signed contract while the contract is approved', scan.status === 201 || scan.status === 200, `${scan.status} ${JSON.stringify(scan.body).slice(0, 120)}`);
     check('recorded as signed', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/signed`, {})).body.status === 'SIGNED');
 
     // The hire: the employee record is made through the one employee form; this links it.
@@ -5316,6 +5350,9 @@ async function main() {
     const hire = await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/hire`, { employeeId: hired.id });
     const arisAfter = await prisma.candidate.findUnique({ where: { id: arisId } });
     check('the hire marks the candidate Hired, linked to the record', hire.status === 200 && arisAfter?.status === 'HIRED' && arisAfter.employeeId === hired.id);
+    // The signed scan is filed in the new employee's 201 (2026-11-13); the employee sees it, a stranger does not.
+    const in201 = await prisma.attachment.count({ where: { entityType: 'employee_201', entityId: hired.id } });
+    check('the hire files the signed contract in the employee’s 201 file', in201 === 1, String(in201));
     check('the request is filled once its headcount is hired', (await prisma.manpowerRequest.findUnique({ where: { id: mprId } }))?.status === 'FILLED');
     check('a candidate is hired once', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/hire`, { employeeId: hired.id })).status === 409);
     check('a contract someone was hired on is kept', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/cancel`, { reason: 'Second thoughts' })).status === 400);
@@ -5418,6 +5455,25 @@ async function main() {
       check('a login with no employee record is told so, not refused', (await api(signToken(recBoss.id, recBoss.email), 'GET', '/my-records')).body.employee === null);
       check('without My Records the page is refused', (await api(signToken(recNobody.id, recNobody.email), 'GET', '/my-records')).status === 403);
       check('a cutoff that is not one is a 400', (await api(recT, 'GET', '/my-records?cutoff=2026-09')).status === 400);
+      // The days to explain (2026-11-13): the last sixty days through the same rule.
+      const issues = await api(recT, 'GET', '/my-records/issues?days=120');
+      const iRows = (issues.body.rows ?? []) as { date: string; issues: string[]; lateMinutes: number; appeal: unknown }[];
+      const late17 = iRows.find((r) => r.date === '2026-09-17');
+      check(
+        'My attendance issues lists the late day with its minutes and the absences, newest first, none with an appeal yet; a punctual day is not listed',
+        issues.status === 200 &&
+          !!late17 && late17.issues.includes('LATE') && late17.lateMinutes === 20 && late17.appeal === null &&
+          iRows.some((r) => r.issues.includes('ABSENT')) &&
+          !iRows.some((r) => r.date === '2026-09-16') &&
+          iRows.length > 1 && iRows[0].date > iRows[iRows.length - 1].date,
+        `${issues.status} ${iRows.length} rows; 17th ${JSON.stringify(late17)}`,
+      );
+      check('a login with no employee record gets no issues, not a refusal', (await api(signToken(recBoss.id, recBoss.email), 'GET', '/my-records/issues')).body.employee === false);
+      // The 201 file's documents (2026-11-13): the person reads their own, never a colleague's, and uploads none.
+      const own201 = await api(recT, 'GET', `/attachments/employee_201/${recEmp.id}`);
+      const peer201 = await api(signToken(recPeer.id, recPeer.email), 'GET', `/attachments/employee_201/${recEmp.id}`);
+      const upload201 = await apiForm(recT, `/attachments/employee_201/${recEmp.id}`, Buffer.from('my own id'), {}, 'files');
+      check('the 201 file documents are read by the person, never by a colleague, and only HR uploads them', own201.status === 200 && [403, 404].includes(peer201.status) && upload201.status === 403, `${own201.status} ${peer201.status} ${upload201.status}`);
     }
   }
 

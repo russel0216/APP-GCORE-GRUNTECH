@@ -61,6 +61,8 @@ hiringRoutes.use(authenticate);
 const MPR = 'manpower_request';
 const CANDIDATE = 'candidate';
 const CONTRACT = 'employment_contract';
+/** The scanned contract signed by both parties. */
+const SIGNED_CONTRACT = 'employment_contract_signed';
 const EXAM = 'entrance_exam';
 export const MPR_LINK = (id: string) => `/g-hr/hiring/mpr/${id}`;
 export const CANDIDATE_LINK = (id: string) => `/g-hr/hiring/candidates/${id}`;
@@ -1355,6 +1357,7 @@ hiringRoutes.delete(
     if (!['DRAFT', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft or a cancelled contract can be deleted — pull it back to draft first');
     await deleteOrRefuse(row.number, () => prisma.employmentContract.delete({ where: { id: row.id } }));
     await deleteAttachmentsOf(CONTRACT, [row.id]);
+    await deleteAttachmentsOf(SIGNED_CONTRACT, [row.id]);
     await audit({ entityType: CONTRACT, entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number}` }, req);
     res.json({ ok: true });
   }),
@@ -1371,6 +1374,11 @@ hiringRoutes.post(
     if (!mayEditContract(me, row)) throw forbidden('Only the person who prepared this contract records its signing');
     const on = body.signedOn ?? today();
     if (on > today()) throw badRequest('It is signed on a day that has come');
+    // The scan signed by both parties first (2026-11-13, the owner's call:
+    // "contract can be uploaded wet signature agreed by both parties").
+    if (!(await prisma.attachment.count({ where: { entityType: SIGNED_CONTRACT, entityId: row.id } }))) {
+      throw badRequest('Upload the scanned contract signed by both parties first, under "Signed contract"');
+    }
     const claimed = await prisma.employmentContract.updateMany({ where: { id: row.id, status: 'APPROVED' }, data: { status: 'SIGNED', signedOn: dayOf(on) } });
     if (!claimed.count) throw badRequest(`${row.number} is ${statusLabel(row.status).toLowerCase()} — only an approved contract is signed`);
     await audit({ entityType: CONTRACT, entityId: row.id, action: 'COMPLETED', summary: `${row.number} signed by ${nameOf(row.candidate)} on ${on}` }, req);
@@ -1409,6 +1417,10 @@ hiringRoutes.post(
       return false;
     });
     await copyAttachments({ entityType: CONTRACT, entityId: row.id }, { entityType: 'employee', entityId: employee.id }, `From contract ${row.number}`, me.id).catch((err) => console.error('[hiring] contract files not copied', err));
+    // The signed contract goes into the new employee's 201 file (2026-11-13).
+    await copyAttachments({ entityType: SIGNED_CONTRACT, entityId: row.id }, { entityType: 'employee_201', entityId: employee.id }, `Signed contract ${row.number}`, me.id).catch((err) =>
+      console.error('[hiring] signed contract not filed in the 201', err),
+    );
     await audit({ entityType: CANDIDATE, entityId: row.candidateId, action: 'COMPLETED', summary: `${nameOf(row.candidate)} hired on ${row.number} as ${employee.firstName} ${employee.lastName}` }, req);
     if (filled) await audit({ entityType: MPR, entityId: row.candidate.mpr.id, action: 'COMPLETED', summary: `${row.candidate.mpr.number} filled — ${row.candidate.mpr.headcount} hired` }, req);
     res.json(await presentContract(me, await loadContract(me, row.id), true));
@@ -1533,6 +1545,26 @@ registerAttachmentGuard(
     write: async (user, id) => {
       const row = await prisma.employmentContract.findUnique({ where: { id }, select: { preparedById: true } });
       return !!row && mayEditContract(user, row);
+    },
+  },
+);
+
+/**
+ * The contract as signed by both parties (2026-11-13): its own card, so a
+ * draft's files never pass for the signed copy. Read as the contract is;
+ * written by whoever may change the contract while it is APPROVED (before
+ * "Mark signed"). Required by `/signed`, filed in the 201 at the hire.
+ */
+registerAttachmentGuard(
+  SIGNED_CONTRACT,
+  async (user, id) => {
+    const row = await prisma.employmentContract.findUnique({ where: { id }, select: { id: true, preparedById: true } });
+    return !!row && (await mayReadContract(user, row));
+  },
+  {
+    write: async (user, id) => {
+      const row = await prisma.employmentContract.findUnique({ where: { id }, select: { preparedById: true, status: true } });
+      return !!row && row.status === 'APPROVED' && mayEditContract(user, row);
     },
   },
 );

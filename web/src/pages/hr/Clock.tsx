@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { frameSharpness, scoringSize, sharpestIndex } from '../../lib/frameSharpness';
 import { ErrorBox, Field, Loading, StatusBadge, formatDateTime, formatTime, useToast } from '../../components/ui';
 import { FaceSamplesPanel } from './FaceSamples';
+import { AttendanceIssues } from './AttendanceIssues';
 import { ATTENDANCE_TONES } from './Dashboard';
 
 /**
@@ -859,6 +860,8 @@ export function Clock() {
               <p className="muted hraud-flush">Nothing recorded yet today.</p>
             )}
           </div>
+
+          <AttendanceIssues />
 
           <div className="card">
             <div className="panel-head">

@@ -83,6 +83,7 @@ import { HrReports } from './pages/hr/Reports';
 import { Plantilla } from './pages/hr/Plantilla';
 import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
 import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
+import { OrgChartPage, HierarchyChartPage } from './pages/hr/Charts';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -1182,6 +1183,22 @@ function Routed() {
           element={
             <Guard permission="ghr.plantilla.view_all">
               <Plantilla />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/org-chart"
+          element={
+            <Guard permission="ghr.org_chart.view_all">
+              <OrgChartPage />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/hierarchy-chart"
+          element={
+            <Guard permission="ghr.hierarchy_chart.view_all">
+              <HierarchyChartPage />
             </Guard>
           }
         />

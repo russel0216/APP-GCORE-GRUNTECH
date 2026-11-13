@@ -436,8 +436,8 @@ export function PriorModal({
       </Field>
 
       <Field
-        label="Charge which project?"
-        hint="Leave empty for overtime that belongs to no job — it is still approved, but nothing is charged"
+        label="Charge which project? (optional)"
+        hint="Leave it empty if you are not sure — the person you report to sets or corrects it: a project, a sales order or a quotation"
       >
         <select
           value={form.jobId}
@@ -453,12 +453,12 @@ export function PriorModal({
       </Field>
 
       {form.jobId && (
-        <Field label="Against which budget line?">
+        <Field label="Against which budget line? (optional)" hint="Labor unless another is chosen">
           <select
             value={form.costCategoryId}
             onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
           >
-            <option value="">— choose —</option>
+            <option value="">— Labor —</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
@@ -486,6 +486,12 @@ type OtDetail = OtRow & {
   canWithdraw: boolean;
   /** The viewer's own filing; `rate` is always the employee's, whoever reads it. */
   own: boolean;
+  /** POST /overtime/:id/allocate — the superior, an approver of it, or Edit All. */
+  canAllocate: boolean;
+  salesOrder: { id: string; number: string } | null;
+  quotation: { id: string; number: string; subject: string | null } | null;
+  allocatedBy: { id: string; name: string } | null;
+  allocatedAt: string | null;
 };
 
 /** What the actual-hours form starts on: the hours just pulled back, to change. */
@@ -504,6 +510,7 @@ export function OvertimeDetail() {
   const [filingActual, setFilingActual] = useState(false);
   const [prefill, setPrefill] = useState<ActualPrefill | null>(null);
   const [modifying, setModifying] = useState(false);
+  const [allocating, setAllocating] = useState(false);
   const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
@@ -727,7 +734,35 @@ export function OvertimeDetail() {
       </div>
 
       <div className="card">
-        <h3 className="card-title">What it costs the project</h3>
+        <div className="card-head">
+          <h3 className="card-title">Charged to</h3>
+          {row.canAllocate && !allocating && (
+            <button type="button" className="btn btn-sm" onClick={() => setAllocating(true)}>
+              {row.job || row.salesOrder || row.quotation ? 'Correct' : 'Set where it is charged'}
+            </button>
+          )}
+        </div>
+        {allocating && <AllocatePanel row={row} onClose={() => setAllocating(false)} onSaved={() => { setAllocating(false); void load(); }} />}
+        {row.allocatedBy && (
+          <p className="faint hraud-flush">
+            Set by {row.allocatedBy.name}
+            {row.allocatedAt ? ` on ${formatDate(row.allocatedAt)}` : ''}.
+          </p>
+        )}
+        {!row.job && (row.salesOrder || row.quotation) && (
+          <dl className="kv">
+            <dt>{row.salesOrder ? 'Sales order' : 'Quotation'}</dt>
+            <dd>
+              {row.salesOrder ? (
+                <Link to={`/g-ops/sales-orders/${row.salesOrder.id}`} className="mono">{row.salesOrder.number}</Link>
+              ) : (
+                <Link to={`/g-ops/quotations/${row.quotation!.id}`} className="mono">{row.quotation!.number}</Link>
+              )}
+            </dd>
+            <dt>Cost</dt>
+            <dd className="faint">Kept for reference — only a project carries a cost ledger. Move it to the project once there is one.</dd>
+          </dl>
+        )}
         {row.job ? (
           <dl className="kv">
             <dt>Project</dt>
@@ -763,10 +798,11 @@ export function OvertimeDetail() {
             <dd>{row.postedAt ? formatDate(row.postedAt) : <span className="faint">not posted</span>}</dd>
           </dl>
         ) : (
-          <p className="muted hraud-flush">
-            No project chosen, so nothing is charged to a budget. The hours are still approved for
-            payroll.
-          </p>
+          !(row.salesOrder || row.quotation) && (
+            <p className="muted hraud-flush">
+              Not charged anywhere yet — the person {row.own ? 'you report' : `${row.employee.firstName} reports`} to sets it. The hours are still approved for payroll either way.
+            </p>
+          )
         )}
         {row.rate?.missingRate && (
           <div className="alert warn hraud-after hraud-flush">
@@ -799,6 +835,104 @@ export function OvertimeDetail() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Where the overtime is charged, set or corrected by the superior (2026-11-13,
+ * the owner's call): a project with its budget line, a sales order or a
+ * quotation, or nothing — in the card, never a dialog. On an approved filing
+ * the cost moves with it.
+ */
+function AllocatePanel({ row, onClose, onSaved }: { row: OtDetail; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  type Opt = { id: string; number: string; name: string };
+  const [opts, setOpts] = useState<{ jobs: Opt[]; categories: { id: string; name: string; code: string }[]; salesOrders: Opt[]; quotations: Opt[] } | null>(null);
+  const [kind, setKind] = useState<'job' | 'salesOrder' | 'quotation' | 'none'>(row.job ? 'job' : row.salesOrder ? 'salesOrder' : row.quotation ? 'quotation' : 'job');
+  const [pick, setPick] = useState(row.job?.id ?? row.salesOrder?.id ?? row.quotation?.id ?? '');
+  const [category, setCategory] = useState(row.costCategory?.id ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    api.get<NonNullable<typeof opts>>('/overtime/allocation-options').then(setOpts).catch(setError);
+  }, []);
+  const list = !opts ? [] : kind === 'job' ? opts.jobs : kind === 'salesOrder' ? opts.salesOrders : kind === 'quotation' ? opts.quotations : [];
+  // The current one stays offered though it is no longer in the list.
+  const current = kind === 'job' ? row.job : kind === 'salesOrder' && row.salesOrder ? { ...row.salesOrder, name: '' } : kind === 'quotation' && row.quotation ? { id: row.quotation.id, number: row.quotation.number, name: row.quotation.subject ?? '' } : null;
+  const shown = current && !list.some((o) => o.id === current.id) ? [current, ...list] : list;
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post<{ chargedTo: string }>(`/overtime/${row.id}/allocate`, {
+        jobId: kind === 'job' ? pick || null : null,
+        costCategoryId: kind === 'job' ? category || null : null,
+        salesOrderId: kind === 'salesOrder' ? pick || null : null,
+        quotationId: kind === 'quotation' ? pick || null : null,
+      });
+      toast('ok', `Charged to ${r.chargedTo}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="prq-panel stack">
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Charge it to">
+          <select
+            value={kind}
+            onChange={(e) => {
+              setKind(e.target.value as typeof kind);
+              setPick('');
+            }}
+          >
+            <option value="job">A project</option>
+            <option value="salesOrder">A sales order (reference only)</option>
+            <option value="quotation">A quotation (reference only)</option>
+            <option value="none">Nothing</option>
+          </select>
+        </Field>
+        {kind !== 'none' && (
+          <Field label={kind === 'job' ? 'Project' : kind === 'salesOrder' ? 'Sales order' : 'Quotation'}>
+            <select value={pick} onChange={(e) => setPick(e.target.value)} disabled={!opts}>
+              <option value="">— choose —</option>
+              {shown.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.number}
+                  {o.name ? ` — ${o.name}` : ''}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {kind === 'job' && (
+          <Field label="Budget line" hint="Labor unless another is chosen">
+            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">— Labor —</option>
+              {(opts?.categories ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+      </div>
+      {row.stage === 'APPROVED' && (
+        <p className="faint">It is approved: the cost already posted is reversed and posted again where you put it. A sales order or a quotation posts nothing.</p>
+      )}
+      <div className="row">
+        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary btn-sm" onClick={() => void save()} disabled={busy || (kind !== 'none' && !pick)}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
     </div>
   );
 }

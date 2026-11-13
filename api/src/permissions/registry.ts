@@ -344,7 +344,7 @@ export const REGISTRY: ModuleDef[] = [
       // supervisor, then HR, decide it, and approval writes the day's row.
       // Own is one's own requests; a superior reads their direct reports'.
       {
-        key: 'attendance_corrections', group: 'My day', label: 'Attendance Corrections', path: '/g-hr/attendance-corrections',
+        key: 'attendance_corrections', group: 'My day', label: 'Time Appeals', path: '/g-hr/attendance-corrections',
         actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'], phase: 10,
         note: 'Create asks for one\'s own; Edit All files and changes anyone\'s (HR); a superior and the approvers read them without a right',
       },
@@ -388,6 +388,11 @@ export const REGISTRY: ModuleDef[] = [
       // reads their own; a supervisor with the dashboard right their direct
       // reports' — shared/peopleFlow.ts.
       { key: 'people_flow', own: 'your own path', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
+      // The two charts, read-only, in G-HR (2026-11-13, the owner's call: "the
+      // Hierarchy Chart and Organizational Chart can be viewed by HR in G-HR";
+      // his answer: every employee). Admin › Users keeps the editable ones.
+      { key: 'org_chart', group: 'People', label: 'Organizational Chart', path: '/g-hr/org-chart', actions: ['view_all'], phase: 10 },
+      { key: 'hierarchy_chart', group: 'People', label: 'Hierarchy Chart', path: '/g-hr/hierarchy-chart', actions: ['view_all'], phase: 10 },
       { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_KEPT, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
       // Turnover of accountabilities before someone leaves, cleared by the area
       // that owns each item and signed off through the approval engine. The

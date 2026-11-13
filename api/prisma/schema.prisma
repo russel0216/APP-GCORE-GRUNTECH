@@ -191,6 +191,7 @@ model User {
 
   @@index([isActive])
   @@index([supervisorId])
+  overtimeAllocated OvertimeRequest[] @relation("OvertimeAllocatedBy")
 }
 
 enum AccountTokenPurpose {
@@ -1643,6 +1644,7 @@ model Quotation {
   @@index([ownerId])
   @@index([outcome])
   @@index([teamId])
+  overtime OvertimeRequest[]
 }
 
 model QuotationRevision {
@@ -1783,6 +1785,7 @@ model SalesOrder {
   @@index([customerId])
   @@index([ownerId])
   @@index([status])
+  overtime OvertimeRequest[]
 }
 
 enum SalesOrderStatus {
@@ -4016,6 +4019,18 @@ model OvertimeRequest {
   job            Job?          @relation(fields: [jobId], references: [id], onDelete: SetNull)
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+  /// Or a deal named for reference (2026-11-13, the owner's call: "the one who
+  /// prepared reports to will allocate or correct the project, sales order or
+  /// quotation"). Only a PROJECT carries a cost ledger, so these post nothing;
+  /// the overtime can be moved to the project later.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation(fields: [salesOrderId], references: [id], onDelete: SetNull)
+  quotationId  String?
+  quotation    Quotation?  @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  /// Who last set or corrected where it is charged, and when.
+  allocatedById String?
+  allocatedBy   User?     @relation("OvertimeAllocatedBy", fields: [allocatedById], references: [id], onDelete: SetNull)
+  allocatedAt   DateTime?
 
   /// Snapshotted at posting so a later rate change does not rewrite history.
   hourlyRate Decimal? @db.Decimal(14, 4)

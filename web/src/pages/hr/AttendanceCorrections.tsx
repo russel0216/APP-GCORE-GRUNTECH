@@ -88,7 +88,7 @@ function CorrectionList() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Attendance Corrections</h1>
+          <h1>Time Appeals</h1>
         </div>
       </div>
       <DataList<Row>
