@@ -1416,6 +1416,12 @@ model Costing {
   assignedBy     User?     @relation("CostingAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
   assignedAt     DateTime?
   assignmentNote String?
+  /// The PART of the work this costing prices, where a lead's costing was
+  /// handed to several people (2026-11-13, the owner's call: the Technical
+  /// Manager costs the site deployment, a project engineer the controller or
+  /// pump skid) — "Site deployment", "Controller fabrication". Null on a
+  /// costing that covers the whole enquiry.
+  assignedPart   String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -134,7 +134,7 @@ async function cleanup() {
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.costingTemplate.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { code: { startsWith: TAG } } });
-  await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
+  await prisma.costing.deleteMany({ where: { title: { contains: TAG } } });
   await prisma.supplier.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -432,6 +432,71 @@ async function main() {
   );
   const estimatorSees = await api(tEstimator, 'GET', `/costings/${made?.id}`);
   check('the assignee can open and own it', estimatorSees.status === 200 && estimatorSees.body.canEdit === true, `status ${estimatorSees.status}`);
+  // Several people, each their own part (2026-11-13): one costing a row, titled
+  // with its part; with more than one, every row names its part.
+  {
+    const before = await prisma.costing.count({ where: { leadId: sellersLead.id } });
+    const noPart = await api(tSeller, 'POST', '/costings/assign', {
+      leadId: sellersLead.id,
+      assignees: [{ assigneeId: estimator.id, part: 'Site deployment' }, { assigneeId: estimator.id }],
+    });
+    const twice = await api(tSeller, 'POST', '/costings/assign', {
+      leadId: sellersLead.id,
+      assignees: [
+        { assigneeId: estimator.id, part: 'Site deployment' },
+        { assigneeId: estimator.id, part: ' site  Deployment ' },
+      ],
+    });
+    const oneCannot = await api(tSeller, 'POST', '/costings/assign', {
+      leadId: sellersLead.id,
+      assignees: [
+        { assigneeId: estimator.id, part: 'Site deployment' },
+        { assigneeId: reader.id, part: 'Controller fabrication' },
+      ],
+    });
+    const afterRefusals = await prisma.costing.count({ where: { leadId: sellersLead.id } });
+    check(
+      'several people need a part each, never the same person twice for one part, and one who cannot cost refuses them all — nothing is made',
+      noPart.status === 400 && /part/i.test(String(noPart.body.error)) && twice.status === 400 && oneCannot.status === 400 &&
+        String(oneCannot.body.error ?? '').includes(reader.name) && afterRefusals === before,
+      `${noPart.status} ${twice.status} ${oneCannot.status} ${before}→${afterRefusals}`,
+    );
+    const split = await api(tSeller, 'POST', '/costings/assign', {
+      leadId: sellersLead.id,
+      assignees: [
+        { assigneeId: estimator.id, part: 'Site deployment', note: 'Two days on site' },
+        { assigneeId: estimator.id, part: 'Controller fabrication' },
+      ],
+    });
+    const parts = rows(split.body.costings);
+    const splitRows = await prisma.costing.findMany({ where: { id: { in: parts.map((p) => String(p.id)) } }, orderBy: { number: 'asc' } });
+    check(
+      'two parts make two draft costings, each in its person’s name, numbered apart and titled with its part',
+      split.status === 201 && parts.length === 2 && splitRows.length === 2 && splitRows[0].number !== splitRows[1].number &&
+        splitRows.every((c) => c.status === 'DRAFT' && c.ownerId === estimator.id && c.leadId === sellersLead.id && c.assignedById === seller.id) &&
+        splitRows.some((c) => c.assignedPart === 'Site deployment' && c.title.startsWith('Site deployment — ') && c.assignmentNote === 'Two days on site') &&
+        splitRows.some((c) => c.assignedPart === 'Controller fabrication' && c.title.startsWith('Controller fabrication — ')),
+      `${split.status} ${JSON.stringify(splitRows.map((c) => [c.number, c.title, c.assignedPart]))}`,
+    );
+    const toldParts = await prisma.notification.findMany({ where: { userId: estimator.id, link: { in: splitRows.map((c) => `/g-ops/costing/${c.id}`) } } });
+    check(
+      'each is told, and told who costs the other part',
+      toldParts.length === 2 && toldParts.every((n) => /also costing this lead/.test(n.body ?? '')),
+      JSON.stringify(toldParts.map((n) => n.body)),
+    );
+    const pageAfter = await api(tSeller, 'GET', `/leads/${sellersLead.id}`);
+    const listed = async (extra: string) => await api(tSeller, 'GET', `/leads?scope=all&pageSize=100&search=${encodeURIComponent(`${TAG} assigned lead`)}${extra}`);
+    const [working, quoted, bogus] = [await listed('&working=yes'), await listed('&working=no'), await listed('&working=maybe')];
+    const row = rows(working.body.rows).find((r) => r.id === sellersLead.id);
+    check(
+      'the lead page names each costing’s part; the list shows who is costing it, and keeps a lead with no quotation among those still being worked',
+      rows(pageAfter.body.costings).filter((c) => c.assignedPart).length === 2 && !!row && rows(row.costingBrief).length === before + 2 &&
+        rows(row.costingBrief).some((c) => c.part === 'Controller fabrication' && c.owner === estimator.name) &&
+        !rows(quoted.body.rows).some((r) => r.id === sellersLead.id) && bogus.status === 400,
+      `${working.status} ${JSON.stringify(row?.costingBrief)} ${quoted.status} ${bogus.status}`,
+    );
+  }
+
   await prisma.lead.update({ where: { id: sellersLead.id }, data: { status: 'LOST', lostReason: 'verify' } });
   const onLost = await api(tSeller, 'POST', '/costings/assign', { leadId: sellersLead.id, assigneeId: estimator.id });
   check('a lost lead takes no new costing', onLost.status === 400, `status ${onLost.status}`);
@@ -553,7 +618,7 @@ async function main() {
     return { ...paper, line, flat: squash(line) };
   };
   const printedMine = await prisma.costing.findMany({
-    where: { ownerId: estimator.id, title: { startsWith: TAG } },
+    where: { ownerId: estimator.id, title: { contains: TAG } },
     select: { id: true, number: true, title: true, contractValue: true, status: true },
   });
   const listedTotal = Number((await api(tEstimator, 'GET', `/costings?search=${encodeURIComponent(TAG)}&scope=all`)).body.total);

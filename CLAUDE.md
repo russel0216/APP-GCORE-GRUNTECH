@@ -2995,6 +2995,29 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   The lead page lists each costing with whose it is and who assigned it,
   when; the costing page shows "Assigned by". The picker is
   `/users/lookup?holding=gops.costing.create`.
+- **A lead's costing is handed to SEVERAL people, each their part**
+  (2026-11-13, the owner's call: the Technical Manager costs the site
+  deployment, a project engineer the controller or pump skid). `POST
+  /costings/assign` takes `assignees: [{ assigneeId, part?, note? }]` (1–8;
+  the old single `assigneeId` + `note` still works): ONE draft costing per
+  row in that person's name, `Costing.assignedPart` kept and leading the
+  title ("Site deployment — <company> — <enquiry>"), each person told —
+  and told who costs the other parts — each audited. With more than one row
+  every row names its part (a 400 naming the row), the same person twice
+  for one part is refused, and one person who cannot cost refuses them all
+  before a number is taken. Each costing goes through the costing route on
+  its own; the quotation and the project are built from them together (the
+  entry below). `AssignCostingPanel` is rows with "+ Add another person";
+  the lead page names each costing's part.
+- **The Leads list opens on leads still being worked** (2026-11-13, the
+  owner's call: "if a quotation is already created it should be removed
+  from the list"): the declared filter `working=yes|no` (no quotation yet /
+  has one; an unknown value a 400), `defaultFilters` adds `working: 'yes'`
+  beside the year — a bare visit only, so the pipeline's "Open as list" and
+  every filtered link still list all. Rows carry `costingBrief` (who costs
+  it, each part, its status) for the **Costing** column; a lead with no
+  estimate reads "not estimated", and the Estimated value card says how
+  many (`summary.unestimated`). The number stays on one line (`.nowrap`).
 - **A quotation or a project may come from SEVERAL costings** (2026-10-19,
   the owner's call: "sometimes there will be 2 costings to generate the
   quotation or project"). The first stays on the record's own `costingId`

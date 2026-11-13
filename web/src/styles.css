@@ -1830,6 +1830,23 @@ table.data td.num {
   text-align: right;
 }
 
+/* A document number stays on one line: broken across two it doubles the row. */
+.nowrap {
+  white-space: nowrap;
+}
+
+/* "Assign costing": a row a person — who, their part, a note — with Remove under it. */
+.assign-row {
+  align-items: start;
+  margin-bottom: var(--s-3);
+}
+
+.assign-row-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+
 table.data th.sortable {
   cursor: pointer;
   user-select: none;

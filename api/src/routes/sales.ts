@@ -212,6 +212,11 @@ export function leadListWhere(
   if (f.assignedToId) and.push({ assignedToId: f.assignedToId });
   if (f.createdById) and.push({ createdById: f.createdById });
   if (f.source) and.push({ source: f.source });
+  // What the list opens on (2026-11-13, the owner's call: "if a quotation is
+  // already created it should be removed from the list"): the leads still
+  // being worked. One with a quotation is followed under Quotations.
+  const working = choice(f.working, { yes: 'yes', no: 'no' }, 'Stage of work', (v) => (v === 'yes' ? 'Still being worked' : 'Has a quotation'));
+  if (working) and.push({ quotations: working === 'yes' ? { none: {} } : { some: {} } });
   // `clientId`, not `customerId`: the leads page's ?customerId= is the
   // "new lead for this customer" hand-off, and a list must never eat it.
   if (f.clientId) and.push({ customerId: f.clientId });
@@ -283,7 +288,9 @@ export async function leadListSummary(
   const tabs = leadStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
   // A card per team (2026-10-09): the set split by the lead's owner's team, at the estimated value.
   const teams = await teamShares(valued.map((l) => ({ team: l.assignedTo.employee?.industry ?? null, cents: Math.round(num(l.estimatedValue) * 100) })));
-  return { tabs, tabCounts, ...valueOf(valued), teams, ...(teamRows ? { team: valueOf(teamRows) } : {}) };
+  // Leads carrying no estimate yet: the value cards understate by them, and say so.
+  const unestimated = valued.filter((l) => num(l.estimatedValue) <= 0).length;
+  return { tabs, tabCounts, ...valueOf(valued), unestimated, teams, ...(teamRows ? { team: valueOf(teamRows) } : {}) };
 }
 
 const LEAD_SORTS = ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt', 'probability'];
@@ -307,6 +314,11 @@ leadRoutes.get(
           createdBy: { select: { id: true, name: true } },
           customer: { select: { id: true, name: true } },
           _count: { select: { quotations: true } },
+          // Who is costing it, each their part, and how far each has got.
+          costings: {
+            select: { id: true, number: true, status: true, assignedPart: true, owner: { select: { id: true, name: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
         },
         orderBy: orderBy(q, LEAD_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
@@ -323,6 +335,7 @@ leadRoutes.get(
           return {
             ...presentLead(r as unknown as Record<string, unknown>),
             quotationCount: r._count.quotations,
+            costingBrief: r.costings.map((c) => ({ id: c.id, number: c.number, status: c.status, part: c.assignedPart, owner: c.owner?.name ?? null })),
             stage,
             stageLabel: cancelledLabel(stages.find((st) => st.key === stage)?.label ?? null, r.lostKind),
             // What the mass actions plan with; the PATCH still decides.
@@ -381,6 +394,7 @@ leadRoutes.get(
       adder,
       customer,
       f.source ? `came via ${f.source}` : null,
+      f.working === 'yes' ? 'still being worked (no quotation yet)' : f.working === 'no' ? 'with a quotation' : null,
       rangeNamed('added', f.createdFrom, f.createdTo),
       rangeNamed('closing', f.closingFrom, f.closingTo),
       scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all')),
@@ -609,6 +623,7 @@ leadRoutes.get(
             assignedBy: { select: { id: true, name: true } },
             assignedAt: true,
             assignmentNote: true,
+            assignedPart: true,
           },
           orderBy: { createdAt: 'desc' },
         },

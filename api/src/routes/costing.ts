@@ -1454,8 +1454,25 @@ costingRoutes.post(
  */
 const assignSchema = z.object({
   leadId: z.string().min(1),
-  assigneeId: z.string().min(1, 'Choose who will do the costing'),
+  /** One person, the whole enquiry — the shape before 2026-11-13, still taken. */
+  assigneeId: z.string().min(1, 'Choose who will do the costing').optional(),
   note: z.string().trim().max(2000).optional().nullable(),
+  /**
+   * Several people, each their own part (2026-11-13, the owner's call:
+   * "assigned costing can be assigned to multiple persons"): one costing
+   * each, in their own name. With more than one, every row names its part.
+   */
+  assignees: z
+    .array(
+      z.object({
+        assigneeId: z.string().min(1, 'Choose who will do the costing'),
+        part: z.string().trim().max(80).optional().nullable(),
+        note: z.string().trim().max(2000).optional().nullable(),
+      }),
+    )
+    .min(1)
+    .max(8, 'Eight parts at most on one assignment')
+    .optional(),
 });
 
 costingRoutes.post(
@@ -1464,8 +1481,20 @@ costingRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(assignSchema, req.body);
+    const asked = body.assignees ?? (body.assigneeId ? [{ assigneeId: body.assigneeId, part: null, note: body.note ?? null }] : []);
+    if (!asked.length) throw badRequest('Choose who will do the costing');
+    if (asked.length > 1) {
+      const missing = asked.findIndex((a) => !a.part?.trim());
+      if (missing >= 0) throw badRequest(`Row ${missing + 1}: say which part of the work they cost — with several people, each costing names its part`);
+      const seen = new Set<string>();
+      for (const a of asked) {
+        const key = `${a.assigneeId}|${a.part!.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+        if (seen.has(key)) throw badRequest('The same person is listed twice for the same part');
+        seen.add(key);
+      }
+    }
 
-    const { costing, leadMoved, lead } = await prisma.$transaction(async (tx) => {
+    const { made, leadMoved, lead } = await prisma.$transaction(async (tx) => {
       // Everything that can be refused is refused before the number is taken.
       const lead = await tx.lead.findUnique({
         where: { id: body.leadId },
@@ -1476,56 +1505,78 @@ costingRoutes.post(
         throw forbidden('This lead is assigned to someone else');
       }
       if (lead.status === 'WON' || lead.status === 'LOST') throw badRequest(`This lead is ${lead.status.toLowerCase()} — there is nothing to cost`);
-      const assignee = await resolveUser(body.assigneeId);
-      if (!assignee) throw badRequest('That person is not an active user');
-      if (!can(assignee, 'gops.costing.create')) throw badRequest(`${assignee.name} cannot make costings — pick someone who does`);
+      // Every person is checked before the first number is taken.
+      const people: { id: string; name: string }[] = [];
+      for (const a of asked) {
+        const assignee = await resolveUser(a.assigneeId);
+        if (!assignee) throw badRequest('That person is not an active user');
+        if (!can(assignee, 'gops.costing.create')) throw badRequest(`${assignee.name} cannot make costings — pick someone who does`);
+        people.push({ id: assignee.id, name: assignee.name });
+      }
 
       const company = await tx.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
       const what = (lead.description ?? '').split('\n')[0].trim();
-      const title = (what ? `${lead.companyName} — ${what}` : lead.companyName).slice(0, 200);
+      const base = what ? `${lead.companyName} — ${what}` : lead.companyName;
 
-      const number = await nextNumber('costing', tx);
-      const created = await tx.costing.create({
-        data: {
-          number,
-          title,
-          customerId: lead.customerId,
-          siteId: lead.siteId,
-          leadId: lead.id,
-          ownerId: assignee.id,
-          vatRate: d(company ? Number(company.vatRate) : 0.12),
-          assignedById: me.id,
-          assignedAt: new Date(),
-          assignmentNote: body.note || null,
-        },
-      });
+      const made: { id: string; number: string; title: string; ownerId: string; ownerName: string; assignmentNote: string | null; assignedPart: string | null }[] = [];
+      const at = new Date();
+      for (const [i, a] of asked.entries()) {
+        const part = a.part?.trim() || null;
+        // The part leads where there is one, so two costings of one lead read apart in any list.
+        const title = (part ? `${part} — ${base}` : base).slice(0, 200);
+        const number = await nextNumber('costing', tx);
+        const created = await tx.costing.create({
+          data: {
+            number,
+            title,
+            customerId: lead.customerId,
+            siteId: lead.siteId,
+            leadId: lead.id,
+            ownerId: people[i].id,
+            vatRate: d(company ? Number(company.vatRate) : 0.12),
+            assignedById: me.id,
+            assignedAt: at,
+            assignmentNote: a.note || null,
+            assignedPart: part,
+          },
+        });
+        made.push({ id: created.id, number: created.number, title: created.title, ownerId: created.ownerId, ownerName: people[i].name, assignmentNote: created.assignmentNote, assignedPart: part });
+      }
       let moved = false;
       if (LEAD_STAGES_BEFORE_COSTING.has(lead.status)) {
         await tx.lead.update({ where: { id: lead.id }, data: { status: 'COSTING' } });
         moved = true;
       }
-      return { costing: created, leadMoved: moved, lead };
+      return { made, leadMoved: moved, lead };
     });
 
-    if (costing.ownerId !== me.id) {
-      await notify({
-        userId: costing.ownerId,
-        type: 'system',
-        title: `Costing assigned to you: ${costing.title}`,
-        body: `${costing.number} · from ${me.name}${costing.assignmentNote ? ` — ${costing.assignmentNote}` : ''}`,
-        link: `/g-ops/costing/${costing.id}`,
-      });
+    const others = (id: string) => made.filter((m) => m.id !== id).map((m) => `${m.assignedPart ?? 'the rest'} — ${m.ownerName}`);
+    for (const costing of made) {
+      if (costing.ownerId !== me.id) {
+        await notify({
+          userId: costing.ownerId,
+          type: 'system',
+          title: `Costing assigned to you: ${costing.title}`,
+          body: `${costing.number} · from ${me.name}${costing.assignmentNote ? ` — ${costing.assignmentNote}` : ''}${
+            made.length > 1 ? ` · also costing this lead: ${others(costing.id).join('; ')}` : ''
+          }`,
+          link: `/g-ops/costing/${costing.id}`,
+        });
+      }
+      await audit(
+        {
+          entityType: 'costing',
+          entityId: costing.id,
+          action: 'CREATED',
+          summary: `Assigned costing ${costing.number} — ${costing.title} — to ${costing.ownerId === me.id ? 'themselves' : costing.ownerName} from lead ${lead.number}${
+            made.length > 1 ? ` (one of ${made.length} parts)` : ''
+          }`,
+          after: { ownerId: costing.ownerId, leadId: lead.id, assignmentNote: costing.assignmentNote, assignedPart: costing.assignedPart },
+        },
+        req,
+      );
     }
-    await audit(
-      {
-        entityType: 'costing',
-        entityId: costing.id,
-        action: 'CREATED',
-        summary: `Assigned costing ${costing.number} — ${costing.title} — to ${costing.ownerId === me.id ? 'themselves' : (await prisma.user.findUnique({ where: { id: costing.ownerId }, select: { name: true } }))?.name} from lead ${lead.number}`,
-        after: { ownerId: costing.ownerId, leadId: lead.id, assignmentNote: costing.assignmentNote },
-      },
-      req,
-    );
+    const costing = made[0];
     if (leadMoved) {
       await audit(
         {
@@ -1537,7 +1588,12 @@ costingRoutes.post(
         req,
       );
     }
-    res.status(201).json({ id: costing.id, number: costing.number, ownerId: costing.ownerId });
+    res.status(201).json({
+      id: costing.id,
+      number: costing.number,
+      ownerId: costing.ownerId,
+      costings: made.map((m) => ({ id: m.id, number: m.number, ownerId: m.ownerId, owner: m.ownerName, part: m.assignedPart })),
+    });
   }),
 );
 

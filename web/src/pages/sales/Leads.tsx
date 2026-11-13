@@ -207,6 +207,8 @@ interface LeadRow {
   createdBy: { id: string; name: string } | null;
   customer: { id: string; name: string } | null;
   quotationCount?: number;
+  /** Who is costing it — each their part — and how far each has got (2026-11-13). */
+  costingBrief?: { id: string; number: string; status: string; part: string | null; owner: string | null }[];
   createdAt: string;
   /** The pipeline stage its status stands in, and the stage's name — the server's `leadStage`. */
   stage?: string;
@@ -233,6 +235,8 @@ interface LeadSummary {
   team?: { count: number; value: number; weighted: number };
   /** The set split by the owner's team — a card per team. */
   teams?: TeamShare[];
+  /** Leads in the set with no estimate yet — the value cards understate by them. */
+  unestimated?: number;
 }
 
 // ── Mass actions: Change status, Assign to ──────────────────────────────────
@@ -438,7 +442,7 @@ export function Leads() {
   const mayEdit = can('gops.leads.edit_own') || can('gops.leads.edit_all');
 
   const columns: Column<LeadRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '130px', render: (l) => <span className="mono">{l.number}</span> },
+    { key: 'number', label: 'Number', sortKey: 'number', width: '170px', render: (l) => <span className="mono nowrap">{l.number}</span> },
     {
       key: 'company',
       label: 'Company',
@@ -465,7 +469,8 @@ export function Leads() {
       label: 'Est. value',
       sortKey: 'estimatedValue',
       align: 'right',
-      render: (l) => (l.estimatedValue == null ? '—' : <span className="mono">{formatMoney(l.estimatedValue)}</span>),
+      // No estimate is said, never printed as ₱0.00 — a zero reads as a figure.
+      render: (l) => (l.estimatedValue ? <span className="mono">{formatMoney(l.estimatedValue)}</span> : <span className="faint">not estimated</span>),
     },
     { key: 'probability', label: 'Prob.', sortKey: 'probability', align: 'right', render: (l) => `${l.probability}%` },
     {
@@ -473,14 +478,36 @@ export function Leads() {
       label: 'Weighted',
       align: 'right',
       render: (l) =>
-        l.estimatedValue == null ? (
-          '—'
+        !l.estimatedValue ? (
+          <span className="faint">—</span>
         ) : (
           <span className="mono faint">{formatMoney((l.estimatedValue * l.probability) / 100)}</span>
         ),
       optional: true,
     },
     { key: 'assignedTo', label: 'Owner', render: (l) => l.assignedTo.name },
+    {
+      key: 'costing',
+      label: 'Costing',
+      render: (l) => {
+        const rows = l.costingBrief ?? [];
+        if (!rows.length) return <span className="faint">—</span>;
+        const final = rows.filter((c) => c.status === 'FINAL').length;
+        return (
+          <div>
+            {rows.map((c) => (
+              <div key={c.id}>
+                {c.owner ?? '—'}
+                {c.part ? <span className="faint"> · {c.part}</span> : null}
+              </div>
+            ))}
+            <div className="faint">
+              {final} of {rows.length} final
+            </div>
+          </div>
+        );
+      },
+    },
     {
       key: 'createdBy',
       label: 'Added by',
@@ -516,6 +543,16 @@ export function Leads() {
 
   const personOptions = people.map((p) => ({ value: p.id, label: p.name }));
   const leadFilters: FilterDef[] = [
+    // What the list opens on (2026-11-13): the leads still being worked. Once
+    // a quotation exists the deal is followed under Quotations.
+    {
+      key: 'working',
+      label: 'Quotation',
+      options: [
+        { value: 'yes', label: 'Still being worked — no quotation yet' },
+        { value: 'no', label: 'Has a quotation' },
+      ],
+    },
     { key: 'stage', label: 'Stage', options: LEAD_STAGE_TABS },
     { key: 'status', label: 'Status', options: LEAD_STATUSES },
     { key: 'assignedToId', label: 'Owner', options: personOptions },
@@ -555,7 +592,7 @@ export function Leads() {
       <DataList<LeadRow>
         listKey="leads"
         // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
-        defaultFilters={{ createdFrom: yearStartKey(new Date()) }}
+        defaultFilters={{ createdFrom: yearStartKey(new Date()), working: 'yes' }}
         endpoint="/leads"
         columns={columns}
         rowKey={(l) => l.id}
@@ -578,7 +615,12 @@ export function Leads() {
           return (
             <>
               <Stat label="Leads" value={total} sub={noTeamNote(sum.teams)} />
-              <Stat label="Estimated value" value={formatMoney(sum.value ?? 0)} figure />
+              <Stat
+                label="Estimated value"
+                value={formatMoney(sum.value ?? 0)}
+                figure
+                sub={sum.unestimated ? `${sum.unestimated} lead${sum.unestimated === 1 ? '' : 's'} not estimated yet` : undefined}
+              />
               <Stat label="Weighted" value={formatMoney(sum.weighted ?? 0)} figure />
               {teamCards(sum.teams, formatMoney, 'lead')}
             </>
@@ -822,11 +864,13 @@ export function LeadDetail() {
           onCancel={() => setAssigning(false)}
           onAssigned={async (made) => {
             setAssigning(false);
-            if (made.ownerId === me?.user.id) {
+            // One costing, and it is yours: straight to its sheet. Several: the
+            // lead lists them, each with its part.
+            if (made.costings.length === 1 && made.ownerId === me?.user.id) {
               navigate(`/g-ops/costing/${made.id}/edit`);
               return;
             }
-            toast('ok', `Costing ${made.number} assigned`);
+            toast('ok', made.costings.length === 1 ? `Costing ${made.number} assigned` : `${made.costings.length} costings assigned — ${made.costings.map((c) => c.number).join(', ')}`);
             await load();
           }}
         />
@@ -932,7 +976,10 @@ export function LeadDetail() {
                   <Link to={`/g-ops/costing/${c.id}`} className="mono">
                     {c.number}
                   </Link>
-                  <span className="sales-linked-title">{c.title}</span>
+                  <span className="sales-linked-title">
+                    {c.assignedPart ? <strong>{c.assignedPart} — </strong> : null}
+                    {c.assignedPart && c.title.startsWith(`${c.assignedPart} — `) ? c.title.slice(c.assignedPart.length + 3) : c.title}
+                  </span>
                   <span className="mono">{formatMoney(c.contractValue)}</span>
                   <StatusBadge status={c.status} extra={{ FINAL: 'ok' }} />
                   <span className="sales-linked-meta faint">
@@ -1042,14 +1089,30 @@ interface LeadDetailRow extends LeadRow {
     assignedBy: { id: string; name: string } | null;
     assignedAt: string | null;
     assignmentNote: string | null;
+    /** The part of the work this costing prices, where the lead's costing was split. */
+    assignedPart?: string | null;
   }[];
 }
 
 /**
  * "Assign costing", in the page — no dialog. The people offered are those who
- * may make a costing (`/users/lookup?holding=gops.costing.create`); the costing
- * is created in the chosen person's name, and they are told.
+ * may make a costing (`/users/lookup?holding=gops.costing.create`).
+ *
+ * Several people, each their own part (2026-11-13, the owner's call: the
+ * Technical Manager costs the site deployment while a project engineer costs
+ * the controller or pump skid): a row a person, "+ Add another person", and
+ * ONE costing made per row in that person's name, titled with its part. With
+ * one row the part is optional — the costing covers the whole enquiry.
  */
+interface AssignMade {
+  id: string;
+  number: string;
+  ownerId: string;
+  costings: { id: string; number: string; ownerId: string; owner: string; part: string | null }[];
+}
+
+const PART_IDEAS = ['Site deployment', 'Installation', 'Controller fabrication', 'Pump skid fabrication', 'Testing and commissioning'];
+
 function AssignCostingPanel({
   leadId,
   onCancel,
@@ -1057,33 +1120,36 @@ function AssignCostingPanel({
 }: {
   leadId: string;
   onCancel: () => void;
-  onAssigned: (made: { id: string; number: string; ownerId: string }) => void | Promise<void>;
+  onAssigned: (made: AssignMade) => void | Promise<void>;
 }) {
   const { me } = useAuth();
   const [people, setPeople] = useState<PersonRow[] | null>(null);
-  const [assigneeId, setAssigneeId] = useState('');
-  const [note, setNote] = useState('');
+  const [rows, setRows] = useState([{ assigneeId: '', part: '', note: '' }]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
     loadPersonRows('gops.costing.create')
-      .then((rows) => {
-        setPeople(rows);
+      .then((list) => {
+        setPeople(list);
         // Yourself first when you can cost; otherwise nobody is picked for you.
-        if (rows.some((p) => p.id === me?.user.id)) setAssigneeId(me!.user.id);
+        if (list.some((p) => p.id === me?.user.id)) setRows((r) => (r.length === 1 && !r[0].assigneeId ? [{ ...r[0], assigneeId: me!.user.id }] : r));
       })
       .catch(setError);
   }, [me]);
 
+  const several = rows.length > 1;
+  const setRow = (i: number, patch: Partial<(typeof rows)[number]>) => setRows((r) => r.map((row, n) => (n === i ? { ...row, ...patch } : row)));
+  const ready = rows.every((r) => r.assigneeId && (!several || r.part.trim()));
+
   async function assign() {
-    if (!assigneeId) return;
+    if (!ready) return;
     setBusy(true);
+    setError(null);
     try {
-      const made = await api.post<{ id: string; number: string; ownerId: string }>('/costings/assign', {
+      const made = await api.post<AssignMade>('/costings/assign', {
         leadId,
-        assigneeId,
-        note: note.trim() || null,
+        assignees: rows.map((r) => ({ assigneeId: r.assigneeId, part: r.part.trim() || null, note: r.note.trim() || null })),
       });
       await onAssigned(made);
     } catch (err) {
@@ -1093,14 +1159,18 @@ function AssignCostingPanel({
     }
   }
 
+  const options = (people ?? []).map((p) => (p.id === me?.user.id ? { ...p, name: `${p.name} (me)` } : p));
+  const mineOnly = !several && rows[0].assigneeId === me?.user.id;
+
   return (
     <section id="assign-costing" className="card sales-card-gap" aria-labelledby="assign-costing-title">
       <h3 id="assign-costing-title" className="card-title">
         Assign costing
       </h3>
       <p className="faint">
-        A draft costing is made in their name from this lead — its customer, site and enquiry — and they are
-        notified. Pick yourself to start it now.
+        A draft costing is made in each person&rsquo;s name from this lead — its customer, site and enquiry — and they are notified.
+        Where the work is split, add a person for each part: every part is its own costing, and the quotation is built from them
+        together.
       </p>
       <ErrorBox error={error} />
       {people === null ? (
@@ -1108,29 +1178,54 @@ function AssignCostingPanel({
       ) : people.length === 0 ? (
         <p className="faint">Nobody can make costings yet. An administrator gives that right in Roles.</p>
       ) : (
-        <div className="grid grid-2">
-          <Field label="Who will cost it" required htmlFor="assign-costing-who">
-            <PersonSelect
-              id="assign-costing-who"
-              value={assigneeId}
-              onChange={setAssigneeId}
-              people={people.map((p) => (p.id === me?.user.id ? { ...p, name: `${p.name} (me)` } : p))}
-              placeholder="Choose…"
-              required
-            />
-          </Field>
-          <Field label="Note" hint="What to price, what the customer said, when you need it">
-            <textarea rows={3} value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
-          </Field>
-        </div>
+        <>
+          <datalist id="assign-costing-parts">
+            {PART_IDEAS.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
+          {rows.map((r, i) => (
+            <div key={i} className="grid grid-3 assign-row">
+              <Field label={several ? `Person ${i + 1}` : 'Who will cost it'} required htmlFor={`assign-costing-who-${i}`}>
+                <PersonSelect id={`assign-costing-who-${i}`} value={r.assigneeId} onChange={(v) => setRow(i, { assigneeId: v })} people={options} placeholder="Choose…" required />
+              </Field>
+              <Field label="Their part of the work" required={several} hint={several ? undefined : 'Optional — leave empty when one costing covers it all'}>
+                <input
+                  list="assign-costing-parts"
+                  value={r.part}
+                  maxLength={80}
+                  placeholder="e.g. Site deployment"
+                  onChange={(e) => setRow(i, { part: e.target.value })}
+                />
+              </Field>
+              <Field label="Note" hint={i === 0 ? 'What to price, what the customer said, when you need it' : undefined}>
+                <textarea rows={2} value={r.note} maxLength={2000} onChange={(e) => setRow(i, { note: e.target.value })} />
+              </Field>
+              {several && (
+                <div className="assign-row-foot">
+                  <button type="button" className="btn btn-sm" onClick={() => setRows((all) => all.filter((_, n) => n !== i))} disabled={busy}>
+                    Remove
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+          {rows.length < 8 && (
+            <div>
+              <button type="button" className="btn btn-sm" onClick={() => setRows((all) => [...all, { assigneeId: '', part: '', note: '' }])} disabled={busy}>
+                + Add another person
+              </button>
+            </div>
+          )}
+        </>
       )}
       {/* [Cancel] [Assign], right — the order every form's foot keeps. */}
       <div className="panel-foot">
         <button type="button" className="btn btn-sm" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="btn btn-sm btn-primary" disabled={!assigneeId || busy} onClick={assign}>
-          {busy ? 'Assigning…' : assigneeId && assigneeId === me?.user.id ? 'Start costing' : 'Assign'}
+        <button type="button" className="btn btn-sm btn-primary" disabled={!ready || busy} onClick={assign}>
+          {busy ? 'Assigning…' : mineOnly ? 'Start costing' : several ? `Assign ${rows.length} costings` : 'Assign'}
         </button>
       </div>
     </section>
