@@ -63,7 +63,7 @@ export function FlowPicture({ input, mode, title, subtitle, fileName }: { input:
         <p className="faint">Nothing booked in this period.</p>
       ) : (
         <svg ref={ref} xmlns="http://www.w3.org/2000/svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label={title}>
-          <rect x={0} y={0} width={W} height={H} fill="#FFFFFF" />
+          <rect data-paper="" x={0} y={0} width={W} height={H} fill="#FFFFFF" />
           <text x={40} y={52} fontFamily={FONT} fontSize={26} fontWeight={700} fill={PURPLE}>
             {title}
           </text>
@@ -222,9 +222,16 @@ function Down({ input }: { input: SankeyInput }) {
   );
 }
 
-/** Draws the SVG onto a canvas at twice its size and saves it as a PNG. */
+/**
+ * Draws the SVG onto a canvas at twice its size and saves it as a PNG with a
+ * TRANSPARENT background (2026-11-13, the owner's report: "the file is not
+ * transparent"): the white sheet behind the picture on screen is left out of
+ * the saved copy, so it sits on a slide of any colour.
+ */
 async function savePng(svg: SVGSVGElement, fileName: string): Promise<void> {
-  const text = new XMLSerializer().serializeToString(svg);
+  const copy = svg.cloneNode(true) as SVGSVGElement;
+  copy.querySelectorAll('[data-paper]').forEach((n) => n.remove());
+  const text = new XMLSerializer().serializeToString(copy);
   const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml;charset=utf-8' }));
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -238,8 +245,6 @@ async function savePng(svg: SVGSVGElement, fileName: string): Promise<void> {
     canvas.height = H * 2;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('No canvas');
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('No picture');
