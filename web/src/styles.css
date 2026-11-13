@@ -1836,9 +1836,18 @@ table.data td.num {
 }
 
 /* "Assign costing": a row a person — who, their part, a note — with Remove under it. */
+/* Three columns across the whole panel, the note twice as wide (2026-11-14):
+   `.grid-3`'s auto-fit made six tracks on a wide panel and filled three. */
 .assign-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr);
   align-items: start;
   margin-bottom: var(--s-3);
+}
+
+@media (max-width: 720px) {
+  .assign-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .assign-row-foot {
