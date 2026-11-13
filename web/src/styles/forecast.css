@@ -1,10 +1,29 @@
 /* The Forecast (2026-10-08): open quotations by expected closing date, by period. Tokens only. */
 
+/* The controls take the whole line in even columns (2026-11-13, the owner's
+   call: "maximize the width"): no ragged gap at the right, and each picker is
+   as wide as its column. */
 .forecast .fc-controls {
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--s-8) * 4), 1fr));
+  align-items: end;
   gap: var(--s-3);
   margin-bottom: var(--block-gap);
-  flex-wrap: wrap;
+}
+
+.forecast .fc-control > input,
+.forecast .fc-control > select,
+.forecast .fc-control .tick-picker,
+.forecast .fc-control .tick-picker > button {
+  width: 100%;
+}
+
+.forecast .fc-periods tfoot tr.fc-pastdue td {
+  color: var(--warn);
+}
+
+.forecast .fc-group-head .btn {
+  margin-left: auto;
 }
 
 .forecast .fc-control {

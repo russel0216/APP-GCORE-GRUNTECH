@@ -198,9 +198,17 @@ export function Forecast() {
   const [data, setData] = useState<ForecastData | null>(null);
   const [error, setError] = useState<unknown>(null);
 
-  // Mine for whoever may edit quotations, All for a reader — the quotation list's rule.
-  const defaultScope: Scope = can('gops.quotations.edit_own') || can('gops.quotations.edit_all') ? 'mine' : 'all';
+  // Where it opens (2026-11-13, the audit: a manager who owns no quotation
+  // opened on an empty "Mine"): All for whoever reads everybody's quotations,
+  // the Team for a team's reader, Mine for a salesperson.
   const hasTeam = !!me?.user.team;
+  const defaultScope: Scope = can('gops.quotations.view_all')
+    ? 'all'
+    : hasTeam && can('gops.quotations.view_team')
+      ? 'team'
+      : can('gops.quotations.edit_own') || can('gops.quotations.edit_all')
+        ? 'mine'
+        : 'all';
 
   const periodParam = params.get('period');
   const period: Period = isPeriod(periodParam) ? periodParam : 'month';
@@ -454,6 +462,11 @@ export function Forecast() {
   );
 }
 
+/** Rows a period's group shows before "Show all". */
+const LIST_TOP = 10;
+/** The odds a new quotation starts with (a lead's, else 50 — `POST /quotations`). */
+const DEFAULT_ODDS = 50;
+
 function ForecastBody({
   data,
   scope,
@@ -482,6 +495,21 @@ function ForecastBody({
   const cmp = data.compare;
   const prevWord = cmp ? (cmp.mode === 'prev-year' ? 'last year' : cmp.mode === 'prev-period' ? 'before' : 'compared') : '';
   const cols = 5 + (cmp ? 2 : 0);
+  // The list under the tables (2026-11-13: it printed all 268 and the page ran
+  // to 25 screens): a period shows its first ten, the past-due group none,
+  // until asked. Of this visit only.
+  const [shown, setShown] = useState<Record<string, 'all' | 'top' | 'none'>>({});
+  const showing = (key: string) => shown[key] ?? (key === 'earlier' ? 'none' : 'top');
+  // A new quotation starts at 50% unless somebody says otherwise, so the
+  // weighted figure is only as good as the odds typed: say how many still
+  // carry the starting figure.
+  const everyRow = groups.flatMap((g) => g.group.rows);
+  const atDefault = everyRow.filter((r) => r.kind !== 'lead' && r.probability === DEFAULT_ODDS).length;
+  const dayBefore = (day: string) => {
+    const d = parseDay(day);
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
 
   return (
     <>
@@ -504,7 +532,9 @@ function ForecastBody({
           sub={
             cmp
               ? compareSub(cmp.inWindow.previous.weighted, { amount: cmp.inWindow.change.weighted, pct: cmp.inWindow.change.weightedPct }, prevWord)
-              : "at each quotation's own odds"
+              : atDefault > 0
+                ? `at each quotation's own odds — ${atDefault} of ${everyRow.length} still at the starting ${DEFAULT_ODDS}%`
+                : "at each quotation's own odds"
           }
         />
         <Stat
@@ -602,6 +632,18 @@ function ForecastBody({
               ))}
             </tbody>
             <tfoot>
+              {data.earlier.count > 0 && (
+                <tr className="fc-pastdue">
+                  <td className="fc-period">
+                    <Link to={listLink(undefined, dayBefore(data.from))}>Past closing date</Link>
+                    <span className="fc-past"> · before {formatDate(parseDay(data.from))}, still open</span>
+                  </td>
+                  <td className="right mono">{data.earlier.count}</td>
+                  <td className="right mono">{formatMoney(data.earlier.value)}</td>
+                  <td className="right mono">{formatMoney(data.earlier.weighted)}</td>
+                  <td colSpan={cols - 4} />
+                </tr>
+              )}
               <tr>
                 <td className="fc-period">
                   In the window
@@ -627,14 +669,13 @@ function ForecastBody({
                   </td>
                 )}
               </tr>
-              {(data.earlier.count > 0 || data.later.count > 0 || data.undated.count > 0) && (
+              {(data.later.count > 0 || data.undated.count > 0) && (
                 <tr className="fc-outside">
                   <td className="fc-period">
-                    Outside it
+                    After it, or undated
                     <span className="faint">
                       {' '}
                       — {[
-                        data.earlier.count ? `${data.earlier.count} earlier` : null,
                         data.later.count ? `${data.later.count} later` : null,
                         data.undated.count ? `${data.undated.count} undated` : null,
                       ]
@@ -642,12 +683,19 @@ function ForecastBody({
                         .join(', ')}
                     </span>
                   </td>
-                  <td className="right mono">{data.totals.count - data.inWindow.count}</td>
-                  <td className="right mono">{formatMoney(data.totals.value - data.inWindow.value)}</td>
-                  <td className="right mono">{formatMoney(data.totals.weighted - data.inWindow.weighted)}</td>
+                  <td className="right mono">{data.later.count + data.undated.count}</td>
+                  <td className="right mono">{formatMoney(data.later.value + data.undated.value)}</td>
+                  <td className="right mono">{formatMoney(data.later.weighted + data.undated.weighted)}</td>
                   <td colSpan={cols - 4} />
                 </tr>
               )}
+              <tr className="fc-everything">
+                <td className="fc-period">Everything open</td>
+                <td className="right mono">{data.totals.count}</td>
+                <td className="right mono">{formatMoney(data.totals.value)}</td>
+                <td className="right mono">{formatMoney(data.totals.weighted)}</td>
+                <td colSpan={cols - 4} />
+              </tr>
             </tfoot>
           </table>
         </div>
@@ -668,7 +716,18 @@ function ForecastBody({
                   {group.count} · {formatMoney(group.value)} · weighted {formatMoney(group.weighted)}
                   {group.overdue ? ` · ${group.overdue} past closing` : ''}
                 </span>
+                {group.rows.length > (showing(key) === 'none' ? 0 : LIST_TOP) || showing(key) === 'all' ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    aria-expanded={showing(key) === 'all'}
+                    onClick={() => setShown((prev) => ({ ...prev, [key]: showing(key) === 'all' ? (key === 'earlier' ? 'none' : 'top') : 'all' }))}
+                  >
+                    {showing(key) === 'all' ? (key === 'earlier' ? 'Hide' : `Show the first ${LIST_TOP}`) : `Show all ${group.rows.length}`}
+                  </button>
+                ) : null}
               </h4>
+              {showing(key) !== 'none' && (
               <div className="table-wrap">
                 <table className="data">
                   <thead>
@@ -685,7 +744,7 @@ function ForecastBody({
                     </tr>
                   </thead>
                   <tbody>
-                    {group.rows.map((r) => (
+                    {(showing(key) === 'all' ? group.rows : group.rows.slice(0, LIST_TOP)).map((r) => (
                       <tr key={`${r.kind}-${r.id}`}>
                         <td className="mono">
                           <Link to={r.link}>{r.number}</Link>
@@ -709,6 +768,7 @@ function ForecastBody({
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
           ))}
       </section>

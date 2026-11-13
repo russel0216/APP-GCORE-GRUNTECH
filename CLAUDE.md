@@ -2549,6 +2549,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   its closing dates (`closingFrom`/`closingTo`, declared keys — rule 16); the
   consolidated list groups the quotations under their period with the stage
   on `StatusBadge` (`STAGE_TONES`, exported from `Quotations.tsx`).
+- **The Forecast after its audit** (2026-11-13). It OPENS on All for
+  whoever reads everybody's quotations (`gops.quotations.view_all`), the
+  Team for a team's reader, Mine for a salesperson — a manager owning no
+  quotation used to open on an empty Mine. The period table's foot leads
+  with **Past closing date** (the `earlier` bucket, warn tone, a link to
+  the quotation list on closing dates before the window), then In the
+  window, "After it, or undated", and **Everything open**, so the rows add
+  up to the card. The list under the tables shows a period's first ten
+  (`LIST_TOP`) and the past-due group folded, each with "Show all N". The
+  Weighted card says how many quotations still carry the starting 50%
+  (`DEFAULT_ODDS`). The controls are a grid of even columns across the
+  whole line. **And app-wide**: `table.data th.right`, `th.num` and
+  `td.num` are right-aligned in `styles.css` — `table.data th` set left
+  with more weight than `.right`, so some three hundred figure heads stood
+  left of their columns, and `.num` aligned nothing.
 - **Breakdowns and a chosen range** (2026-10-12, the owner's call:
   "Forecast of Sales Person, by Product Group, by Team" and "a specified
   date range"; `docs/notes/P-forecast-breakdowns-2026-10-12.md`). Each row

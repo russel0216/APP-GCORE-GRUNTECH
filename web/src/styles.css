@@ -1820,6 +1820,16 @@ table.data th {
   white-space: nowrap;
 }
 
+/* A figure's head sits over its figures (2026-11-13, the owner's call:
+   "check column alignment"). `table.data th` sets left with more weight than
+   `.right`, so three hundred heads marked right stood left of their column,
+   and `.num` set no alignment at all. */
+table.data th.right,
+table.data th.num,
+table.data td.num {
+  text-align: right;
+}
+
 table.data th.sortable {
   cursor: pointer;
   user-select: none;
