@@ -4781,6 +4781,15 @@ receive the tickets".
   "Reports to" kept), false when it is another employee's (the message
   names their number: open that record instead). `createLogin()` keeps
   its own check for any other caller.
+- **A login is deleted only as a mistake's clean-up** (2026-11-13, the
+  owner's call, for a duplicate): `DELETE /users/:id`, the System
+  Administrator alone (`requireSuperAdmin`) — a login that is SWITCHED OFF,
+  linked to NO employee record, not a super admin, not one's own, with nobody
+  reporting to it and nothing on file (`loginHistory()`: approvals asked or
+  decided, files uploaded, activities, meetings, help tickets, job orders —
+  rows that cascade from the user); a document that still names it is
+  `deleteOrRefuse`'s 400. Anything else stays switched off. Delete in the
+  user editor's foot, shown only where it may apply. verify-accounts pins it.
 - **No password is typed for a new person — they are invited.** `invitePending`
   marks the account; its password hash is of random bytes nobody sees. The
   invitation (7 days), a self-service reset (1 hour) and an admin-issued reset

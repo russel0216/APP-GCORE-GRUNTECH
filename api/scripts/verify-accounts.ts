@@ -982,6 +982,40 @@ async function main() {
     `${histories.map((r) => r.status).join(',')} / ${ownHistory.status}`,
   );
 
+  // Deleting a login (2026-11-13): the System Administrator, a switched-off
+  // login with no employee record and nothing on file — anything else is kept.
+  {
+    const dup = await makeUser(`${TAG} Duplicate`, `dup${DOMAIN}`, ['hr']);
+    const busyOne = await makeUser(`${TAG} Has History`, `history${DOMAIN}`, []);
+    const linked = await makeUser(`${TAG} Linked`, `linked${DOMAIN}`, []);
+    await prisma.employee.create({ data: { employeeNo: `${TAG}-DEL1`, firstName: 'Del', lastName: `${TAG} Linked`, userId: linked.id } });
+    await prisma.user.updateMany({ where: { id: { in: [busyOne.id, linked.id] } }, data: { isActive: false } });
+    await prisma.helpTicket.create({ data: { number: `${TAG}-HT-DEL`, kind: 'QUESTION', subject: `${TAG} kept`, description: 'x', createdById: busyOne.id } });
+    const notAdmin = await http(hrT, 'DELETE', `/users/${dup.id}`);
+    const stillOn = await http(adminT, 'DELETE', `/users/${dup.id}`);
+    await prisma.user.update({ where: { id: dup.id }, data: { isActive: false } });
+    const own = await http(adminT, 'DELETE', `/users/${admin.id}`);
+    const withEmployee = await http(adminT, 'DELETE', `/users/${linked.id}`);
+    const withHistory = await http(adminT, 'DELETE', `/users/${busyOne.id}`);
+    const gone = await http(adminT, 'DELETE', `/users/${dup.id}`);
+    const [dupLeft, rolesLeft, keptLeft, trail] = await Promise.all([
+      prisma.user.count({ where: { id: dup.id } }),
+      prisma.userRole.count({ where: { userId: dup.id } }),
+      prisma.user.count({ where: { id: { in: [busyOne.id, linked.id, admin.id] } } }),
+      prisma.auditLog.count({ where: { entityType: 'user', entityId: dup.id, action: 'DELETED' } }),
+    ]);
+    check(
+      'A login is deleted by the System Administrator alone, only once switched off, never their own, never one linked to an employee or with anything on file; its roles go with it, audited',
+      notAdmin.status === 403 && stillOn.status === 400 && /switch/i.test(String(stillOn.body.error)) && own.status === 400 && withEmployee.status === 400 &&
+        /employee/i.test(String(withEmployee.body.error)) && withHistory.status === 400 && /kept/i.test(String(withHistory.body.error)) && gone.status === 200 &&
+        dupLeft === 0 && rolesLeft === 0 && keptLeft === 3 && trail === 1,
+      `${notAdmin.status} ${stillOn.status} ${own.status} ${withEmployee.status} ${withHistory.status} ${withHistory.body.error ?? ''} ${gone.status} ${gone.body.error ?? ''} left ${dupLeft}/${rolesLeft}/${keptLeft} trail ${trail}`,
+    );
+    await prisma.helpTicket.deleteMany({ where: { createdById: busyOne.id } });
+    await prisma.attachment.deleteMany({ where: { uploadedById: busyOne.id } });
+    await prisma.auditLog.deleteMany({ where: { entityId: dup.id } });
+  }
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;

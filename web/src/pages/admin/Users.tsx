@@ -491,7 +491,27 @@ function UserEditor({
       title={`Modify user ${detail?.name ?? form.name}`.trim()}
       onClose={onClose}
       footer={
-        <ModalFoot onCancel={onClose} busy={busy} cancelLabel={maySave ? undefined : 'Close'}>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          cancelLabel={maySave ? undefined : 'Close'}
+          // A duplicate made by mistake (2026-11-13): the System Administrator
+          // deletes a login that is switched off, linked to no employee and
+          // has nothing on file — the API refuses anything else, in words.
+          danger={
+            me?.user.isSuperAdmin && detail && !detail.isActive && !detail.employee && id !== me.user.id
+              ? {
+                  label: 'Delete',
+                  question: `Delete the login ${detail.name}? It cannot be undone. A login with anything on file is kept instead.`,
+                  onConfirm: async () => {
+                    await api.del(`/users/${id}`);
+                    toast('ok', `${detail.name}'s login deleted`);
+                    onSaved();
+                  },
+                }
+              : undefined
+          }
+        >
           {maySave && (
             <button className="btn btn-primary" onClick={save} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}

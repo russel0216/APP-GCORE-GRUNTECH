@@ -14,9 +14,10 @@ import {
   conflict,
   badRequest,
   forbidden,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireSuperAdmin, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
 import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } from '../shared/accounts';
@@ -461,6 +462,85 @@ userRoutes.get(
   login used to leave a User with no Employee behind it: no team, no employee
   number, nothing for the face clock or the quotation numbering to read.
 */
+
+/**
+ * What a login leaves behind that deleting it would take along (those rows
+ * cascade from the user): the approvals it asked for or decided, the files it
+ * uploaded, the activities booked for it, the meetings and activities it was
+ * invited to, its help tickets. Any of it, and the login is kept.
+ */
+async function loginHistory(userId: string): Promise<string[]> {
+  const [requests, decisions, followUps, files, activities, invites, meetings, minutes, tickets, support] = await Promise.all([
+    prisma.approvalRequest.count({ where: { requesterId: userId } }),
+    prisma.approvalAction.count({ where: { approverId: userId } }),
+    prisma.approvalFollowUp.count({ where: { byId: userId } }),
+    prisma.attachment.count({ where: { uploadedById: userId } }),
+    prisma.salesActivity.count({ where: { assignedToId: userId } }),
+    prisma.salesActivityInvitee.count({ where: { userId } }),
+    prisma.meetingInvitee.count({ where: { userId } }),
+    prisma.minutesAgreement.count({ where: { userId } }),
+    prisma.helpTicket.count({ where: { createdById: userId } }),
+    prisma.jobOrderSupport.count({ where: { userId } }),
+  ]);
+  const say = (n: number, one: string, many: string) => (n ? `${n} ${n === 1 ? one : many}` : null);
+  return [
+    say(requests, 'approval request', 'approval requests'),
+    say(decisions + followUps, 'approval decision', 'approval decisions'),
+    say(files, 'uploaded file', 'uploaded files'),
+    say(activities + invites, 'calendar activity', 'calendar activities'),
+    say(meetings + minutes, 'meeting', 'meetings'),
+    say(tickets, 'help ticket', 'help tickets'),
+    say(support, 'job order', 'job orders'),
+  ].filter((x): x is string => !!x);
+}
+
+/**
+ * Deleting a login (2026-11-13, the owner's call, for a duplicate made by
+ * mistake). The System Administrator alone; only a login that is SWITCHED
+ * OFF, linked to NO employee record, not a super admin and not one's own —
+ * and only one with nothing behind it: anything it asked for, decided,
+ * uploaded or was booked on (`loginHistory`), or any document that still
+ * names it (a foreign key, `deleteOrRefuse`), and it is kept switched off
+ * instead. Its roles, links, notifications and saved views go with it. The
+ * audit trail keeps what it did, by name in the summaries.
+ */
+userRoutes.delete(
+  '/:id',
+  requireSuperAdmin,
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, name: true, email: true, isActive: true, isSuperAdmin: true, employee: { select: { id: true, employeeNo: true } } },
+    });
+    if (!user) throw notFound('User not found');
+    if (user.id === me.id) throw badRequest('You cannot delete your own login');
+    if (user.isSuperAdmin) throw badRequest('A System Administrator login is not deleted');
+    if (user.isActive) throw badRequest('Switch the login off first — only a login that is switched off is deleted');
+    if (user.employee) {
+      throw badRequest(`It is the login of employee ${user.employee.employeeNo ?? 'record'} — unlink it on the employee record first`);
+    }
+    const history = await loginHistory(user.id);
+    if (history.length) {
+      throw badRequest(`${user.name} has ${history.join(', ')} on file, so the login is kept — leave it switched off`);
+    }
+    const reports = await prisma.user.count({ where: { supervisorId: user.id } });
+    if (reports) throw badRequest(`${reports} ${reports === 1 ? 'person reports' : 'people report'} to ${user.name} — set their "Reports to" first`);
+
+    await deleteOrRefuse(`${user.name}'s login`, () => prisma.user.delete({ where: { id: user.id } }));
+    await audit(
+      {
+        entityType: 'user',
+        entityId: user.id,
+        action: 'DELETED',
+        summary: `Deleted the login ${user.name} (${user.email}) — switched off, no employee record, nothing on file`,
+        before: { name: user.name, email: user.email },
+      },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
 
 // ── Invitations and reset links, issued by an administrator ──────────────────
 
