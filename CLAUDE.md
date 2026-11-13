@@ -6464,6 +6464,18 @@ the owner's call — and keeps its Sales / Project / Aftermarket counts below.
   "₱11.20M". The RangePicker in the page head governs the sales figures,
   the funnel and the PM count alike.
 
+**The dashboard is a SUMMARY since 2026-11-13** (the owner's call: "it's a
+redundant menu of the Sales Order report"). `OpsSales` draws the three cards
+and the month bars against last year, then its `children` — the dashboard's
+Sales / Project / Aftermarket count panels, moved up under the bars — then
+**Top 5 customers** and **Top 5 sales personnel** (by the range), each with
+"See all" opening the Sales Order report on the same days. Both Sankeys and
+the month-by-month grid are OFF the dashboard: the flows were already the
+report's pictures, and the grid is `pages/sales/SalesMatrix.tsx`, a section of
+the Sales Order report (over its flows, the year the report's range ends in).
+`GET /gops/sales` is unchanged and still sends the flows — the report's
+`/flows` reads the same function.
+
 ## The one-page Sales Report (2026-11-09)
 
 The owner's `Sale_Report_October_31_2026.pdf`: the Sales Order report's

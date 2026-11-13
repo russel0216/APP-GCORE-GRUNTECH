@@ -176,7 +176,7 @@ export function OpsDashboard() {
         </div>
       ) : (
         <div className="stack">
-          <OpsSales from={from} to={to} />
+          <OpsSales from={from} to={to}>
           {sales && (
             <Panel
               title="Sales"
@@ -285,6 +285,7 @@ export function OpsDashboard() {
               </div>
             </Panel>
           )}
+          </OpsSales>
         </div>
       )}
     </div>

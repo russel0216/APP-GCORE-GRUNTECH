@@ -7,6 +7,7 @@ import { useAuth } from '../../lib/auth';
 import { NumberInput } from '../../components/NumberInput';
 import { formatDate, formatMoney, useToast } from '../../components/ui';
 import { FlowPicture } from '../../components/FlowPicture';
+import { SalesMatrix } from './SalesMatrix';
 import { topOfFlow, type SankeyInput } from '../../lib/sankey';
 
 /**
@@ -141,6 +142,8 @@ export function SalesOrderReports() {
         </>
       )}
       below={({ from, to, params }) => (
+        <>
+        <SalesMatrix year={Number(to.slice(0, 4))} />
         <SalesFlows
           from={from}
           to={to}
@@ -153,6 +156,7 @@ export function SalesOrderReports() {
           onOwners={setBooked}
           onCustomers={setCustomers}
         />
+        </>
       )}
     />
   );

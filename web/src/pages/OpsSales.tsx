@@ -1,18 +1,21 @@
-import { topOfFlow } from '../lib/sankey';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { api, downloadBlob, openPdf, qs } from '../lib/api';
-import { ErrorBox, Loading, formatCompactMoney, formatMoney, useToast } from '../components/ui';
-import { GroupedBars, Panel, Sankey, Stat, type BarGroup } from '../components/charts';
+import { api, qs } from '../lib/api';
+import { ErrorBox, Loading, formatCompactMoney, formatMoney } from '../components/ui';
+import { GroupedBars, Panel, Stat, type BarGroup } from '../components/charts';
 
 /**
  * The G-OPS dashboard's sales performance (2026-11-08, the owner's
  * `G-OPS_Dashboard_1.pdf`): booked sales orders BEFORE VAT, in pesos, read
  * from `GET /gops/sales` — the Sales Order report's own rows, so the two
- * agree. The month-by-month bars against last year, the top ten customers,
- * who booked (this month and the range), the Gruntech → team → person flow
- * with every node's amount and share, and page 2's monthly analysis matrix
- * (the `sales-matrix` kind of the sales reports, with its CSV and PDF).
+ * agree.
+ *
+ * A SUMMARY since 2026-11-13 (the owner's call: the dashboard repeated the
+ * Sales Order report): the three cards and the month-by-month bars against
+ * last year, then — after whatever the dashboard puts between (`children`,
+ * its Sales / Project / Aftermarket counts) — the top five customers and the
+ * top five salespeople, each with "See all" opening the report. The two
+ * flows and the month-by-month grid live in the Sales Order report alone.
  *
  * The section shows only to a reader of sales orders — the API answers
  * `null` to anyone else — and a View Own holder sees their own orders alone,
@@ -40,7 +43,9 @@ interface Sales {
   customerSankey?: Omit<Sales['sankey'], 'people'> & { people: { id: string; of?: string; label: string; value: number; pct: number; to: string }[] };
 }
 
-export function OpsSales({ from, to }: { from: string; to: string }) {
+const TOP = 5;
+
+export function OpsSales({ from, to, children }: { from: string; to: string; children?: ReactNode }) {
   const [data, setData] = useState<Sales | null | undefined>(undefined);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
@@ -51,9 +56,28 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
       .catch(setError);
   }, [from, to]);
 
-  if (error) return <ErrorBox error={error} />;
-  if (data === undefined) return <Loading label="Adding up the sales orders…" />;
-  if (data === null) return null;
+  // The dashboard's own panels show whatever becomes of the sales figures.
+  if (error)
+    return (
+      <>
+        <ErrorBox error={error} />
+        {children}
+      </>
+    );
+  if (data === undefined)
+    return (
+      <>
+        <Loading label="Adding up the sales orders…" />
+        {children}
+      </>
+    );
+  if (data === null) return <>{children}</>;
+  const report = `/g-ops/sales-orders/report?from=${data.from}&to=${data.to}`;
+  const seeAll = (
+    <Link to={report} className="btn btn-sm">
+      See all
+    </Link>
+  );
 
   const groups: BarGroup[] = data.months.map((m) => ({
     label: m.label,
@@ -72,12 +96,12 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
   const change = prevSame > 0 ? ((ytd - prevSame) / prevSame) * 100 : null;
 
   return (
-    <div className="stack">
+    <>
       <Panel
         title={`Monthly sales performance — ${data.year} against ${data.previousYear}`}
         blurb="Booked sales orders before VAT, month by month, in pesos. A cancelled order books nothing."
         action={
-          <Link to={`/g-ops/sales-orders/report?from=${data.from}&to=${data.to}`} className="btn btn-sm">
+          <Link to={report} className="btn btn-sm">
             Open the Sales Order report
           </Link>
         }
@@ -103,8 +127,10 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
         />
       </Panel>
 
+      {children}
+
       <div className="grid grid-2">
-        <Panel title="Top 10 customers" blurb={`${data.from} to ${data.to}, before VAT`}>
+        <Panel title={`Top ${TOP} customers`} blurb={`${data.from} to ${data.to}, before VAT`} action={seeAll}>
           {data.customers.length === 0 ? (
             <div className="chart-empty">Nothing booked in the range.</div>
           ) : (
@@ -118,7 +144,7 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
                 </tr>
               </thead>
               <tbody>
-                {data.customers.map((c, i) => (
+                {data.customers.slice(0, TOP).map((c, i) => (
                   <tr key={c.id}>
                     <td className="faint">{i + 1}</td>
                     <td>
@@ -133,7 +159,7 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
           )}
         </Panel>
 
-        <Panel title="Sales personnel — month vs range" blurb={`${data.currentMonth.label} beside ${data.from} to ${data.to}, before VAT`}>
+        <Panel title={`Top ${TOP} sales personnel`} blurb={`${data.currentMonth.label} beside ${data.from} to ${data.to}, before VAT`} action={seeAll}>
           {data.people.length === 0 ? (
             <div className="chart-empty">Nobody has booked an order in the range.</div>
           ) : (
@@ -147,7 +173,7 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
                 </tr>
               </thead>
               <tbody>
-                {data.people.map((p) => (
+                {[...data.people].sort((a, b) => b.range - a.range).slice(0, TOP).map((p) => (
                   <tr key={p.id}>
                     <td>
                       <Link to={p.to}>{p.name}</Link>
@@ -162,190 +188,6 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
           )}
         </Panel>
       </div>
-
-      <Panel
-        title="Where the sales come from"
-        blurb="Gruntech → team → the person who booked. Each node shows its revenue and its share of the whole; a person appears once whatever roles they hold."
-      >
-        <Sankey input={data.sankey} format={formatCompactMoney} caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to}`} />
-      </Panel>
-
-      {data.customerSankey && <CustomerFlow flow={data.customerSankey} caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to}`} />}
-
-      <SalesMatrix year={data.year} />
-    </div>
-  );
-}
-
-// ── Page 2: the monthly analysis matrix ─────────────────────────────────────
-
-interface MatrixReport {
-  from: string;
-  to: string;
-  filterLine?: string;
-  tables: { title: string; columns: { label: string; money?: boolean }[]; rows: (string | number | null)[][]; links?: (string | null)[] }[];
-}
-
-function SalesMatrix({ year: initialYear }: { year: number }) {
-  const toast = useToast();
-  const [year, setYear] = useState(initialYear);
-  const [by, setBy] = useState<'team' | 'customer'>('team');
-  const [teamId, setTeamId] = useState('');
-  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
-  const [report, setReport] = useState<MatrixReport | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  useEffect(() => setYear(initialYear), [initialYear]);
-  useEffect(() => {
-    api
-      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
-      .then((rows) => setTeams(rows.filter((t) => t.isActive)))
-      .catch(() => setTeams([]));
-  }, []);
-  const query = qs({ from: `${year}-01-01`, to: `${year}-12-31`, by, teamId: teamId || undefined });
-  useEffect(() => {
-    setReport(null);
-    setError(null);
-    api
-      .get<MatrixReport>(`/sales-reports/sales-matrix${query}`)
-      .then(setReport)
-      .catch(setError);
-  }, [query]);
-  const years: number[] = [];
-  for (let y = initialYear + 1; y >= initialYear - 4; y--) years.push(y);
-  const table = report?.tables[0];
-
-  return (
-    <Panel
-      title="Monthly sales performance analysis"
-      blurb="The year's months across, the teams down with each person under their team — or the key customers. Before VAT, in pesos (M = millions, K = thousands)."
-      action={
-        <div className="row">
-          <button className="btn btn-sm" onClick={() => void downloadBlob(`/sales-reports/sales-matrix.csv${query}`, `sales-${year}.csv`).catch(() => toast('error', 'That export is not available to you'))}>
-            Export CSV
-          </button>
-          <button className="btn btn-sm" onClick={() => openPdf(`/api/sales-reports/sales-matrix.pdf${query}`, (m) => toast('error', m))}>
-            Print
-          </button>
-        </div>
-      }
-    >
-      <div className="row">
-        <label className="row">
-          <span className="rep-label">Year</span>
-          <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
-            {years.map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="row">
-          <span className="rep-label">Grouping</span>
-          <select value={by} onChange={(e) => setBy(e.target.value as 'team' | 'customer')}>
-            <option value="team">By sales team &amp; personnel</option>
-            <option value="customer">Key customers</option>
-          </select>
-        </label>
-        <label className="row">
-          <span className="rep-label">Team</span>
-          <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
-            <option value="">All teams</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.code} — {t.name}
-              </option>
-            ))}
-            <option value="none">No team</option>
-          </select>
-        </label>
-      </div>
-      {error ? (
-        <ErrorBox error={error} />
-      ) : !report || !table ? (
-        <Loading label="Building the matrix…" />
-      ) : table.rows.length <= 1 ? (
-        <div className="chart-empty">Nothing booked in {year}.</div>
-      ) : (
-        <div className="table-scroll">
-          <table className="data matrix">
-            <thead>
-              <tr>
-                {table.columns.map((c) => (
-                  <th key={c.label} className={c.money ? 'num' : undefined}>
-                    {c.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {table.rows.map((r, i) => {
-                const first = String(r[0] ?? '');
-                const child = first.startsWith('↳');
-                const last = i === table.rows.length - 1;
-                const link = table.links?.[i];
-                return (
-                  <tr key={i} className={`${child ? 'matrix-child' : 'matrix-group'}${last ? ' matrix-total' : ''}`}>
-                    <td>{link ? <Link to={link}>{first}</Link> : first}</td>
-                    {r.slice(1).map((v, j) => (
-                      <td key={j} className="num mono">
-                        {typeof v === 'number' ? (v === 0 ? <span className="faint">–</span> : formatCompactMoney(v).replace('₱', '')) : v}
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-const FLOW_TOPS = [
-  { value: 10, label: 'Top 10' },
-  { value: 25, label: 'Top 25' },
-  { value: 50, label: 'Top 50' },
-  { value: 0, label: 'All' },
-];
-
-/**
- * Gruntech → team → customer (2026-11-12). A customer stands under the team
- * of the salesperson who booked, so one that two teams sold to is listed
- * under each and no band crosses; Top 10 / 25 / 50 gathers the rest per team.
- */
-function CustomerFlow({ flow, caption }: { flow: NonNullable<Sales['customerSankey']>; caption: string }) {
-  const [top, setTop] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem('gcore_flow_customers'));
-      return FLOW_TOPS.some((t) => t.value === v) ? v : 0;
-    } catch {
-      return 0;
-    }
-  });
-  const choose = (v: number) => {
-    setTop(v);
-    try {
-      localStorage.setItem('gcore_flow_customers', String(v));
-    } catch {
-      /* the choice is a convenience */
-    }
-  };
-  const customers = new Set(flow.people.map((p) => p.of ?? p.id)).size;
-  return (
-    <Panel
-      title="Where the sales go"
-      blurb="Gruntech → team → customer. A customer stands under the team of the salesperson who booked the order, so one that two teams sold to is listed under each."
-    >
-      <div className="scope-switch" role="group" aria-label="Customers shown">
-        {FLOW_TOPS.map((t) => (
-          <button key={t.value} type="button" className={top === t.value ? 'active' : ''} aria-pressed={top === t.value} onClick={() => choose(t.value)}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-      <Sankey input={topOfFlow(flow, top)} format={formatCompactMoney} oneLine caption={`${caption} · ${customers} customers`} />
-    </Panel>
+    </>
   );
 }
