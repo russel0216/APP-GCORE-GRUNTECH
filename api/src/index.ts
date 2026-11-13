@@ -109,6 +109,7 @@ import { memoRoutes } from './routes/memos';
 import { attendanceCorrectionRoutes } from './routes/attendanceCorrections';
 import { assetRoutes as companyAssetRoutes } from './routes/assets';
 import { hiringRoutes } from './routes/hiring';
+import { examQuestionRoutes, publicExamRoutes } from './routes/employmentExams';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
 import { helpTicketRoutes } from './routes/helpTickets';
 import { positionRoutes } from './routes/positions';
@@ -251,6 +252,9 @@ app.use('/api/memos', memoRoutes);
 app.use('/api/attendance-corrections', attendanceCorrectionRoutes);
 app.use('/api/assets', companyAssetRoutes);
 app.use('/api/hiring', hiringRoutes);
+app.use('/api/hiring', examQuestionRoutes);
+// The Employment Examination's own page, for an applicant with no login (2026-11-13): the token in the link is the key.
+app.use('/api/public/exam', publicExamRoutes);
 
 // Aftermarket (Phase 8)
 app.use('/api/installed-assets', assetRoutes);

@@ -741,6 +741,41 @@ four databases and four copies of "customer".
   Acknowledge receipt, Print, the filed PDF), and the slip number on the
   asset's history and the employee's Assets tab. verify-hr pins it.
 
+## The owner's G-HR batch of 2026-11-13 — push 3: the Employment Examination online
+
+- **Entrance Exam is "Employment Examination"** (the menu label and the
+  pages; the key `ghr.entrance_exams`, the path and the audit type stay).
+  Each exam has QUESTIONS (`ExamQuestion`: CHOICE with `choices` and
+  `correctIndex`, scored at once, or WRITTEN, scored by HR; `points`; one
+  answered is switched off, never deleted) and a `timeLimitMinutes`, edited
+  on its own page `/g-hr/hiring/exams/:id` (`pages/hr/ExamQuestions.tsx`;
+  `GET/PUT /hiring/exams/:id/questions`, replaced whole, the PUT behind the
+  catalogue's Edit). `routes/employmentExams.ts`.
+- **An applicant answers on their phone with NO login**: on the applicant's
+  page, **Online exam** › tick exams › "Issue exam link" (`POST
+  /hiring/candidates/:id/exam-link`) makes an `ExamSitting` — one link for
+  every exam ticked, taken one after another on ONE countdown (their minutes
+  added), open 7 days. The link is `APP_URL/exam#t=<token>` (32 random bytes
+  in the #fragment — never sent to a server or a log; only its SHA-256 is
+  kept) shown ONCE with its QR: `lib/qrCode.ts` draws it from
+  **qrcode-generator 1.4.4, vendored in `web/public/qrcode/`** (README.txt:
+  the build and its integrity). The page `/exam` (`pages/PublicExam.tsx`, a
+  `SIGNED_OUT_PAGES` entry) posts the token in the BODY of `POST
+  /api/public/exam/{view,start,answers,submit}` (no `authenticate`; 60
+  requests a minute and 10 wrong tokens an hour per visitor, read from
+  Cloudflare's `cf-connecting-ip`). Start is once (claimed on ISSUED); the
+  paper never carries the correct answers; answers save as they are given;
+  Submit — or the clock, the page submitting at zero, else `sweep()` on the
+  next read past the deadline + 30 s — closes it for good (`finalize()`:
+  every choice scored by its key, a blank 0, a written answer waits).
+  HR scores the written answers on the applicant's page (`POST
+  /hiring/sittings/:id/score`, never over a question's worth); once every
+  answer is scored the sitting is SCORED and each exam's score — points
+  earned over points possible, out of the exam's maximum — is written to the
+  applicant as an `ExamResult`, the same as a score typed by hand (which
+  stays possible for a paper exam). An unused link is cancelled. The trail
+  never carries a score. verify-hr pins it.
+
 ## The delete rule (2026-11-13)
 
 The owner's call: "make all the Delete function only by the one who created

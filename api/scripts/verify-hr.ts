@@ -5329,6 +5329,58 @@ async function main() {
     check('a maximum already scored against is fixed', (await api(T(hr1), 'PATCH', `/hiring/exams/${String(own.body.id)}`, { maxScore: 100 })).status === 400);
     check('a scored exam is switched off, not deleted; a standard one is never deleted', (await api(T(hr1), 'DELETE', `/hiring/exams/${String(own.body.id)}`)).status === 400 && (await api(T(hr1), 'DELETE', `/hiring/exams/${exams[0].id}`)).status === 400);
 
+    // The Employment Examination online (2026-11-13): HR's questions, a link with no login, scored at once and by HR.
+    {
+      const online = await api(T(hr1), 'POST', '/hiring/exams', { name: `${TAG} Online Test`, maxScore: 10, weight: 1 });
+      const oid = String(online.body.id);
+      const qs = { timeLimitMinutes: 15, questions: [
+        { kind: 'CHOICE', prompt: 'Which unit measures pressure?', choices: ['Volt', 'Pascal'], correctIndex: 1, points: 2 },
+        { kind: 'WRITTEN', prompt: 'Describe a pump you have maintained.', points: 3 },
+      ] };
+      check('the hiring manager cannot change the questions', (await api(T(tm), 'PUT', `/hiring/exams/${oid}/questions`, qs)).status === 403);
+      const saved = await api(T(hr1), 'PUT', `/hiring/exams/${oid}/questions`, qs);
+      const read = await api(T(hr1), 'GET', `/hiring/exams/${oid}/questions`);
+      check('HR adds a multiple-choice and a written question, with the time limit', saved.status === 200 && (read.body.questions as unknown[]).length === 2 && read.body.timeLimitMinutes === 15 && read.body.totalPoints === 5);
+      const badChoice = await api(T(hr1), 'PUT', `/hiring/exams/${oid}/questions`, { questions: [{ kind: 'CHOICE', prompt: 'No answer marked', choices: ['A', 'B'], points: 1 }] });
+      check('a multiple-choice question with no correct answer marked is refused', badChoice.status === 400);
+      const link = await api(T(hr1), 'POST', `/hiring/candidates/${kevinId}/exam-link`, { examIds: [oid] });
+      const url = String(link.body.url ?? '');
+      const token = url.split('#t=')[1] ?? '';
+      check('HR issues a link: the token rides in the #fragment, the countdown is the exam’s minutes', link.status === 201 && token.length > 30 && link.body.minutes === 15);
+      const stored = await prisma.examSitting.findFirst({ where: { candidateId: kevinId }, orderBy: { issuedAt: 'desc' } });
+      check('only the token’s hash is kept', !!stored && stored.tokenHash !== token && !JSON.stringify(stored).includes(token));
+      const pub = async (path: string, body: Record<string, unknown>) => {
+        const r = await fetch(`${BASE}/public/exam/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+      };
+      check('a wrong token opens nothing', (await pub('view', { token: 'x'.repeat(43) })).status === 404);
+      const view = await pub('view', { token });
+      check('the applicant opens the link with no login: their name, the exam, the minutes — no questions before Start', view.status === 200 && view.body.status === 'ISSUED' && String(view.body.name).includes('Kevin') && view.body.minutes === 15 && !view.body.paper);
+      const started = await pub('start', { token });
+      const paperText = JSON.stringify(started.body.paper ?? {});
+      const qIds = ((started.body.paper?.exams?.[0]?.questions ?? []) as { id: string; kind: string }[]);
+      check('Start opens the paper and the countdown — the correct answers never leave the server', started.status === 200 && qIds.length === 2 && !!started.body.deadlineAt && !paperText.includes('correctIndex') && !paperText.includes('"correct"'));
+      check('it starts once', (await pub('start', { token })).status === 409);
+      const choiceQ = qIds.find((q) => q.kind === 'CHOICE')!;
+      const writtenQ = qIds.find((q) => q.kind === 'WRITTEN')!;
+      const savedA = await pub('answers', { token, answers: [{ questionId: choiceQ.id, choiceIndex: 1 }] });
+      const submitted = await pub('submit', { token, answers: [{ questionId: writtenQ.id, text: 'I overhauled a 30 kW centrifugal pump.' }] });
+      check('answers save as they go; Submit closes it with a written answer waiting for HR', savedA.status === 200 && submitted.status === 200 && submitted.body.status === 'SUBMITTED');
+      check('a submitted link cannot be used again', (await pub('answers', { token, answers: [] })).status === 409);
+      const sittings = await api(T(hr1), 'GET', `/hiring/candidates/${kevinId}/sittings`);
+      const sit = (sittings.body.rows as { id: string; canScore: boolean; answers: { id: string; kind: string; points: number | null; text: string | null }[] }[])[0];
+      const written = sit?.answers.find((a) => a.kind === 'WRITTEN');
+      const choice = sit?.answers.find((a) => a.kind === 'CHOICE');
+      check('HR reads the sitting: the choice scored by its key, the written answer to score', !!sit && sit.canScore && choice?.points === 2 && written?.points === null && (written?.text ?? '').includes('centrifugal'));
+      check('a written score over its worth is refused', (await api(T(hr1), 'POST', `/hiring/sittings/${sit.id}/score`, { answers: [{ id: written!.id, points: 4 }] })).status === 400);
+      const done = await api(T(hr1), 'POST', `/hiring/sittings/${sit.id}/score`, { answers: [{ id: written!.id, points: 3 }] });
+      const result = await prisma.examResult.findUnique({ where: { candidateId_examId: { candidateId: kevinId, examId: oid } } });
+      check('scored in full, the exam score lands on the applicant — 5 of 5 points is 10 out of 10', done.status === 200 && done.body.scored === true && Number(result?.score) === 10, `${done.status} ${result?.score}`);
+      const second = await api(T(hr1), 'POST', `/hiring/candidates/${kevinId}/exam-link`, { examIds: [oid] });
+      const secondId = (await prisma.examSitting.findFirst({ where: { candidateId: kevinId }, orderBy: { issuedAt: 'desc' } }))!.id;
+      check('an unused link is cancelled', second.status === 201 && (await api(T(hr1), 'POST', `/hiring/sittings/${secondId}/cancel`, {})).status === 200 && (await pub('start', { token: String(second.body.url).split('#t=')[1] })).status === 409);
+    }
+
     // Interview, then the contract
     for (const to of ['EXAM_DONE', 'INTERVIEW_SCHEDULED', 'INTERVIEW_PASSED']) await move(arisId, to);
     check('no contract for someone still under screening', (await api(T(hr1), 'POST', '/hiring/contracts', { candidateId: kevinId, monthlySalary: 50000, startDate: '2026-11-03' })).status === 400);

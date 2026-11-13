@@ -1,0 +1,91 @@
+/* The applicant's Employment Examination page (pages/PublicExam.tsx,
+   2026-11-13): built for a phone, tokens only. */
+
+.exam-public .login-wrap {
+  max-width: 44rem;
+}
+
+.exam-list {
+  margin: 0 0 var(--s-3);
+  padding-left: var(--s-5);
+}
+
+.exam-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: calc(var(--s-4) * -1) calc(var(--s-4) * -1) var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.exam-time {
+  font-family: ui-monospace, monospace;
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.exam-time.is-low {
+  color: var(--danger);
+}
+
+.exam-section + .exam-section {
+  margin-top: var(--block-gap);
+}
+
+.exam-questions {
+  margin: 0;
+  padding-left: var(--s-5);
+}
+
+.exam-question {
+  margin-bottom: var(--s-5);
+}
+
+.exam-prompt {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-md);
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.exam-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.exam-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.exam-choice input {
+  margin-top: 3px;
+  accent-color: var(--magenta);
+}
+
+.exam-question textarea {
+  width: 100%;
+}
+
+/* The QR on the applicant's card in G-CORE. */
+.exam-qr {
+  width: 12rem;
+  height: 12rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}

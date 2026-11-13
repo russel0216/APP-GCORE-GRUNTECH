@@ -4,6 +4,7 @@ import { ToastProvider, Loading } from './components/ui';
 import { Shell } from './components/Shell';
 import { Login } from './pages/Login';
 import { ForgotPassword, ResetPassword, Welcome } from './pages/AccountLinks';
+import { PublicExam } from './pages/PublicExam';
 import { Home } from './pages/Home';
 import { FileViewer } from './pages/FileViewer';
 import { MyWork } from './pages/MyWork';
@@ -85,6 +86,7 @@ import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
 import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { OrgChartPage, HierarchyChartPage } from './pages/hr/Charts';
 import { AssetSlips, AssetSlipPage } from './pages/hr/AssetSlips';
+import { ExamQuestionsPage } from './pages/hr/ExamQuestions';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -188,6 +190,8 @@ function GuardAny({ permissions, children }: { permissions: string[]; children: 
  * a reset, "Forgot password?" — whether or not somebody is signed in already.
  */
 const SIGNED_OUT_PAGES: Record<string, () => JSX.Element> = {
+  // The applicant's Employment Examination (2026-11-13): no login, the #t= token is the key.
+  '/exam': PublicExam,
   '/welcome': Welcome,
   '/reset-password': ResetPassword,
   '/forgot-password': ForgotPassword,
@@ -1105,6 +1109,14 @@ function Routed() {
           element={
             <GuardAny permissions={['ghr.entrance_exams.view_all', 'ghr.entrance_exams.view_team', 'ghr.entrance_exams.view_own', 'ghr.candidates.view_all']}>
               <EntranceExams />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/hiring/exams/:id"
+          element={
+            <GuardAny permissions={['ghr.entrance_exams.view_all', 'ghr.entrance_exams.view_team', 'ghr.entrance_exams.view_own', 'ghr.candidates.view_all']}>
+              <ExamQuestionsPage />
             </GuardAny>
           }
         />

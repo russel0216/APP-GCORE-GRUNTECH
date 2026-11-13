@@ -194,6 +194,7 @@ model User {
   overtimeAllocated OvertimeRequest[] @relation("OvertimeAllocatedBy")
   assetSlipsIssued AssetSlip[] @relation("AssetSlipIssuer")
   assetSlipsAcknowledged AssetSlip[] @relation("AssetSlipAcknowledger")
+  examSittingsIssued ExamSitting[] @relation("ExamSittingIssuer")
 }
 
 enum AccountTokenPurpose {
@@ -6629,6 +6630,7 @@ model Candidate {
 
   @@index([mprId])
   @@index([status])
+  examSittings ExamSitting[]
 }
 
 enum CandidateStatus {
@@ -6676,6 +6678,88 @@ model ExamCatalog {
   createdById String?
   createdAt   DateTime     @default(now())
   results     ExamResult[]
+  /// Minutes an applicant has for this exam when taking it online (2026-11-13).
+  timeLimitMinutes Int            @default(30)
+  questions        ExamQuestion[]
+}
+
+enum ExamQuestionKind {
+  /// Multiple choice — scored at once against `correctIndex`.
+  CHOICE
+  /// A written answer — scored by HR afterwards.
+  WRITTEN
+}
+
+/// A question of an Employment Examination (2026-11-13, the owner's call: "HR
+/// can add or modify questions; an applicant gets a link or QR to answer on
+/// their phone"). One answered in a sitting is switched off, never deleted.
+model ExamQuestion {
+  id           String           @id @default(cuid())
+  examId       String
+  exam         ExamCatalog      @relation(fields: [examId], references: [id], onDelete: Cascade)
+  sequence     Int              @default(0)
+  kind         ExamQuestionKind @default(CHOICE)
+  prompt       String
+  choices      String[]
+  correctIndex Int?
+  points       Decimal          @default(1) @db.Decimal(6, 2)
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  answers      ExamAnswer[]
+
+  @@index([examId, sequence])
+}
+
+enum ExamSittingStatus {
+  ISSUED
+  STARTED
+  SUBMITTED
+  SCORED
+  EXPIRED
+  CANCELLED
+}
+
+/// One applicant's online sitting of one or more exams, opened by a link with
+/// a one-time token (only its hash is kept). One countdown for the sitting;
+/// submitted by the applicant or when the time is up; never reopened.
+model ExamSitting {
+  id          String            @id @default(cuid())
+  candidateId String
+  candidate   Candidate         @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  tokenHash   String            @unique
+  examIds     String[]
+  /// The questions put to the applicant when they started, in order.
+  questionIds String[]
+  status      ExamSittingStatus @default(ISSUED)
+  minutes     Int
+  issuedById  String?
+  issuedBy    User?             @relation("ExamSittingIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
+  issuedAt    DateTime          @default(now())
+  expiresAt   DateTime
+  startedAt   DateTime?
+  deadlineAt  DateTime?
+  submittedAt DateTime?
+  scoredAt    DateTime?
+  answers     ExamAnswer[]
+
+  @@index([candidateId])
+}
+
+model ExamAnswer {
+  id          String       @id @default(cuid())
+  sittingId   String
+  sitting     ExamSitting  @relation(fields: [sittingId], references: [id], onDelete: Cascade)
+  questionId  String
+  question    ExamQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  choiceIndex Int?
+  text        String?
+  /// Points earned: set at once for a choice, by HR for a written answer (null until then).
+  points      Decimal?     @db.Decimal(6, 2)
+  scoredById  String?
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([sittingId, questionId])
 }
 
 /// A candidate's score on one exam.

@@ -10,6 +10,7 @@ import { NumberInput } from '../../components/NumberInput';
 import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps } from '../../components/ApprovalStepper';
 import { ActiveBadge, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { MiniBar, Stat } from '../../components/charts';
+import { OnlineExamCard } from './ExamQuestions';
 import { NewPersonModal } from '../masters/Employees';
 
 /**
@@ -1170,7 +1171,7 @@ export function CandidatePage() {
           </section>
           <section className="card">
             <div className="card-head">
-              <h3 className="card-title">Entrance exam — {pct(c.examScore)}</h3>
+              <h3 className="card-title">Employment examination — {pct(c.examScore)}</h3>
               {c.canScore && (
                 <button type="button" className="btn btn-sm" onClick={() => setScoring(true)}>
                   Record scores
@@ -1180,6 +1181,8 @@ export function CandidatePage() {
             <ScoreComparison name={c.firstName} rows={c.exams.filter((e) => e.isActive || e.score != null).map((e) => ({ name: e.name, candidate: e.pct, benchmark: e.benchmark, benchmarkCount: e.benchmarkCount }))} />
           </section>
         </div>
+
+        <OnlineExamCard candidateId={c.id} onScored={() => void load()} />
 
         {c.contracts.length > 0 && (
           <section className="card">
@@ -1331,7 +1334,7 @@ export function EntranceExams() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Entrance Exam</h1>
+          <h1>Employment Examination</h1>
         </div>
         {data?.canEdit && (
           <div className="page-actions">
@@ -1345,7 +1348,7 @@ export function EntranceExams() {
       <div className="stack">
         <section className="card">
           <div className="card-head">
-            <h3 className="card-title">Entrance exam catalog & score analytics</h3>
+            <h3 className="card-title">Employment examination catalog & score analytics</h3>
             <span className="faint">Benchmark: the applicant’s score vs. the hired candidates’ average</span>
           </div>
           {analytics && analytics.candidates.length > 0 ? (
@@ -1388,7 +1391,7 @@ export function EntranceExams() {
                     <th>Sat</th>
                     <th>Hired average</th>
                     <th>Status</th>
-                    {data.canEdit && <th />}
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -1405,13 +1408,18 @@ export function EntranceExams() {
                       <td>
                         <ActiveBadge active={e.isActive} />
                       </td>
-                      {data.canEdit && (
-                        <td>
-                          <button type="button" className="btn btn-sm" onClick={() => setEditing(e)}>
-                            Modify
-                          </button>
-                        </td>
-                      )}
+                      <td>
+                        <div className="row">
+                          <Link className="btn btn-sm" to={`/g-hr/hiring/exams/${e.id}`}>
+                            Questions
+                          </Link>
+                          {data.canEdit && (
+                            <button type="button" className="btn btn-sm" onClick={() => setEditing(e)}>
+                              Modify
+                            </button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

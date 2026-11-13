@@ -36,6 +36,7 @@ import './styles/people-flow.css';
 import './styles/help.css';
 import './styles/face.css';
 import './styles/marketing.css';
+import './styles/exam.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

@@ -537,7 +537,7 @@ const candidateInclude = {
 type CandidateRow = Prisma.CandidateGetPayload<{ include: typeof candidateInclude }>;
 
 const scoreOf = (c: CandidateRow) => weightedScore(c.examResults.map((r) => ({ score: Number(r.score), maxScore: r.exam.maxScore, weight: Number(r.exam.weight) })));
-const mayEditCandidate = (me: ResolvedUser, c: { createdById: string }) => canEditRecord(me, 'ghr', 'candidates', c.createdById);
+export const mayEditCandidate = (me: ResolvedUser, c: { createdById: string }) => canEditRecord(me, 'ghr', 'candidates', c.createdById);
 
 function presentCandidate(me: ResolvedUser, c: CandidateRow) {
   const closed = CANDIDATE_CLOSED.includes(c.status as CandidateStatusKey);
@@ -554,7 +554,7 @@ function presentCandidate(me: ResolvedUser, c: CandidateRow) {
   };
 }
 
-async function loadCandidate(me: ResolvedUser, id: string): Promise<CandidateRow> {
+export async function loadCandidate(me: ResolvedUser, id: string): Promise<CandidateRow> {
   const row = await prisma.candidate.findUnique({ where: { id }, include: candidateInclude });
   const scope = viewScope(me, 'ghr', 'candidates');
   const readable = !!row && (me.isSuperAdmin || scope === 'all' || visibleOwners(me, 'ghr', 'candidates').includes(row.createdById));
