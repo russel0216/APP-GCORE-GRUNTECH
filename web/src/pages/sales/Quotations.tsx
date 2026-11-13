@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ApiError, api, openPdf, qs } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { Attachments } from '../../components/Attachments';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
@@ -13,7 +13,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { loadPeople } from '../../components/People';
-import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, initials, useToast, type Tone } from '../../components/ui';
+import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, formatWholeMoney, initials, useToast, type Tone } from '../../components/ui';
 import type { CostPanel } from '../../lib/quotationMath';
 import { RecordBudgetRequests } from '../delivery/BudgetRequests';
 import { QuotationBuying, type QuotationBuyingData } from './QuotationBuying';
@@ -414,16 +414,16 @@ export function Quotations() {
                 value={total}
                 sub={noTeamNote(s.teams)}
               />
-              <Stat label="Sum" value={formatMoney(s.value ?? 0)} figure />
+              <Stat label="Sum" value={formatWholeMoney(s.value ?? 0)} figure />
               {s.margin && (
                 <Stat
                   label="Margin"
-                  value={formatMoney(s.margin.amount)}
+                  value={formatWholeMoney(s.margin.amount)}
                   figure
                   sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
                 />
               )}
-              {teamCards(s.teams, formatMoney)}
+              {teamCards(s.teams, formatWholeMoney)}
             </>
           );
         }}
@@ -721,6 +721,8 @@ export interface QuotationDetail {
   /** Settings' rates, the default when the currency changes. */
   exchangeRates?: Record<string, number>;
   canEdit: boolean;
+  /** Raised in the author's name by somebody else: theirs to acknowledge before it goes anywhere. */
+  authorAck?: { pending: boolean; at: string | null; by: string | null; canAcknowledge: boolean } | null;
   /** Who may move its status — not the same as who may edit it (2026-11-14). */
   canMove?: boolean;
   /** Whether the server sent the cost half of each line. */
@@ -950,7 +952,30 @@ export function QuotationDetail() {
   const canCreateProject = quotation.outcome === 'WON' && !!approved && jobs.length === 0 && can('gops.projects.create');
   // ONE main next step, in the order a quotation lives them: approve the
   // draft, send it, then book the won work.
-  const primary = canSubmit ? 'submit' : canSend ? 'send' : quotation.outcome === 'WON' && canOrder && hasPricedLine ? 'order' : null;
+  // Awarded (2026-11-14, the owner's flow: sent, then Confirmed (Won), then
+  // the job order for Project Management): offered once it is with the customer.
+  const canWin =
+    canMove && ['SUBMITTED', 'NEGOTIATION'].includes(quotation.outcome) && moves.some((m) => m.value === 'WON') && (!!approved || !!unchangedImport);
+  const primary = canSubmit
+    ? 'submit'
+    : canSend
+      ? 'send'
+      : canWin
+        ? 'win'
+        : quotation.outcome === 'WON' && canRequestJobOrder
+          ? 'jobOrder'
+          : quotation.outcome === 'WON' && canOrder && hasPricedLine
+            ? 'order'
+            : null;
+  // Modify only while the latest revision is a draft the customer has not
+  // been sent: once sent or approved it is pulled back first, or — sent — a
+  // new revision is raised and that one is modified.
+  const latestRevision = quotation.revisions[0] ?? null;
+  const draftToModify =
+    latestRevision?.status === 'DRAFT' &&
+    (quotation.outcome === 'OPEN' || (!!quotation.submittedAt && new Date(latestRevision.createdAt) > new Date(quotation.submittedAt)));
+  const canModify = quotation.canEdit && draftToModify;
+  const sentDraft = latestRevision?.status === 'DRAFT' && !draftToModify && ['SUBMITTED', 'NEGOTIATION', 'ON_HOLD'].includes(quotation.outcome);
   const pendingLatest = quotation.revisions[0]?.status === 'PENDING_APPROVAL' ? quotation.revisions[0] : null;
   const raiseRevision = () =>
     run(
@@ -1031,6 +1056,15 @@ export function QuotationDetail() {
                 Mark as sent
               </button>
             )}
+            {canWin && (
+              <button
+                className={`btn${primary === 'win' ? ' btn-primary' : ''}`}
+                title="The customer awarded it: the quotation is confirmed (won), and its job order for Project Management comes next"
+                onClick={() => act(() => api.patch(`/quotations/${quotation.id}`, { outcome: 'WON' }), 'Confirmed — won')}
+              >
+                Mark won
+              </button>
+            )}
             {canOrder && (
               <button
                 className={`btn${primary === 'order' ? ' btn-primary' : ''}`}
@@ -1045,7 +1079,7 @@ export function QuotationDetail() {
             )}
             {canRequestJobOrder && (
               <Link
-                className="btn"
+                className={`btn${primary === 'jobOrder' ? ' btn-primary' : ''}`}
                 to={`/g-ops/job-orders${qs({
                   new: 1,
                   customerId: quotation.customer.id,
@@ -1056,26 +1090,25 @@ export function QuotationDetail() {
                 Request job order
               </Link>
             )}
-            {canCreateProject && approved && (
-              <Link
-                className="btn"
-                to={`/g-ops/projects${qs({ new: 1, costingIds: costingsOf(approved).map((c) => c.id).join(',') || undefined, quotationRevisionId: approved.id })}`}
-                title={`R${approved.revision} is the approved revision — its costing carries the budget and the schedule of values into the project`}
-              >
-                Create project
-              </Link>
-            )}
           </>
         }
         print={revision ? `/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption })}` : undefined}
         more={[
-          // Print is the bare quotation (2026-10-16, the owner's call); this one carries the attached files behind it.
-          revision && {
-            label: 'Print with attachments',
-            hint: 'The quotation with the files attached to it behind it',
-            onSelect: () =>
-              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 1 })}`, (e) => setError(e)),
-          },
+          // The paper never carries the attached files (2026-11-14): they show what the supplies cost.
+          // A project is built by the job order's approval; building one directly stays here for the rare case.
+          canCreateProject &&
+            approved && {
+              label: 'Create project directly',
+              hint: `Without a job order — from R${approved.revision}'s costing`,
+              to: `/g-ops/projects${qs({ new: 1, costingIds: costingsOf(approved).map((c) => c.id).join(',') || undefined, quotationRevisionId: approved.id })}`,
+            },
+          // What was sent is not edited; the facts beside it still are.
+          quotation.canEdit &&
+            !canModify && {
+              label: 'Closing date, contact and status…',
+              hint: 'The details that are not on the customer’s paper — to change the lines or terms, raise a new revision',
+              to: editHref,
+            },
           can('gops.quotations.create') &&
             revision && {
               label: 'Duplicate',
@@ -1101,7 +1134,7 @@ export function QuotationDetail() {
               },
             },
           quotation.canEdit &&
-            revision?.status !== 'DRAFT' &&
+            (revision?.status !== 'DRAFT' || sentDraft) &&
             (pendingLatest
               ? {
                   label: 'New revision',
@@ -1180,11 +1213,27 @@ export function QuotationDetail() {
               },
             },
         ]}
-        modify={quotation.canEdit ? editHref : undefined}
+        modify={canModify ? editHref : undefined}
         confirm={confirm}
       />
 
       <ErrorBox error={error} />
+
+      {quotation.authorAck?.pending && (
+        <div className="card sales-card-gap" role="note">
+          <div className="card-head">
+            <p>
+              <strong>Waiting for {quotation.owner.name} to acknowledge it.</strong> {quotation.authorAck.by ?? 'Somebody else'} raised this quotation in
+              their name; it cannot be sent for approval or to the customer until they acknowledge it.
+            </p>
+            {quotation.authorAck.canAcknowledge && (
+              <button className="btn btn-sm btn-primary" onClick={() => act(() => api.post(`/quotations/${quotation.id}/acknowledge`), 'Acknowledged')}>
+                Acknowledge
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {editable && revision?.importedUnchanged && (
         <div className="card sales-card-gap" role="note">
@@ -1296,7 +1345,7 @@ export function QuotationDetail() {
                 <ProjectCell approved={approved} jobs={jobs} outcome={quotation.outcome} can={can} />
               </Detail>
               {quotation.lead && (
-                <Detail label="Enquiry">
+                <Detail label="Inquiry">
                   <Link to={`/g-ops/leads/${quotation.lead.id}`}>
                     {quotation.lead.number} — {quotation.lead.companyName}
                   </Link>

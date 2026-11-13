@@ -1,5 +1,5 @@
 import { prisma } from '../prisma';
-import type { ResolvedUser } from '../permissions/resolve';
+import { can, type ResolvedUser } from '../permissions/resolve';
 
 /**
  * Who may move a quotation's STATUS (2026-11-14, the owner's call: "only the
@@ -66,6 +66,23 @@ export function mayMoveQuotation(scope: MoverScope, q: { ownerId: string; teamId
   if (scope.all || q.ownerId === scope.userId) return true;
   return q.teamId ? scope.teamIds.has(q.teamId) : scope.memberIds.has(q.ownerId);
 }
+
+/**
+ * Who may EDIT a quotation is the same people (2026-11-14, the owner's call:
+ * "only the owner can edit — the sales engineer, its sales manager, its team
+ * leader and the CEO"), holding the quotation edit right: Manage Team /
+ * Manage All no longer edit somebody else's by themselves.
+ */
+export function mayEditWith(me: ResolvedUser, scope: MoverScope, q: { ownerId: string; teamId?: string | null }): boolean {
+  return can(me, 'gops.quotations.edit_own') && mayMoveQuotation(scope, q);
+}
+
+export async function mayEditQuotation(me: ResolvedUser, q: { ownerId: string; teamId?: string | null }): Promise<boolean> {
+  return mayEditWith(me, await moverScope(me), q);
+}
+
+export const EDITOR_REFUSAL =
+  'Only its owner, their Team Leader or Sales Manager, the CEO / President or the System Administrator edits a quotation';
 
 export const MOVER_REFUSAL =
   'Only its owner, their Team Leader or Sales Manager, the CEO / President or the System Administrator moves a quotation’s status';

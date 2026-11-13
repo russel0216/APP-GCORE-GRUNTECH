@@ -461,7 +461,11 @@ export function QuotationEditor() {
         siteId: l.customer ? (l.site?.id ?? '') : h.siteId,
         subject: h.subject || firstLine.slice(0, 120),
         expectedClosing: l.expectedClosing ? l.expectedClosing.slice(0, 10) : h.expectedClosing,
+        // Every costing of the lead comes along (2026-11-14): a lead's costing
+        // may be split between people, each their part, and the quotation is
+        // built from them together.
         costingId: h.costingId || l.costings[0]?.id || '',
+        otherCostingIds: h.costingId ? h.otherCostingIds : l.costings.slice(1).map((c) => c.id),
       }));
       setWantContact(l.contactPerson);
       setPinnedCostings((list) => [...l.costings, ...list]);
@@ -1165,7 +1169,11 @@ export function QuotationEditor() {
             {canPickAuthor ? (
               <Field
                 label="Author"
-                hint="Their employee digits go into the number, and only they (or a manager) can edit it"
+                hint={
+                  header.ownerId && header.ownerId !== myId
+                    ? 'Raised in their name: they are asked to acknowledge it before it can be sent for approval or to the customer'
+                    : 'Their employee digits go into the number, and only they, their team leader or sales manager, or the CEO can edit it'
+                }
                 htmlFor="qe-author"
               >
                 {/* You are always offered, even when you do not hold the create right yourself. */}
@@ -1325,7 +1333,7 @@ export function QuotationEditor() {
               </Static>
             )}
             {editing ? (
-              <Static label="Enquiry">
+              <Static label="Inquiry">
                 {quotation!.lead ? (
                   <Link to={`/g-ops/leads/${quotation!.lead.id}`}>
                     {quotation!.lead.number} — {quotation!.lead.companyName}
@@ -1337,7 +1345,7 @@ export function QuotationEditor() {
             ) : (
               leadOptions.length > 0 && (
                 <Field
-                  label="Enquiry"
+                  label="Inquiry"
                   hint="Keeps the lead's status in step with this quotation — and fills in the rest"
                 >
                   <select

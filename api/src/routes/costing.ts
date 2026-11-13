@@ -7,6 +7,7 @@ import { handler, parseBody, listQuery, listResult, orderBy, notFound, badReques
 import { manilaDayStart, manilaMonthKey, workingDayDate } from '../shared/day';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser } from '../permissions/resolve';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { notify } from '../shared/notifications';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
@@ -2229,3 +2230,25 @@ costingRoutes.get(
   }),
 );
 
+
+/**
+ * A costing's files (2026-11-14) — supplier quotations, drawings: every one of
+ * them is cost. Read by whoever reads costings (their own for a View Own
+ * holder), written by whoever may edit that costing.
+ */
+registerAttachmentGuard(
+  'costing',
+  async (user, id) => {
+    if (user.isSuperAdmin || can(user, 'gops.costing.view_all')) return true;
+    const c = await prisma.costing.findUnique({ where: { id }, select: { ownerId: true } });
+    if (!c) return false;
+    if (can(user, 'gops.costing.view_team') && user.teamMemberIds.includes(c.ownerId)) return true;
+    return c.ownerId === user.id && can(user, 'gops.costing.view_own');
+  },
+  {
+    write: async (user, id) => {
+      const c = await prisma.costing.findUnique({ where: { id }, select: { ownerId: true } });
+      return !!c && canEditRecord(user, 'gops', 'costing', c.ownerId);
+    },
+  },
+);

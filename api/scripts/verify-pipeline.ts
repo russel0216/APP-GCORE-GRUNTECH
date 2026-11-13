@@ -714,7 +714,7 @@ async function main() {
     `${byEditAll.status} ${otherTeam.status} ${stillOpen.outcome} ${errorOf(byEditAll)} ${await canMoveOf(managerToken)} ${await canMoveOf(leaderToken)}`,
   );
   const editStill = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { probability: 41 });
-  check('Manage All still edits its other details', editStill.status === 200, `${editStill.status}`);
+  check('Manage All alone no longer edits somebody else’s quotation either (2026-11-14)', editStill.status === 403, `${editStill.status}`);
   await prisma.quotation.update({ where: { id: sellersOwn.id }, data: { teamId: moverTeam.id } });
   const boardFor = async (token: string) =>
     ((await http(token, 'GET', `/pipeline?search=${encodeURIComponent(TAG)}`)).body as unknown as BoardBody).columns

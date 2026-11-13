@@ -8754,6 +8754,56 @@ on the project management menu, it should be inside the individual project";
   The Budget requests card on a sales order, quotation and costing keeps
   both kinds and gains "+ New travel request" (`onRaiseTravel`).
 
+## The quotation's rules of 2026-11-14
+
+The owner's audit of the Quotations list ("only the owner can edit — sales
+engineer, its sales manager, its team leader and CEO"; cards; "an author's
+name has to be acknowledged by the user"; "Inquiry"; files from costing and
+leads, never printed; Mark sent › Won › Job Order; Modify hidden once sent
+or approved).
+
+- **Who edits a quotation is who moves it**: `mayEditQuotation(me, q)` /
+  `mayEditWith(me, scope, q)` in `shared/quotationMovers.ts` — the quotation
+  edit right AND its owner, a Team Leader or Sales Manager of its team, the
+  CEO / President or a super admin. It REPLACES `canEditRecord(…,
+  'quotations', …)` on every quotation route (lines, revisions, submit,
+  withdraw, the PATCH, reopen, the attachment guard, `canEdit` on the list
+  and the page): Manage Team / Manage All no longer edit somebody else's.
+  The refusal is `EDITOR_REFUSAL`. Cost visibility (`canSeeQuotationCost`)
+  is unchanged.
+- **A quotation raised in another person's name waits for them**:
+  `Quotation.createdById`, `authorAckPending`, `authorAckAt`. `POST
+  /quotations { ownerId }` (still Manage All's to do) sets it pending and
+  tells the author; `POST /quotations/:id/acknowledge` is the author's
+  alone, once (a conditional claim), the creator told. Until then submit for
+  approval and every status move but Lost / On hold are a 400
+  (`refuseUnacknowledged`). `GET /quotations/:id` sends `authorAck { pending,
+  at, by, canAcknowledge }`; the page shows the note with Acknowledge.
+- **The lead's and the costings' files come along**: on create, copies onto
+  `quotation` captioned "From lead …" / "From costing …" (`copyAttachments`,
+  after the commit, never failing the save). The costing page has an
+  Attachments card (`costing`: read by costing readers, written by whoever
+  may edit that costing). **The quotation's paper NEVER carries its files**
+  — `?attachments=1` is ignored and "Print with attachments" is gone: they
+  show what the supplies cost. The sales order's paper (internal) still does.
+- **The page's buttons**: Submit for approval › Mark as sent › **Mark won**
+  (while Submitted / Negotiation, with an approved revision) › **Request job
+  order** (the primary once won; its approval builds the project) with
+  Create sales order beside it; "Create project directly" moved into ⋯.
+  **Modify shows only on a draft the customer has not been sent**
+  (`draftToModify`: the latest revision DRAFT, and the quotation OPEN or
+  that draft made after it was sent). Pending or approved is pulled back
+  first; sent, ⋯ New revision — which now also takes a DRAFT that was
+  already sent (an imported quotation; the API's `sentDraft`). ⋯ "Closing
+  date, contact and status…" still opens the details page for what is not
+  on the customer's paper.
+- **Words and cards**: "Inquiry" (the editor, the page, the lead's "Inquiry
+  came via", its paper). A lead's costings ALL prefill the editor's Costing
+  rows. The list's cards are whole pesos (`formatWholeMoney`), and every
+  list card's figure shrinks with its card (`.list-summary .kpi` is a size
+  container; `clamp(--fs-xs, 11.5cqi, --fs-base)`).
+- verify-sales and verify-pipeline pin it.
+
 ## Travel requests, one place at a time (2026-11-14)
 
 The owner's calls: "why when a travel request is clicked it goes to Project

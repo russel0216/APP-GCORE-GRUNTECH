@@ -1617,6 +1617,14 @@ model Quotation {
   /// Salesperson's percentage to award, for the pipeline.
   probability Int @default(50)
 
+  /// Who made it, where that is not its author (2026-11-14, the owner's call:
+  /// a quotation raised in somebody else's name "has to be acknowledged by
+  /// the user"): `authorAckPending` until the author acknowledges it — no
+  /// approval and no "sent" before that — then `authorAckAt`.
+  createdById      String?
+  authorAckPending Boolean   @default(false)
+  authorAckAt      DateTime?
+
   submittedAt     DateTime?
   decidedAt       DateTime?
   lostReason      String?

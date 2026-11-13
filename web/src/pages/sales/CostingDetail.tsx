@@ -10,6 +10,7 @@ import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, form
 import { COSTING_TONES, MarginBadge, type CostingRow } from './Costings';
 import { PlanBar, TemplateSavePanel } from './CostingSheet';
 import { RecordBudgetRequests } from '../delivery/BudgetRequests';
+import { Attachments } from '../../components/Attachments';
 
 /**
  * The costing, as the estimate reads: its details, the project budgeted cost
@@ -740,6 +741,15 @@ export function CostingDetailPage() {
           </section>
         </div>
       )}
+
+      {/* Supplier quotations, drawings, the site's photos (2026-11-14): they go with the costing
+          into the quotation raised from it — and are never printed on the customer's paper. */}
+      <Attachments
+        entityType="costing"
+        entityId={costing.id}
+        hint="Supplier quotations, drawings, photos. They carry into the quotation raised from this costing, and are never printed with it."
+        canEdit={costing.canEdit}
+      />
 
       {/* Cash on a final costing (2026-10-26) — taken over by a project built from it. */}
       <RecordBudgetRequests record={{ key: 'costingId', id: costing.id }} open={isFinal} />

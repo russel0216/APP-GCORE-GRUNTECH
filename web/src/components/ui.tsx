@@ -688,6 +688,12 @@ export function formatMoney(value: number | null | undefined, currency = 'PHP'):
   return new Intl.NumberFormat('en-PH', { style: 'currency', currency }).format(value);
 }
 
+/** Money in whole units — a summary card's figure, where centavos only crowd it (2026-11-14). */
+export function formatWholeMoney(value: number | null | undefined, currency = 'PHP'): string {
+  if (value === null || value === undefined) return '—';
+  return new Intl.NumberFormat('en-PH', { style: 'currency', currency, maximumFractionDigits: 0 }).format(value);
+}
+
 /**
  * Money where a bar's label has no room for centavos (2026-11-08, the G-OPS
  * dashboard's "₱11.20M"): millions to two decimals, thousands to one, under

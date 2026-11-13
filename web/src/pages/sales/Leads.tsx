@@ -906,7 +906,7 @@ export function LeadDetail() {
               )
             }
           />
-          <Row label="Enquiry came via" value={lead.source} />
+          <Row label="Inquiry came via" value={lead.source} />
           <Row
             label="Added by"
             value={`${lead.createdBy?.name ?? 'Unknown'}, ${formatDateTime(lead.createdAt)}`}

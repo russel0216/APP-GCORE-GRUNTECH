@@ -1433,6 +1433,19 @@ small,
   white-space: nowrap;
 }
 
+/* A figure never runs out of its card (2026-11-14, the owner's report: with
+   the sidebar open the cards narrow and a long sum was cut off): the card is
+   a size container and its figure shrinks with it, down to the smallest type. */
+.list-summary .kpi {
+  container-type: inline-size;
+}
+
+@supports (font-size: 1cqi) {
+  .list-summary .kpi-value {
+    font-size: clamp(var(--fs-xs), 11.5cqi, var(--fs-base));
+  }
+}
+
 /* The Filters panel: every filter the screen declares, in a grid. */
 .list-filter-panel {
   display: grid;

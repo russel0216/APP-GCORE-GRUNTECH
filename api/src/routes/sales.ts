@@ -9,7 +9,7 @@ import { handler, parseBody, listQuery, listResult, orderBy, notFound, badReques
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { requireEdit, viewScope } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
-import { MOVER_REFUSAL, mayMoveQuotation, moverScope } from '../shared/quotationMovers';
+import { EDITOR_REFUSAL, MOVER_REFUSAL, mayEditQuotation, mayEditWith, mayMoveQuotation, moverScope } from '../shared/quotationMovers';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext, setCounter, type CounterMove } from '../shared/numbering';
@@ -63,7 +63,7 @@ import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, dayOf, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 import { toCsv } from '../shared/insights';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
-import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { copyAttachments } from '../shared/pdfAttachments';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
@@ -504,7 +504,7 @@ leadRoutes.get(
           { label: 'Email', value: lead.contactEmail ?? '' },
           { label: 'Phone', value: lead.contactPhone ?? '' },
           { label: 'Address', value: lead.address ?? '' },
-          { label: 'Enquiry came via', value: lead.source ?? '' },
+          { label: 'Inquiry came via', value: lead.source ?? '' },
           { label: 'Owner', value: lead.assignedTo.name },
           { label: 'Expected closing', value: lead.expectedClosing ? formatDate(lead.expectedClosing) : '' },
           { label: 'Estimated value', value: lead.estimatedValue == null ? '' : formatMoney(num(lead.estimatedValue), currency) },
@@ -1380,7 +1380,7 @@ quotationRoutes.get(
             margin,
             // What the bulk status change needs to plan a move the way the
             // PATCH will judge it (assertOutcomeChange); the PATCH still decides.
-            canEdit: canEditRecord(me, 'gops', 'quotations', r.ownerId),
+            canEdit: mayEditWith(me, movers, r),
             canMove: mayMoveQuotation(movers, r),
             hasApprovedRevision: r.revisions.some(standsApproved),
             hasJob: r.revisions.some((v) => v.jobs.length > 0),
@@ -2011,7 +2011,7 @@ quotationRoutes.get(
         // An order with no request may be bought ahead for it too (2026-11-11).
         canOrder: can(me, 'gchain.purchase_orders.create') && ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome),
         toReallocate: quotation.outcome === 'LOST' ? await costsToReallocate(quotation.id) : null,
-        canReallocate: quotation.outcome === 'LOST' && (canEditRecord(me, 'gops', 'quotations', quotation.ownerId) || can(me, 'gfin.budget_requests.view_all')),
+        canReallocate: quotation.outcome === 'LOST' && ((await mayEditQuotation(me, quotation)) || can(me, 'gfin.budget_requests.view_all')),
       },
       quotationStages: quotationStages(pipeline).map((st) => ({
         key: st.key,
@@ -2031,9 +2031,18 @@ quotationRoutes.get(
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
       ),
-      canEdit: canEditRecord(me, 'gops', 'quotations', quotation.ownerId),
-      // Who may move its status (shared/quotationMovers.ts) — not the same as who may edit it.
+      canEdit: await mayEditQuotation(me, quotation),
+      // Who may move its status (shared/quotationMovers.ts) — the same people.
       canMove: mayMoveQuotation(await moverScope(me), quotation),
+      // Raised in the author's name by somebody else: theirs to acknowledge first.
+      authorAck: quotation.authorAckPending || quotation.authorAckAt
+        ? {
+            pending: quotation.authorAckPending,
+            at: quotation.authorAckAt,
+            by: quotation.createdById ? ((await prisma.user.findUnique({ where: { id: quotation.createdById }, select: { name: true } }))?.name ?? null) : null,
+            canAcknowledge: quotation.authorAckPending && quotation.ownerId === me.id,
+          }
+        : null,
       // Tells the screen whether to draw the cost columns — the keys are
       // already absent when it is false; this only saves it guessing.
       canSeeCost: showCost,
@@ -2334,6 +2343,9 @@ quotationRoutes.post(
           siteId,
           leadId: body.leadId || null,
           ownerId,
+          // In somebody else's name: theirs to acknowledge before it goes anywhere.
+          createdById: me.id,
+          authorAckPending: ownerId !== me.id,
           subject: body.subject,
           // The page no longer asks: the lead's own read, else even odds. The
           // weighted pipeline multiplies by it.
@@ -2415,7 +2427,66 @@ quotationRoutes.post(
       },
       req,
     );
+    if (ownerId !== me.id) {
+      await notify({
+        userId: ownerId,
+        type: 'system',
+        title: `${me.name} raised quotation ${quotation.number} in your name`,
+        body: `${quotation.subject} — open it and acknowledge it; it cannot be sent for approval or to the customer until you do.`,
+        link: `/g-ops/quotations/${quotation.id}`,
+      });
+    }
+    // What the lead and the costings carry comes along (2026-11-14, the
+    // owner's call) — supplier quotes, site photos, the customer's enquiry —
+    // as copies of the quotation's own. Never printed with it: the paper is
+    // the customer's, and those files show what the supplies really cost.
+    try {
+      if (body.leadId) {
+        const from = await prisma.lead.findUnique({ where: { id: body.leadId }, select: { number: true } });
+        if (from) await copyAttachments({ entityType: 'lead', entityId: body.leadId }, { entityType: 'quotation', entityId: quotation.id }, `From lead ${from.number}`, me.id);
+      }
+      for (const cid of costingIdsOf(body) ?? []) {
+        const from = await prisma.costing.findUnique({ where: { id: cid }, select: { number: true } });
+        if (from) await copyAttachments({ entityType: 'costing', entityId: cid }, { entityType: 'quotation', entityId: quotation.id }, `From costing ${from.number}`, me.id);
+      }
+    } catch (err) {
+      console.error('[quotations] lead and costing files not copied', err);
+    }
     res.status(201).json(quotation);
+  }),
+);
+
+/** A quotation raised in somebody else's name goes nowhere until they acknowledge it (2026-11-14). */
+async function refuseUnacknowledged(q: { authorAckPending: boolean; ownerId: string; number: string }) {
+  if (!q.authorAckPending) return;
+  const owner = await prisma.user.findUnique({ where: { id: q.ownerId }, select: { name: true } });
+  throw badRequest(`${owner?.name ?? 'Its author'} has not acknowledged ${q.number} yet — it was raised in their name, so they acknowledge it first`);
+}
+
+/**
+ * The author acknowledges a quotation somebody else raised in their name —
+ * theirs alone, once.
+ */
+quotationRoutes.post(
+  '/:id/acknowledge',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = await prisma.quotation.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, subject: true, ownerId: true, createdById: true, authorAckPending: true } });
+    if (!q) throw notFound('Quotation not found');
+    if (q.ownerId !== me.id) throw forbidden('Only the author it was raised for acknowledges it');
+    const claimed = await prisma.quotation.updateMany({ where: { id: q.id, authorAckPending: true }, data: { authorAckPending: false, authorAckAt: new Date() } });
+    if (!claimed.count) throw badRequest(`${q.number} is already acknowledged`);
+    await audit({ entityType: 'quotation', entityId: q.id, action: 'UPDATED', summary: `${me.name} acknowledged quotation ${q.number}, raised in their name` }, req);
+    if (q.createdById && q.createdById !== me.id) {
+      await notify({
+        userId: q.createdById,
+        type: 'system',
+        title: `${me.name} acknowledged quotation ${q.number}`,
+        body: q.subject,
+        link: `/g-ops/quotations/${q.id}`,
+      });
+    }
+    res.json({ ok: true });
   }),
 );
 
@@ -2424,8 +2495,8 @@ async function revisionForEdit(req: Parameters<typeof currentUser>[0], quotation
   const me = currentUser(req);
   const quotation = await prisma.quotation.findUnique({ where: { id: quotationId } });
   if (!quotation) throw notFound('Quotation not found');
-  if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
-    throw forbidden('Only the author can edit this quotation');
+  if (!(await mayEditQuotation(me, quotation))) {
+    throw forbidden(EDITOR_REFUSAL);
   }
 
   const revision = await prisma.quotationRevision.findFirst({
@@ -2479,13 +2550,14 @@ quotationRoutes.patch(
     const MOVE_KEYS = ['outcome', 'lostReason', 'lostKind', 'probability'];
     const mayMove = mayMoveQuotation(await moverScope(me), before);
     if (moving && !mayMove) throw forbidden(MOVER_REFUSAL);
-    if (!canEditRecord(me, 'gops', 'quotations', before.ownerId)) {
+    if (!(await mayEditQuotation(me, before))) {
       const others = Object.keys(body).filter((k) => !MOVE_KEYS.includes(k) && (body as Record<string, unknown>)[k] !== undefined);
-      if (!moving || !mayMove || others.length) throw forbidden('Only the author can edit this quotation');
+      if (!moving || !mayMove || others.length) throw forbidden(EDITOR_REFUSAL);
     }
 
     // One set of move rules for the detail page and the board (shared/pipeline).
     if (body.outcome !== undefined && body.outcome !== before.outcome) {
+      if (body.outcome !== 'LOST' && body.outcome !== 'ON_HOLD') await refuseUnacknowledged(before);
       const job = before.revisions.flatMap((r) => r.jobs)[0] ?? null;
       assertOutcomeChange(before.outcome, body.outcome, {
         lostReason: body.lostReason !== undefined ? body.lostReason : before.lostReason,
@@ -2684,9 +2756,9 @@ quotationRoutes.post(
       }),
       req.body,
     );
-    const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, ownerId: true } });
+    const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, ownerId: true, teamId: true } });
     if (!quotation) throw notFound('Quotation not found');
-    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId) && !can(me, 'gfin.budget_requests.view_all')) {
+    if (!(await mayEditQuotation(me, quotation)) && !can(me, 'gfin.budget_requests.view_all')) {
       throw forbidden('Its owner or finance re-allocates what was spent on a lost quotation');
     }
     const actor = { id: me.id, name: me.name };
@@ -2903,12 +2975,19 @@ quotationRoutes.post(
       include: { revisions: { orderBy: { revision: 'desc' }, take: 1, include: { items: true } } },
     });
     if (!quotation) throw notFound('Quotation not found');
-    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
-      throw forbidden('Only the author can edit this quotation');
+    if (!(await mayEditQuotation(me, quotation))) {
+      throw forbidden(EDITOR_REFUSAL);
     }
 
     const latest = quotation.revisions[0];
-    if (latest?.status === 'DRAFT') {
+    // A draft that was already SENT to the customer (a quotation sent as it
+    // was imported) is what they hold: it is changed by a new revision too
+    // (2026-11-14, the owner's call), never edited in place.
+    const sentDraft =
+      latest?.status === 'DRAFT' &&
+      ['SUBMITTED', 'NEGOTIATION', 'ON_HOLD'].includes(quotation.outcome) &&
+      (!quotation.submittedAt || latest.createdAt <= quotation.submittedAt);
+    if (latest?.status === 'DRAFT' && !sentDraft) {
       throw badRequest(
         `Revision ${latest.revision} is still a draft — finish or submit it before raising another.`,
       );
@@ -3212,6 +3291,7 @@ quotationRoutes.post(
     if (!withItems?.items.some((i) => !i.isHeading)) {
       throw badRequest('Add at least one line before submitting for approval');
     }
+    await refuseUnacknowledged(quotation);
     // Every priced line names its product group before the quotation moves on
     // (2026-10-08, the owner's call) — the editor refuses to save without one;
     // this is the gate for a quotation filled another way (SCORO, a costing).
@@ -3266,8 +3346,8 @@ quotationRoutes.post(
     const me = currentUser(req);
     const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id } });
     if (!quotation) throw notFound('Quotation not found');
-    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
-      throw forbidden('Only the author can edit this quotation');
+    if (!(await mayEditQuotation(me, quotation))) {
+      throw forbidden(EDITOR_REFUSAL);
     }
     const revision = await prisma.quotationRevision.findFirst({
       where: { id: req.params.revisionId, quotationId: req.params.id },
@@ -3375,9 +3455,9 @@ onApprovalReopened('quotation', {
   may: async (actor, revisionId) => {
     const revision = await prisma.quotationRevision.findUnique({
       where: { id: revisionId },
-      select: { status: true, quotation: { select: { ownerId: true } } },
+      select: { status: true, quotation: { select: { ownerId: true, teamId: true } } },
     });
-    return !!revision && revision.status === 'APPROVED' && canEditRecord(actor, 'gops', 'quotations', revision.quotation.ownerId);
+    return !!revision && revision.status === 'APPROVED' && (await mayEditQuotation(actor, revision.quotation));
   },
   reopen: async ({ documentId, tx }) => {
     const revision = await tx.quotationRevision.findUnique({
@@ -3641,7 +3721,7 @@ registerAttachmentGuard(
       if (user.isSuperAdmin) return true;
       const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true, teamId: true } });
       if (!q) return false;
-      if (canEditRecord(user, 'gops', 'quotations', q.ownerId)) return true;
+      if (await mayEditQuotation(user, q)) return true;
       const reads = readsQuotation(user, q);
       return reads && user.permissions.has('gops.sales_orders.create');
     },
@@ -3664,20 +3744,17 @@ quotationRoutes.get(
     const { design } = await quotationDesign();
     const optionId = typeof req.query.option === 'string' && req.query.option ? req.query.option : null;
     const bare = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
-    // The bare document by default (2026-10-16, the owner's call); `?attachments=1` puts the files behind it.
-    const files = req.query.attachments !== '1' ? [] : await attachedFiles('quotation', quotation.id);
-    const { pdf, listed } = await withAttachments(bare, files, {
-      title: 'Quotation',
-      number: quotation.number,
-      reference: quotation.customer.name,
-    });
+    // ALWAYS the bare quotation (2026-11-14, the owner's call): its files —
+    // the lead's and the costings' among them — show what the supplies really
+    // cost, and this paper goes to the customer.
+    const pdf = bare;
 
     await audit(
       {
         entityType: 'quotation',
         entityId: quotation.id,
         action: 'EXPORTED',
-        summary: `Printed ${quotation.number} R${revision.revision}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+        summary: `Printed ${quotation.number} R${revision.revision}`,
       },
       req,
     );

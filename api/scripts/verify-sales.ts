@@ -4652,17 +4652,54 @@ async function main() {
     const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
     const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=1`);
     const qFullText = pdfText(qFull);
+    // The quotation's paper is the customer's (2026-11-14, the owner's call):
+    // its files — the lead's and the costings' among them — never print with it.
     check(
-      'printed with its attachments, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
-      (await pagesOf(qFull)) === (await pagesOf(qBare)) + 1 + 1 + 2,
+      'the quotation never prints its attached files, even when asked: the same pages, no Attachments page, no file named',
+      (await pagesOf(qFull)) === (await pagesOf(qBare)) && !qFullText.includes('ATTACHMENTS') && !qFullText.includes(`${TAG}-customer-PO.pdf`),
       `${await pagesOf(qBare)} → ${await pagesOf(qFull)}`,
     );
-    check(
-      'the Attachments page names all four, says what cannot be printed, and how many pages follow',
-      qFullText.includes('ATTACHMENTS') && [`${TAG}-site-photo.png`, `${TAG}-customer-PO.pdf`, `${TAG}-specs.docx`, `${TAG}-broken.pdf`].every((n) => qFullText.includes(n)) &&
-        qFullText.includes('Not printable') && qFullText.includes('Could not be read') && qFullText.includes('3 pages follow'),
-    );
     check('Print is the bare quotation (2026-10-16)', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
+
+    // A lead's files come along into the quotation raised from it, as copies.
+    const upLead = await uploadTo(salesToken, 'lead', lead.id, `${TAG}-inquiry-scope.png`, 'image/png', pngBytes);
+    const fromLeadQ = await http(salesToken, 'POST', '/quotations', { customerId: customer.id, leadId: lead.id, subject: `${TAG} with the lead's files` });
+    const leadFiles = fromLeadQ.status === 201 ? await prisma.attachment.findMany({ where: { entityType: 'quotation', entityId: String(fromLeadQ.body.id) } }) : [];
+    const stillOnLead = await prisma.attachment.count({ where: { entityType: 'lead', entityId: lead.id } });
+    check(
+      'a quotation raised from a lead takes copies of the lead’s files, captioned with the lead — the lead keeps its own',
+      upLead.status === 201 && leadFiles.length === 1 && /From lead/.test(leadFiles[0].caption ?? '') && leadFiles[0].fileName === `${TAG}-inquiry-scope.png` && stillOnLead === 1,
+      `${upLead.status} ${fromLeadQ.status} ${leadFiles.map((c) => c.caption).join()} ${stillOnLead}`,
+    );
+
+    // Raised in somebody else's name: theirs to acknowledge before it goes anywhere.
+    const raisedFor = await http(managerToken, 'POST', '/quotations', {
+      customerId: customer.id,
+      ownerId: sales.id,
+      subject: `${TAG} raised for the author`,
+      lines: [{ title: 'Pump', description: '', quantity: 1, unit: 'lot', unitPrice: 1000, group: 'OTHERS' }],
+    });
+    const forId = String(raisedFor.body.id);
+    const forRev = (raisedFor.body.revisions as { id: string }[] | undefined)?.[0]?.id;
+    const toldAuthor = await prisma.notification.count({ where: { userId: sales.id, link: `/g-ops/quotations/${forId}`, title: { contains: 'in your name' } } });
+    const pageBefore = (await http(salesToken, 'GET', `/quotations/${forId}`)).body.authorAck as { pending: boolean; canAcknowledge: boolean } | null;
+    const submitEarly = await http(salesToken, 'POST', `/quotations/${forId}/revisions/${forRev}/submit`, {});
+    const sendEarly = await http(salesToken, 'PATCH', `/quotations/${forId}`, { outcome: 'SUBMITTED' });
+    const ackByOther = await http(managerToken, 'POST', `/quotations/${forId}/acknowledge`);
+    const ack = await http(salesToken, 'POST', `/quotations/${forId}/acknowledge`);
+    const ackAgain = await http(salesToken, 'POST', `/quotations/${forId}/acknowledge`);
+    const pageAfter = (await http(salesToken, 'GET', `/quotations/${forId}`)).body.authorAck as { pending: boolean } | null;
+    check(
+      'a quotation raised in another person’s name waits for them: they are told, it cannot be submitted or sent, only they acknowledge it, once',
+      raisedFor.status === 201 && toldAuthor === 1 && pageBefore?.pending === true && pageBefore.canAcknowledge === true &&
+        submitEarly.status === 400 && /acknowledged/.test(submitEarly.text) && sendEarly.status === 400 &&
+        ackByOther.status === 403 && ack.status === 200 && ackAgain.status === 400 && pageAfter?.pending === false,
+      `${raisedFor.status} ${raisedFor.text.slice(0, 120)} told ${toldAuthor} ${JSON.stringify(pageBefore)} ${submitEarly.status} ${sendEarly.status} ${ackByOther.status} ${ack.status} ${ackAgain.status}`,
+    );
+    // Only its owner, their leader or sales manager, the CEO: a colleague, and
+    // the paper once sent, are changed by nobody else and by a new revision.
+    const colleagueEdit = await http(otherToken, 'PATCH', `/quotations/${forId}`, { subject: `${TAG} not theirs` });
+    check('a colleague cannot edit somebody else’s quotation', colleagueEdit.status === 403, `${colleagueEdit.status} ${colleagueEdit.text.slice(0, 100)}`);
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
     const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };
