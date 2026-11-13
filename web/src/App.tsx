@@ -87,6 +87,7 @@ import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { OrgChartPage, HierarchyChartPage } from './pages/hr/Charts';
 import { AssetSlips, AssetSlipPage } from './pages/hr/AssetSlips';
 import { ExamQuestionsPage } from './pages/hr/ExamQuestions';
+import { EvaluationRuns, EvaluationRunPage, EvaluationAnswerPage, EvaluationResultPage } from './pages/hr/EvaluationRuns';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -1110,6 +1111,25 @@ function Routed() {
             <GuardAny permissions={['ghr.entrance_exams.view_all', 'ghr.entrance_exams.view_team', 'ghr.entrance_exams.view_own', 'ghr.candidates.view_all']}>
               <EntranceExams />
             </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/evaluation-runs"
+          element={
+            <Guard permission="ghr.evaluation_runs.view_all">
+              <EvaluationRuns />
+            </Guard>
+          }
+        />
+        {/* No Guard on these three: an evaluator answers their own, a person reads their own released result — the API decides. */}
+        <Route path="/g-hr/evaluation-runs/answer/:id" element={<EvaluationAnswerPage />} />
+        <Route path="/g-hr/evaluation-runs/result/:id" element={<EvaluationResultPage />} />
+        <Route
+          path="/g-hr/evaluation-runs/:id"
+          element={
+            <Guard permission="ghr.evaluation_runs.view_all">
+              <EvaluationRunPage />
+            </Guard>
           }
         />
         <Route

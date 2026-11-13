@@ -394,6 +394,10 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'org_chart', group: 'People', label: 'Organizational Chart', path: '/g-hr/org-chart', actions: ['view_all'], phase: 10 },
       { key: 'hierarchy_chart', group: 'People', label: 'Hierarchy Chart', path: '/g-hr/hierarchy-chart', actions: ['view_all'], phase: 10 },
       { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_KEPT, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
+      // Evaluation runs (2026-11-13, the owner's call: "run an evaluation for
+      // certain people, particularly trainees; HR adds the questions; a report
+      // when all have answered"). HR's; an evaluator answers with no right.
+      { key: 'evaluation_runs', group: 'People', label: 'Evaluation Runs', path: '/g-hr/evaluation-runs', actions: ['view_all', 'create', 'edit_all'], phase: 10 },
       // Turnover of accountabilities before someone leaves, cleared by the area
       // that owns each item and signed off through the approval engine. The
       // screen opens with the 12-month turnover figures so the label is true.

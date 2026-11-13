@@ -776,6 +776,33 @@ four databases and four copies of "customer".
   stays possible for a paper exam). An unused link is cancelled. The trail
   never carries a score. verify-hr pins it.
 
+## The owner's G-HR batch of 2026-11-13 — push 4: evaluation runs
+
+- **HR evaluates a batch, evaluators answer, a report ranks them**
+  (`ghr.evaluation_runs`, view_all / create / edit_all — given once by
+  `splitBorrowedRights()` (`evaluation-runs`) to whoever held Employees ›
+  Edit All; G-HR › People › **Evaluation Runs**, `/g-hr/evaluation-runs`,
+  `routes/evaluationRuns.ts`, `pages/hr/EvaluationRuns.tsx`, numbering
+  `evaluation_run` GT-EVR-2026-0001). Apart from the regularisation
+  evaluation (that one is a routed document). `EvaluationRun` (DRAFT → OPEN →
+  CLOSED, `releasedAt`) holds its QUESTIONS (`EvaluationRunQuestion`: RATING
+  1–5 with a weight, or COMMENT), its PEOPLE (`EvaluationRunTarget`, any
+  employee) and per person their EVALUATORS (`EvaluationRunAssignment`, a
+  login and a role word — Superior, Trainer, Peer …; nobody evaluates
+  themselves). A draft is saved whole (`PUT /:id`); **Open** fixes it and
+  tells each evaluator (bell + My Work, `evaluationRunWork()`); **Remind**
+  tells those still to answer, once a day at most; **Close** / **Reopen**;
+  **Release** (closed only, once) lets each person read THEIR OWN result
+  (`GET /:id/my-result`: averages and comments, never an evaluator's name);
+  a draft alone is deleted. The evaluator's page `/answer/:assignmentId` and
+  the person's `/result/:runId` have no web Guard — the API opens an
+  assignment to its evaluator alone (404 otherwise). Save leaves ratings
+  blank; Submit needs every rating, once. **The report** (`runReport()`): per
+  question the mean of the ratings given, a person's overall the
+  weight-averaged means, to two decimals, ranked; who is still to answer;
+  `report.csv` and `report.pdf`. Ratings never reach the audit trail.
+  verify-hr pins it.
+
 ## The delete rule (2026-11-13)
 
 The owner's call: "make all the Delete function only by the one who created

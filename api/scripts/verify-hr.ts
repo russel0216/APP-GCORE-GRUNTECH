@@ -193,6 +193,8 @@ async function cleanup() {
   const testSlips = await prisma.assetSlip.findMany({ where: { OR: [{ employee: { employeeNo: { startsWith: TAG } } }, { issuedBy: { email: { endsWith: '@verifyhr.local' } } }] }, select: { id: true } });
   for (const f of await prisma.attachment.findMany({ where: { entityType: 'asset_slip', entityId: { in: testSlips.map((x) => x.id) } }, select: { id: true } })) await deleteAttachment(f.id);
   await prisma.assetSlip.deleteMany({ where: { id: { in: testSlips.map((x) => x.id) } } });
+  // Evaluation runs (2026-11-13) hold their employees, evaluators and author.
+  await prisma.evaluationRun.deleteMany({ where: { OR: [{ title: { startsWith: TAG } }, { createdBy: { email: { endsWith: '@verifyhr.local' } } }] } });
   // Hiring (2026-10-21): contract → candidate → request, each held by a Restrict.
   const hiringRequests = await prisma.manpowerRequest.findMany({ where: { OR: [{ title: { startsWith: TAG } }, { requestedBy: { email: { endsWith: '@verifyhr.local' } } }] }, select: { id: true } });
   if (hiringRequests.length) {
@@ -5645,6 +5647,107 @@ async function main() {
     check('the list prints', (await fetch(`${BASE}/attendance-corrections/pdf`, { headers: { Authorization: `Bearer ${signToken(corrAdmin.id, corrAdmin.email)}` } })).status === 200);
   } else {
     check('API is reachable for the superior’s door checks', false, `nothing answered at ${BASE}`);
+  }
+
+  // Evaluation runs (2026-11-13): HR picks the people, evaluators rate them, a report when all have answered.
+  if (await apiReachable()) {
+    const evHr = await makeUser('ZZ Eval HR', 'evalhr@verifyhr.local', [(await makeRole('zzhr_evrun', `${TAG} Eval runs`, ['ghr.evaluation_runs.view_all', 'ghr.evaluation_runs.create', 'ghr.evaluation_runs.edit_all'])).id]);
+    const evA = await makeUser('ZZ Evaluator A', 'evala@verifyhr.local', []);
+    const evB = await makeUser('ZZ Evaluator B', 'evalb@verifyhr.local', []);
+    const evStranger = await makeUser('ZZ Eval Stranger', 'evalx@verifyhr.local', []);
+    const traineeLogin = await makeUser('ZZ Trainee Tess', 'evaltess@verifyhr.local', []);
+    const tess = await prisma.employee.create({ data: { employeeNo: `${TAG}-EV1`, firstName: `${TAG} Tess`, lastName: 'Trainee', employmentType: 'TRAINEE', userId: traineeLogin.id } });
+    const tom = await prisma.employee.create({ data: { employeeNo: `${TAG}-EV2`, firstName: `${TAG} Tom`, lastName: 'Trainee', employmentType: 'TRAINEE' } });
+    const hrT = signToken(evHr.id, evHr.email);
+    const aT = signToken(evA.id, evA.email);
+    const bT = signToken(evB.id, evB.email);
+    const xT = signToken(evStranger.id, evStranger.email);
+    const tessT = signToken(traineeLogin.id, traineeLogin.email);
+    const made = await api(hrT, 'POST', '/evaluation-runs', { title: `${TAG} trainee batch` });
+    check('HR starts an evaluation run, numbered', made.status === 201 && /^GT-EVR-/.test(String(made.body.number)), JSON.stringify(made.body).slice(0, 200));
+    const runId = String(made.body.id);
+    check('a run cannot be opened with nobody on it', (await api(hrT, 'POST', `/evaluation-runs/${runId}/open`)).status === 400);
+    check(
+      'nobody evaluates themselves',
+      (await api(hrT, 'PUT', `/evaluation-runs/${runId}`, { title: `${TAG} trainee batch`, questions: [{ kind: 'RATING', prompt: 'Safety', weight: 1 }], targets: [{ employeeId: tess.id, evaluators: [{ userId: traineeLogin.id, role: 'Peer' }] }] })).status === 400,
+    );
+    const saved = await api(hrT, 'PUT', `/evaluation-runs/${runId}`, {
+      title: `${TAG} trainee batch`,
+      dueOn: '2026-12-31',
+      questions: [
+        { kind: 'RATING', prompt: 'Follows safety procedures', weight: 2 },
+        { kind: 'RATING', prompt: 'Technical skill', weight: 1 },
+        { kind: 'COMMENT', prompt: 'What should they improve?', weight: 1 },
+      ],
+      targets: [
+        { employeeId: tess.id, evaluators: [{ userId: evA.id, role: 'Superior' }, { userId: evB.id, role: 'Trainer' }] },
+        { employeeId: tom.id, evaluators: [{ userId: evA.id, role: 'Superior' }] },
+      ],
+    });
+    check('HR saves the questions, the people and their evaluators', saved.status === 200, JSON.stringify(saved.body).slice(0, 200));
+    check('an evaluator cannot read the run itself', (await api(aT, 'GET', `/evaluation-runs/${runId}`)).status === 403);
+    const opened = await api(hrT, 'POST', `/evaluation-runs/${runId}/open`);
+    check('opened, it tells each evaluator', opened.status === 200 && (await prisma.notification.count({ where: { userId: evA.id, link: { startsWith: '/g-hr/evaluation-runs/answer/' } } })) === 2, JSON.stringify(opened.body).slice(0, 200));
+    check('an open run’s questions are fixed', (await api(hrT, 'PUT', `/evaluation-runs/${runId}`, { title: 'changed' })).status === 400);
+    type Mine = { toAnswer: { id: string; person: string }[] };
+    const mineA = (await api(aT, 'GET', '/evaluation-runs/mine')).body as Mine;
+    check('the evaluator lists the two people to evaluate', mineA.toAnswer?.length === 2, JSON.stringify(mineA).slice(0, 200));
+    const work = (await api(aT, 'GET', '/my-work')).body as { assignedToMe?: { kind: string }[] };
+    check('My Work carries them', (work.assignedToMe ?? []).filter((r) => r.kind === 'evaluation_run').length === 2, JSON.stringify(work).slice(0, 300));
+    const asg = await prisma.evaluationRunAssignment.findMany({ where: { target: { runId } }, include: { target: true } });
+    const aTess = asg.find((x) => x.evaluatorId === evA.id && x.target.employeeId === tess.id)!;
+    const bTess = asg.find((x) => x.evaluatorId === evB.id)!;
+    const aTom = asg.find((x) => x.evaluatorId === evA.id && x.target.employeeId === tom.id)!;
+    check(
+      'another person cannot open an evaluator’s answers',
+      (await api(xT, 'GET', `/evaluation-runs/assignments/${aTess.id}`)).status === 404 && (await api(bT, 'GET', `/evaluation-runs/assignments/${aTess.id}`)).status === 404,
+    );
+    const paper = (await api(aT, 'GET', `/evaluation-runs/assignments/${aTess.id}`)).body as { questions: { id: string; kind: string }[] };
+    const [qSafety, qSkill, qComment] = paper.questions;
+    check(
+      'a save may leave ratings blank; a submit may not',
+      (await api(aT, 'PUT', `/evaluation-runs/assignments/${aTess.id}`, { answers: [{ questionId: qSafety.id, rating: 5 }] })).status === 200 &&
+        (await api(aT, 'PUT', `/evaluation-runs/assignments/${aTess.id}`, { answers: [], submit: true })).status === 400,
+    );
+    const subA = await api(aT, 'PUT', `/evaluation-runs/assignments/${aTess.id}`, {
+      answers: [
+        { questionId: qSafety.id, rating: 5 },
+        { questionId: qSkill.id, rating: 2 },
+        { questionId: qComment.id, comment: `${TAG} more practice on wiring` },
+      ],
+      submit: true,
+    });
+    check('the evaluator submits', subA.status === 200, JSON.stringify(subA.body));
+    check('a second submit is refused', (await api(aT, 'PUT', `/evaluation-runs/assignments/${aTess.id}`, { answers: [], submit: true })).status === 409);
+    await api(bT, 'PUT', `/evaluation-runs/assignments/${bTess.id}`, { answers: [{ questionId: qSafety.id, rating: 3 }, { questionId: qSkill.id, rating: 4 }], submit: true });
+    type Rep = { ranked: { name: string; overall: number | null; perQuestion: { average: number | null }[]; pending?: string[] }[]; progress: { answered: number; asked: number } };
+    const rep = (await api(hrT, 'GET', `/evaluation-runs/${runId}/report`)).body as Rep;
+    const tessRow = rep.ranked?.find((p) => p.name.includes('Tess'));
+    // Safety (5+3)/2 = 4 at weight 2, skill (2+4)/2 = 3 at weight 1 → (8+3)/3 = 3.67.
+    check('the report averages each question and weighs the overall', tessRow?.overall === 3.67 && tessRow.perQuestion[0].average === 4 && tessRow.perQuestion[1].average === 3, JSON.stringify(tessRow));
+    check('the report says who is still to answer', rep.progress?.answered === 2 && rep.progress.asked === 3 && !!rep.ranked.find((p) => p.name.includes('Tom'))?.pending?.length, JSON.stringify(rep).slice(0, 400));
+    check(
+      'the report exports and prints',
+      (await fetch(`${BASE}/evaluation-runs/${runId}/report.csv`, { headers: { Authorization: `Bearer ${hrT}` } })).status === 200 &&
+        (await fetch(`${BASE}/evaluation-runs/${runId}/report.pdf`, { headers: { Authorization: `Bearer ${hrT}` } })).status === 200,
+    );
+    const trail = await prisma.auditLog.findMany({ where: { entityType: 'evaluation_run', entityId: runId } });
+    check('the trail says it was answered, never the ratings', trail.length > 0 && !trail.some((r) => /rating/i.test(r.summary) || JSON.stringify(r.after ?? null).includes('rating')));
+    check('the person evaluated sees nothing before release', (await api(tessT, 'GET', `/evaluation-runs/${runId}/my-result`)).status === 404);
+    check('results are released only once it is closed', (await api(hrT, 'POST', `/evaluation-runs/${runId}/release`)).status === 409);
+    await api(hrT, 'POST', `/evaluation-runs/${runId}/close`);
+    check('closed, an unanswered evaluator can no longer answer', (await api(aT, 'PUT', `/evaluation-runs/assignments/${aTom.id}`, { answers: [{ questionId: qSafety.id, rating: 4 }] })).status === 400);
+    check('HR releases the results', (await api(hrT, 'POST', `/evaluation-runs/${runId}/release`)).status === 200);
+    const result = await api(tessT, 'GET', `/evaluation-runs/${runId}/my-result`);
+    check(
+      'the person reads their own result, with no evaluator’s name on it',
+      result.status === 200 && (result.body.person as { overall: number })?.overall === 3.67 && !JSON.stringify(result.body).includes('ZZ Evaluator'),
+      JSON.stringify(result.body).slice(0, 300),
+    );
+    check('a colleague reads no one else’s result', (await api(xT, 'GET', `/evaluation-runs/${runId}/my-result`)).status === 404);
+    check('an opened run is not deleted', (await api(hrT, 'DELETE', `/evaluation-runs/${runId}`)).status === 400);
+  } else {
+    check('API is reachable for the evaluation run checks', false, `nothing answered at ${BASE}`);
   }
 
   await cleanup();

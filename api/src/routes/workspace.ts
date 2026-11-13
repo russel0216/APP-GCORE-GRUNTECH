@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { peopleFlowWork } from '../shared/peopleFlow';
 import { memosToAcknowledge } from './memos';
 import { attendanceCorrectionWork } from './attendanceCorrections';
+import { evaluationRunWork } from './evaluationRuns';
 import { Prisma } from '@prisma/client';
 import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
@@ -595,6 +596,7 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     ...(await outgoingToConfirm(me)),
     // Memos (2026-10-20): what was issued to me and I have not acknowledged.
     ...(await memosToAcknowledge(me)),
+    ...(await evaluationRunWork(me)),
     // Attendance corrections (2026-10-23): my own waiting for approval, and
     // those rejected this week (the drafts are under My drafts).
     ...(await attendanceCorrectionWork(me, 'open')),

@@ -71,6 +71,7 @@ const DETAIL: Record<string, string> = {
   // G-HR › Records › Asset Management (2026-10-21).
   company_asset: '/g-hr/assets',
   asset_slip: '/g-hr/assets/slips',
+  evaluation_run: '/g-hr/evaluation-runs',
   manpower_request: '/g-hr/hiring/mpr',
   candidate: '/g-hr/hiring/candidates',
   employment_contract: '/g-hr/hiring/contracts',

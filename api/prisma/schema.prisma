@@ -195,6 +195,8 @@ model User {
   assetSlipsIssued AssetSlip[] @relation("AssetSlipIssuer")
   assetSlipsAcknowledged AssetSlip[] @relation("AssetSlipAcknowledger")
   examSittingsIssued ExamSitting[] @relation("ExamSittingIssuer")
+  evaluationRunsCreated EvaluationRun[] @relation("EvaluationRunCreator")
+  evaluationRunAssignments EvaluationRunAssignment[] @relation("EvaluationRunEvaluator")
 }
 
 enum AccountTokenPurpose {
@@ -1044,6 +1046,7 @@ model Employee {
   @@index([positionId])
   @@index([industryId])
   assetSlips AssetSlip[]
+  evaluationRunTargets EvaluationRunTarget[]
 }
 
 /// The five cost buckets every costing, budget and cost-ledger row uses
@@ -6972,3 +6975,98 @@ model ExhibitionScan {
   @@index([visitorId])
   @@index([userId])
 }
+
+// ── Evaluation runs (2026-11-13) ─────────────────────────────────────────────
+// The owner's call: "run an evaluation for certain people, particularly
+// trainees; HR adds the questions; after all have answered there is a
+// report". His answer: evaluators rate the trainee. Apart from the
+// regularisation evaluation (EmployeeEvaluation), which changes employment.
+
+enum EvaluationRunStatus {
+  DRAFT
+  OPEN
+  CLOSED
+}
+
+enum EvaluationQuestionKind {
+  /// A rating from 1 to 5.
+  RATING
+  /// A written comment.
+  COMMENT
+}
+
+model EvaluationRun {
+  id          String                  @id @default(cuid())
+  number      String                  @unique
+  title       String
+  description String?
+  dueOn       DateTime?               @db.Date
+  status      EvaluationRunStatus     @default(DRAFT)
+  createdById String
+  createdBy   User                    @relation("EvaluationRunCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  openedAt    DateTime?
+  closedAt    DateTime?
+  /// When the people evaluated may read their own result.
+  releasedAt  DateTime?
+  remindedAt  DateTime?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  questions   EvaluationRunQuestion[]
+  targets     EvaluationRunTarget[]
+
+  @@index([status])
+}
+
+model EvaluationRunQuestion {
+  id       String                 @id @default(cuid())
+  runId    String
+  run      EvaluationRun          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence Int                    @default(0)
+  kind     EvaluationQuestionKind @default(RATING)
+  prompt   String
+  weight   Decimal                @default(1) @db.Decimal(6, 2)
+  answers  EvaluationRunAnswer[]
+
+  @@index([runId, sequence])
+}
+
+/// One person evaluated in a run.
+model EvaluationRunTarget {
+  id          String                    @id @default(cuid())
+  runId       String
+  run         EvaluationRun             @relation(fields: [runId], references: [id], onDelete: Cascade)
+  employeeId  String
+  employee    Employee                  @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  assignments EvaluationRunAssignment[]
+
+  @@unique([runId, employeeId])
+}
+
+/// One evaluator asked to rate one person.
+model EvaluationRunAssignment {
+  id          String                @id @default(cuid())
+  targetId    String
+  target      EvaluationRunTarget   @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  evaluatorId String
+  evaluator   User                  @relation("EvaluationRunEvaluator", fields: [evaluatorId], references: [id], onDelete: Restrict)
+  /// Superior, Trainer, Peer — said on the report.
+  role        String?
+  submittedAt DateTime?
+  answers     EvaluationRunAnswer[]
+
+  @@unique([targetId, evaluatorId])
+  @@index([evaluatorId])
+}
+
+model EvaluationRunAnswer {
+  id           String                  @id @default(cuid())
+  assignmentId String
+  assignment   EvaluationRunAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     EvaluationRunQuestion   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  rating       Int?
+  comment      String?
+
+  @@unique([assignmentId, questionId])
+}
+
