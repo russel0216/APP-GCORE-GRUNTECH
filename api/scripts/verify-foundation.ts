@@ -554,9 +554,9 @@ async function main() {
   const ghrGroups = [...new Set(menuFor(superUser).find((m) => m.key === 'ghr')!.submodules.filter((s) => !s.hidden).map((s) => s.group))];
   const hiringStrip = menuFor(superUser).find((m) => m.key === 'ghr')!.submodules.filter((s) => s.group === 'Hiring' && !s.hidden).map((s) => s.label).join();
   check(
-    'G-HR’s Hiring section sits between Records and People: Man Power Request, Candidates, Entrance Exam, Contracts & Approvals',
+    'G-HR’s Hiring section sits between Records and People: Man Power Request, Candidates, Employment Examination, Contracts & Approvals',
     ghrGroups.indexOf('Hiring') === ghrGroups.indexOf('Records') + 1 && ghrGroups.indexOf('People') === ghrGroups.indexOf('Hiring') + 1 &&
-      hiringStrip === 'Man Power Request,Candidates,Entrance Exam,Contracts & Approvals',
+      hiringStrip === 'Man Power Request,Candidates,Employment Examination,Contracts & Approvals',
     `${ghrGroups.join(' · ')} | ${hiringStrip}`,
   );
   // The Sales strip is the sales flow (2026-10-08, the owner's call).
