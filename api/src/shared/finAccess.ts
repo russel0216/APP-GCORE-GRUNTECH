@@ -79,3 +79,61 @@ export async function applyFinAccess(): Promise<{ roles: number; common: number;
   );
   return { roles: roles.length, ...tally };
 }
+
+/**
+ * Money In for the three who work it (2026-11-13, the owner's call: "editable
+ * for access for Credit and Collection, Accounts Payable and Finance
+ * Manager"). Once, marked `MONEY_IN_ACCESS_MARK`: the Credit and Collection
+ * Officer (`credit_collection`), the Account Payable Officer (`finance`) and
+ * the Finance Manager (`finance_manager`) get every Accounts Receivable box
+ * but Delete — view, create and edit, own, team and all — and Collections'
+ * view. Delete (an invoice's, and reversing a collection) stays where Admin ›
+ * Roles has it. Added, never removed; a role not on file is passed over.
+ */
+export const MONEY_IN_ACCESS_MARK = 'seed.moneyInAccess20261113';
+export const MONEY_IN_ROLES = ['credit_collection', 'finance', 'finance_manager'];
+export const MONEY_IN_KEYS: string[] = [
+  ...['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all'].map((a) => `gfin.ar.${a}`),
+  'gfin.payments.view_all',
+];
+
+export async function applyMoneyInAccess(): Promise<{ roles: number; added: number } | null> {
+  if (await prisma.setting.findUnique({ where: { key: MONEY_IN_ACCESS_MARK } })) return null;
+  const [roles, permissions] = await Promise.all([
+    prisma.role.findMany({ where: { key: { in: MONEY_IN_ROLES } }, select: { id: true, key: true, name: true } }),
+    prisma.permission.findMany({ where: { key: { in: MONEY_IN_KEYS } }, select: { id: true, key: true } }),
+  ]);
+  const missing = MONEY_IN_KEYS.filter((k) => !permissions.some((p) => p.key === k));
+  if (missing.length) throw new Error(`G-FIN permissions not on file: ${missing.join(', ')}`);
+  let added = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const r of roles) {
+      const { count } = await tx.rolePermission.createMany({
+        data: permissions.map((p) => ({ roleId: r.id, permissionId: p.id })),
+        skipDuplicates: true,
+      });
+      added += count;
+      if (count) {
+        await audit(
+          {
+            entityType: 'role',
+            entityId: r.id,
+            action: 'UPDATED',
+            summary: `${r.name}: Accounts Receivable to view, create and edit (all), and Collections to view — ${count} right(s) added`,
+            after: { added: count },
+          },
+          undefined,
+          tx,
+        );
+      }
+    }
+    await tx.setting.create({
+      data: {
+        key: MONEY_IN_ACCESS_MARK,
+        value: { at: new Date().toISOString(), roles: roles.map((r) => r.key), added },
+        description: 'seed: Accounts Receivable (view, create, edit) and Collections (view) given to Credit and Collection, Account Payable and the Finance Manager, once (2026-11-13)',
+      },
+    });
+  });
+  return { roles: roles.length, added };
+}

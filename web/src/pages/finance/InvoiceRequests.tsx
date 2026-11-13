@@ -131,9 +131,20 @@ export function InvoiceRequests() {
         emptyTitle="No invoice requests"
         emptyHint="Ask for an invoice from an issued sales order, or from an approved progress billing on its project's Progress & Billing tab."
         filters={[
+          // One tab at a time (2026-11-13): the list opens on requests still in
+          // progress; an approved one has its invoice, in Accounts Receivable.
+          {
+            key: 'stage',
+            label: 'Stage',
+            options: [
+              { value: 'open', label: 'In progress — draft or waiting for approval' },
+              { value: 'closed', label: 'Approved or cancelled' },
+            ],
+          },
           { key: 'status', label: 'Status', options: STATUSES },
           { key: 'dateFrom', toKey: 'dateTo', label: 'Raised', type: 'dateRange' },
         ]}
+        defaultFilters={{ stage: 'open' }}
         summary={(raw) => {
           const sum = raw as unknown as Summary | undefined;
           if (!sum) return null;

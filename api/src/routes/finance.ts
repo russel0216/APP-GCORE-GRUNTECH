@@ -433,6 +433,13 @@ function invoiceListWhereAll(q: ListQuery): Prisma.InvoiceWhereInput {
   if (f.outstanding === 'true') {
     where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
   }
+  // What Accounts Receivable opens on (2026-11-13, the owner's call: "once
+  // reserved it moves to Accounts Receivable, then to Collections" — one tab
+  // at a time): the invoices still to collect — a draft just raised from its
+  // request, an issued and a partly paid one. A paid invoice is its
+  // collection's, under Collections; a cancelled one is history.
+  const stage = choice(f.stage, { open: 'open', closed: 'closed' }, 'Stage', (v) => (v === 'open' ? 'To collect' : 'Paid or cancelled'));
+  if (stage) and.push({ status: stage === 'open' ? { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } : { in: ['PAID', 'CANCELLED'] } });
   // Overdue only once countered: an invoice the customer has not received
   // has not started its terms.
   if (f.overdue === 'true') and.push(overdueWhere());
@@ -659,6 +666,7 @@ invoiceRoutes.get(
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
       f.countered === 'yes' ? 'countered' : f.countered === 'no' ? 'awaiting countering' : undefined,
+      f.stage === 'open' ? 'to collect' : f.stage === 'closed' ? 'paid or cancelled' : undefined,
       customer,
       project,
       orderNamed,
@@ -933,6 +941,10 @@ invoiceRoutes.get(
       // The delete route's own door (2026-10-22): the creator or Edit All
       // holding the delete right, or a super admin; the status is the page's.
       canDelete: can(me, 'gfin.ar.delete') && mayDeleteDocument(me, row.createdById),
+      // Correcting it after issue (2026-11-13): its details for whoever may
+      // edit it; its amounts only on a SCORO import no G-CORE collection settles.
+      canAmend: AMENDABLE.includes(row.status) && mayEdit(me, 'gfin', 'ar', row.createdById === me.id, row.createdById),
+      amounts: AMENDABLE.includes(row.status) ? await amountsCorrectable(row) : { ok: false, why: null },
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -1554,6 +1566,195 @@ invoiceRoutes.put(
         after: {
           ...headerData,
           ...(manual ? { customerId, jobId, netCollectible: manual.tax.netCollectible } : {}),
+        },
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
+  }),
+);
+
+/** The statuses an invoice is corrected in — out of draft, not cancelled. */
+const AMENDABLE: InvoiceStatus[] = ['ISSUED', 'PARTIALLY_PAID', 'PAID'];
+
+/**
+ * May this invoice's AMOUNTS be corrected? Only one the SCORO import brought
+ * across, and only while no collection recorded in G-CORE settles it — the
+ * collection SCORO's export stated is history and stays as it is.
+ */
+async function amountsCorrectable(invoice: { id: string; importedFrom: string | null }): Promise<{ ok: boolean; why: string | null }> {
+  if (!invoice.importedFrom) return { ok: false, why: 'Its amounts are fixed — an invoice raised in G-CORE is cancelled and raised again' };
+  const live = await prisma.paymentAllocation.count({ where: { invoiceId: invoice.id, payment: { importedFrom: null } } });
+  if (live) return { ok: false, why: 'A collection recorded in G-CORE settles it — its amounts are fixed from then on' };
+  return { ok: true, why: null };
+}
+
+const amendSchema = z.object({
+  siNumber: z.string().trim().max(60).optional().nullable(),
+  invoiceDate: z.string().optional(),
+  counteredDate: z.string().optional().nullable(),
+  termsDays: z.number().int().min(0).max(365).optional().nullable(),
+  poReference: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  ewtRate: z.number().min(0).max(0.15).optional(),
+  vatRate: z.number().min(0).max(1).optional(),
+  lines: z
+    .array(z.object({ description: z.string().trim().min(1, 'Every line needs a description'), detail: z.string().optional().nullable(), amount: z.number() }))
+    .min(1, 'An invoice needs at least one line')
+    .optional(),
+  /** The `updatedAt` the page read — a save over somebody else's is a 409. */
+  version: z.string().optional(),
+});
+
+/**
+ * Correcting an invoice that is already out (2026-11-13, the owner's call:
+ * "Accounts Receivable now holds the data of the SCORO import — editable").
+ *
+ * Any issued, partly paid or paid invoice takes its DETAILS: the printed
+ * invoice no., the countered day and the terms (the expected collection
+ * follows), the PO reference, the notes, and the withholding rate — EWT again
+ * on the gross it carries, refused once a collection states what was really
+ * withheld. An invoice the SCORO import brought across also takes its
+ * AMOUNTS — the invoice date, the lines and the VAT rate — while no
+ * collection recorded in G-CORE settles it; one raised in G-CORE never does
+ * (cancel it and raise another, so what was collected stays right). Nothing
+ * may leave less collectible than was already collected. The status is
+ * re-derived by `refreshSettlement`, never set here. A field left out is kept.
+ */
+invoiceRoutes.put(
+  '/:id/amend',
+  requireEdit('gfin', 'ar'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(amendSchema, req.body ?? {});
+    const existing = await prisma.invoice.findUnique({ where: { id: req.params.id }, include: invoiceInclude });
+    if (!existing) throw notFound('Invoice not found');
+    assertCanEdit(me, 'gfin', 'ar', existing.createdById === me.id, existing.createdById);
+    if (existing.status === 'DRAFT') throw badRequest('A draft is changed with Modify');
+    if (!AMENDABLE.includes(existing.status)) throw badRequest('A cancelled invoice is not changed');
+    if (body.version && new Date(body.version).getTime() !== existing.updatedAt.getTime()) {
+      throw conflict('It changed a moment ago — reload to see where it stands');
+    }
+
+    const wantsAmounts = body.lines !== undefined || body.vatRate !== undefined || body.invoiceDate !== undefined;
+    if (wantsAmounts) {
+      const may = await amountsCorrectable(existing);
+      if (!may.ok) throw badRequest(may.why!);
+    }
+    if (body.ewtRate !== undefined && existing.ewtAsBilled != null) {
+      throw badRequest('Its collections state the EWT that was withheld — the rate no longer decides it');
+    }
+
+    const today = dayKey(new Date());
+    const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : existing.invoiceDate;
+    const counteredDate =
+      body.counteredDate === undefined ? existing.counteredDate : body.counteredDate ? asDate(body.counteredDate, 'Countered date') : null;
+    if (invoiceDate > today) throw badRequest('The invoice date is a day still to come');
+    if (counteredDate && counteredDate < invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+    if (counteredDate && counteredDate > today) throw badRequest('It cannot be countered on a day still to come');
+    const termsDays = body.termsDays === undefined ? existing.termsDays : body.termsDays;
+    const datesMoved = body.invoiceDate !== undefined || body.counteredDate !== undefined || body.termsDays !== undefined;
+    const dueDate = datesMoved && termsDays !== null ? expectedCollection(invoiceDate, counteredDate, termsDays) : existing.dueDate;
+    if (dueDate < invoiceDate) throw badRequest('The expected collection would fall before the invoice date — set the terms');
+    if (body.siNumber !== undefined) await assertSiNumberFree(body.siNumber, { invoiceId: existing.id });
+
+    // The money: the lines again (a SCORO invoice), else the EWT alone on the
+    // gross it carries, else untouched.
+    const vatRate = body.vatRate ?? num(existing.vatRate);
+    const ewtRate = body.ewtRate ?? num(existing.ewtRate);
+    const manual = body.lines ? manualInvoiceMoney(body.lines, vatRate, ewtRate) : null;
+    const retaxed =
+      !manual && (body.ewtRate !== undefined || body.vatRate !== undefined)
+        ? (() => {
+            const tax = taxBreakdown(num(existing.grossAmount), vatRate, ewtRate);
+            return {
+              vatRate: D(tax.vatRate),
+              vatAmount: D(tax.vatAmount),
+              ewtRate: D(tax.ewtRate),
+              ewtAmount: D(tax.ewtAmount),
+              invoiceTotal: D(tax.invoiceTotal),
+              netCollectible: D(tax.netCollectible),
+            };
+          })()
+        : null;
+    const figures = manual?.figures ?? retaxed;
+    if (figures) {
+      const collected = num(existing.amountCollected);
+      const collectible = num(figures.netCollectible);
+      if (collected - collectible > 0.004) {
+        throw badRequest(
+          `${collected.toFixed(2)} has already been collected on ${existing.siNumber ?? existing.number} — it cannot be left collectible at ${collectible.toFixed(2)}. Lower the withholding rate, or correct the collection first`,
+        );
+      }
+    }
+
+    const headerData = {
+      invoiceDate,
+      counteredDate,
+      dueDate,
+      termsDays,
+      siNumber: body.siNumber === undefined ? existing.siNumber : body.siNumber?.trim() || null,
+      poReference: body.poReference === undefined ? existing.poReference : body.poReference || null,
+      notes: body.notes === undefined ? existing.notes : body.notes || null,
+    };
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.invoice.updateMany({
+        where: { id: existing.id, status: { in: AMENDABLE }, updatedAt: existing.updatedAt },
+        data: { ...headerData, ...(figures ?? {}) },
+      });
+      if (!claimed.count) throw conflict('It changed a moment ago — reload to see where it stands');
+      if (manual) {
+        await tx.invoiceLine.deleteMany({ where: { invoiceId: existing.id } });
+        await tx.invoiceLine.createMany({ data: manual.lines.map((l) => ({ ...l, invoiceId: existing.id })) });
+      }
+      // Paid, partly paid or issued is a function of the arithmetic.
+      if (figures) await refreshSettlement(tx, 'invoice', existing.id);
+      return tx.invoice.findUniqueOrThrow({ where: { id: existing.id }, include: invoiceInclude });
+    });
+
+    const moved = (a: Date | null, b: Date | null) => (a?.getTime() ?? 0) !== (b?.getTime() ?? 0);
+    const changed = [
+      headerData.siNumber !== existing.siNumber && 'invoice no.',
+      moved(invoiceDate, existing.invoiceDate) && 'invoice date',
+      moved(counteredDate, existing.counteredDate) && 'countered date',
+      termsDays !== existing.termsDays && 'terms',
+      headerData.poReference !== existing.poReference && 'PO reference',
+      headerData.notes !== existing.notes && 'notes',
+      manual && 'lines',
+      body.vatRate !== undefined && 'VAT rate',
+      body.ewtRate !== undefined && 'withholding rate',
+    ].filter(Boolean);
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary: `${existing.siNumber ?? existing.number} corrected after issue — ${changed.length ? changed.join(', ') : 'nothing changed'}${
+          figures ? `; ${num(updated.netCollectible)} collectible (was ${num(existing.netCollectible)})` : ''
+        }`,
+        before: {
+          siNumber: existing.siNumber,
+          invoiceDate: existing.invoiceDate,
+          counteredDate: existing.counteredDate,
+          dueDate: existing.dueDate,
+          termsDays: existing.termsDays,
+          poReference: existing.poReference,
+          grossAmount: num(existing.grossAmount),
+          vatRate: num(existing.vatRate),
+          ewtRate: num(existing.ewtRate),
+          invoiceTotal: num(existing.invoiceTotal),
+          netCollectible: num(existing.netCollectible),
+          status: existing.status,
+        },
+        after: {
+          ...headerData,
+          grossAmount: num(updated.grossAmount),
+          vatRate: num(updated.vatRate),
+          ewtRate: num(updated.ewtRate),
+          invoiceTotal: num(updated.invoiceTotal),
+          netCollectible: num(updated.netCollectible),
+          status: updated.status,
         },
       },
       req,
@@ -4402,6 +4603,8 @@ const paymentInclude = {
           number: true,
           invoiceDate: true,
           netCollectible: true,
+          ewtAmount: true,
+          ewtAsBilled: true,
           salesperson: { select: { id: true, name: true } },
           team: TEAM_REF_SELECT,
         },
@@ -4433,16 +4636,80 @@ function collectionCredit(row: { allocations: { invoice: { salesperson: { id: st
   return { salespeople: [...people.values()], teams: [...teams.values()] };
 }
 
+/**
+ * The EWT a customer withheld on ONE collection (2026-11-13, the owner's call:
+ * "status and value of uncollected EWT — paid once collected, attached file
+ * for the scan — under Collections"). Never stored: per invoice it settles,
+ * the EWT the collection itself states (`ewtWithheld`), else — where no
+ * collection of that invoice states one — the share of the invoice's EWT this
+ * collection's amount is of its net collectible. UNCOLLECTED until the BIR
+ * 2307 is recorded on the collection with its scan, PAID after; null where
+ * nothing was withheld. `EWT_ON_COLLECTION` is the same rule as a where.
+ */
+type EwtAllocation = {
+  amount: Prisma.Decimal;
+  ewtWithheld: Prisma.Decimal | null;
+  invoice: { netCollectible: Prisma.Decimal; ewtAmount: Prisma.Decimal; ewtAsBilled: Prisma.Decimal | null } | null;
+};
+function collectionEwt(row: { kind: PaymentKind; customerId: string | null; ewtCertificateAt: Date | null; allocations: EwtAllocation[] }): {
+  amount: number;
+  status: 'UNCOLLECTED' | 'PAID' | null;
+} {
+  if (row.kind !== 'RECEIPT' || !row.customerId) return { amount: 0, status: null };
+  let total = 0;
+  let applies = false;
+  for (const a of row.allocations) {
+    if (!a.invoice) continue;
+    if (a.ewtWithheld != null) {
+      const stated = Math.round(num(a.ewtWithheld) * 100);
+      if (stated > 0) {
+        applies = true;
+        total += stated;
+      }
+      continue;
+    }
+    // Another collection of this invoice states its EWT: this one withheld none.
+    if (a.invoice.ewtAsBilled != null) continue;
+    const ewt = num(a.invoice.ewtAmount);
+    if (ewt <= 0) continue;
+    applies = true;
+    const net = num(a.invoice.netCollectible);
+    const share = net > 0 ? Math.min(1, num(a.amount) / net) : 1;
+    total += Math.round(ewt * share * 100);
+  }
+  return { amount: total / 100, status: !applies ? null : row.ewtCertificateAt ? 'PAID' : 'UNCOLLECTED' };
+}
+
+/** A collection something was withheld on — `collectionEwt`'s rule as a where. */
+const EWT_ON_COLLECTION: Prisma.PaymentWhereInput = {
+  kind: 'RECEIPT',
+  customerId: { not: null },
+  allocations: {
+    some: {
+      OR: [{ ewtWithheld: { gt: 0 } }, { ewtWithheld: null, invoice: { ewtAmount: { gt: 0 }, ewtAsBilled: null } }],
+    },
+  },
+};
+const EWT_STATUSES = { uncollected: 'uncollected', paid: 'paid', none: 'none' } as const;
+
 function presentPayment(row: PaymentRow) {
   return {
     ...row,
     ...collectionCredit(row),
+    ewt: collectionEwt(row),
     amount: num(row.amount),
     allocations: row.allocations.map((a) => ({
       ...a,
       amount: num(a.amount),
       ewtWithheld: a.ewtWithheld == null ? null : num(a.ewtWithheld),
-      invoice: a.invoice ? { ...a.invoice, netCollectible: num(a.invoice.netCollectible) } : null,
+      invoice: a.invoice
+        ? {
+            ...a.invoice,
+            netCollectible: num(a.invoice.netCollectible),
+            ewtAmount: num(a.invoice.ewtAmount),
+            ewtAsBilled: a.invoice.ewtAsBilled == null ? null : num(a.invoice.ewtAsBilled),
+          }
+        : null,
       bill: a.bill ? { ...a.bill, netPayable: num(a.bill.netPayable) } : null,
       claim: a.claim ? { ...a.claim, total: num(a.claim.total) } : null,
       advance: a.advance ? { ...a.advance, amount: num(a.advance.amount) } : null,
@@ -4530,6 +4797,14 @@ function paymentListWhere(q: ListQuery, register: PaymentRegister | null = null)
   if (q.filters.teamId) invoiceCredit.teamId = q.filters.teamId === 'none' ? null : q.filters.teamId;
   if (Object.keys(invoiceCredit).length) where.allocations = { some: { invoice: invoiceCredit } };
   if (q.filters.invoiceId) where.allocations = { some: { invoiceId: q.filters.invoiceId } };
+  // The EWT withheld on a collection and whether its BIR 2307 is in (2026-11-13).
+  const ewt = choice(q.filters.ewt, EWT_STATUSES, 'EWT status', (v) => (v === 'uncollected' ? 'Uncollected' : v === 'paid' ? 'Paid' : 'No EWT'));
+  if (ewt) {
+    const and = (where.AND as Prisma.PaymentWhereInput[] | undefined) ?? [];
+    if (ewt === 'none') and.push({ NOT: EWT_ON_COLLECTION });
+    else and.push(EWT_ON_COLLECTION, { ewtCertificateAt: ewt === 'paid' ? { not: null } : null });
+    where.AND = and;
+  }
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
@@ -4597,8 +4872,34 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
     prisma.payment.aggregate({ where: { AND: [where, { kind: 'RECEIPT', customerId: null }] }, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [where, { clearedAt: null }] }, _sum: { amount: true } }),
   ]);
+  // EWT withheld on collections whose BIR 2307 is not in yet — G-CORE's own
+  // collections; SCORO's are counted apart, as every collection figure does.
+  const ewtOpen = await prisma.payment.findMany({
+    where: { AND: [where, EWT_ON_COLLECTION, { ewtCertificateAt: null }] },
+    select: {
+      kind: true,
+      customerId: true,
+      ewtCertificateAt: true,
+      importedFrom: true,
+      allocations: { select: { amount: true, ewtWithheld: true, invoice: { select: { netCollectible: true, ewtAmount: true, ewtAsBilled: true } } } },
+    },
+  });
+  const ewtUncollected = { amount: 0, count: 0, historyAmount: 0, historyCount: 0 };
+  for (const p of ewtOpen) {
+    const centsOf = Math.round(collectionEwt(p).amount * 100);
+    if (p.importedFrom) {
+      ewtUncollected.historyAmount += centsOf;
+      ewtUncollected.historyCount++;
+    } else {
+      ewtUncollected.amount += centsOf;
+      ewtUncollected.count++;
+    }
+  }
+  ewtUncollected.amount /= 100;
+  ewtUncollected.historyAmount /= 100;
   const chequeTotal = num(cheques._sum.amount);
   return {
+    ewtUncollected,
     // Cheques received from customers, and the share of their value the bank has cleared.
     cheques: cheques._count._all,
     chequesCleared: chequesCleared._count._all,
@@ -4641,7 +4942,9 @@ paymentRoutes.get(
           payeeUser: { select: { name: true } },
           allocations: {
             select: {
-              invoice: { select: { number: true } },
+              amount: true,
+              ewtWithheld: true,
+              invoice: { select: { number: true, netCollectible: true, ewtAmount: true, ewtAsBilled: true } },
               bill: { select: { number: true } },
               claim: { select: { number: true } },
               advance: { select: { number: true } },
@@ -4672,6 +4975,7 @@ paymentRoutes.get(
       payee,
       rangeNamed('dated', f.from, f.to),
       f.uncleared === 'true' && 'uncleared only',
+      f.ewt && (f.ewt === 'uncollected' ? 'EWT uncollected' : f.ewt === 'paid' ? 'EWT paid' : 'no EWT'),
       f.method && statusLabel(f.method),
       f.salespersonId && (f.salespersonId === 'none' ? 'no salesperson' : await recordNamed('person', f.salespersonId)),
       f.teamId && (f.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? '?'}`),
@@ -4692,8 +4996,8 @@ paymentRoutes.get(
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Date', 'Who', 'Direction', 'Settles', `Amount (${currency})`, 'Cleared'],
-        align: ['left', 'left', 'left', 'left', 'left', 'right', 'left'],
+        head: ['Number', 'Date', 'Who', 'Direction', 'Settles', `Amount (${currency})`, 'Cleared', ...(register === 'collections' ? [`EWT (${currency})`, 'EWT status'] : [])],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', ...(register === 'collections' ? (['right', 'left'] as const) : [])],
         rows: rows.map((r) => [
           r.orNumber ? { title: r.number, body: `OR ${r.orNumber}` } : r.number,
           formatShortDate(r.paymentDate),
@@ -4705,6 +5009,12 @@ paymentRoutes.get(
           settles(r),
           formatAmount(num(r.amount)),
           r.clearedAt ? formatShortDate(r.clearedAt) : 'Uncleared',
+          ...(register === 'collections'
+            ? (() => {
+                const e = collectionEwt(r);
+                return [e.status ? formatAmount(e.amount) : '—', e.status === 'PAID' ? 'Paid' : e.status === 'UNCOLLECTED' ? 'Uncollected' : '—'];
+              })()
+            : []),
         ]),
       },
       {
@@ -4733,6 +5043,7 @@ paymentRoutes.get(
 
     const pdf = await renderDocument({
       title: register === 'collections' ? 'Collections' : register === 'other' ? 'Payments & Repayments' : 'Payments',
+      landscape: register === 'collections',
       date: new Date(),
       reference,
       sections,
@@ -4754,7 +5065,125 @@ paymentRoutes.get(
       include: paymentInclude,
     });
     if (!row || !mayReadPayment(currentUser(req), row)) throw notFound('Payment not found');
-    res.json(presentPayment(row));
+    const me = currentUser(req);
+    const certifiedBy = row.ewtCertificateById
+      ? await prisma.user.findUnique({ where: { id: row.ewtCertificateById }, select: { id: true, name: true } })
+      : null;
+    const mayRecord = EWT_RECORDERS.some((k) => can(me, k));
+    const present = presentPayment(row);
+    res.json({
+      ...present,
+      ewtCertificateBy: certifiedBy,
+      canRecordEwt: mayRecord && present.ewt.status === 'UNCOLLECTED',
+      canClearEwt: can(me, 'gfin.ar.edit_all') && present.ewt.status === 'PAID',
+    });
+  }),
+);
+
+/** Whoever records collections records the certificate for what one withheld. */
+const EWT_RECORDERS = ['gfin.ar.create', 'gfin.ar.edit_all'] as const;
+
+/**
+ * The scanned BIR 2307 of a collection (`payment_ewt`, the payment's id): read
+ * as the payment is; added by whoever records collections and only BEFORE the
+ * certificate is recorded — a recorded one's scan is fixed, and "Not received
+ * after all" takes it away with the record.
+ */
+registerAttachmentGuard(
+  'payment_ewt',
+  async (user, id) => {
+    const row = await prisma.payment.findUnique({ where: { id }, select: { kind: true, customerId: true } });
+    return !!row && mayReadPayment(user, row);
+  },
+  {
+    write: async (user, id) => {
+      if (!EWT_RECORDERS.some((k) => can(user, k))) return false;
+      const row = await prisma.payment.findUnique({ where: { id }, select: { kind: true, customerId: true, ewtCertificateAt: true } });
+      return !!row && row.kind === 'RECEIPT' && !!row.customerId && !row.ewtCertificateAt;
+    },
+  },
+);
+
+/**
+ * Recording the BIR 2307 for the EWT a collection withheld — the EWT is
+ * "Paid" from here on. The scan must already be attached (`payment_ewt`): a
+ * certificate nobody can show is not a certificate. Once, claimed on its
+ * being unrecorded.
+ */
+paymentRoutes.post(
+  '/:id/ewt-certificate',
+  requireAny(...EWT_RECORDERS),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({ receivedOn: z.string().optional().nullable(), certificateNo: z.string().trim().max(80).optional().nullable() }),
+      req.body ?? {},
+    );
+    const me = currentUser(req);
+    const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: paymentInclude });
+    if (!payment) throw notFound('Payment not found');
+    const ewt = collectionEwt(payment);
+    if (!ewt.status) throw badRequest('Nothing was withheld on this collection, so there is no certificate to record');
+    if (payment.ewtCertificateAt) throw conflict('Its EWT certificate is already recorded');
+    const today = dayKey(new Date());
+    const receivedOn = body.receivedOn ? asDate(body.receivedOn, 'Date received') : today;
+    if (receivedOn > today) throw badRequest('The certificate cannot be received on a day still to come');
+    if (receivedOn < payment.paymentDate) throw badRequest('The certificate cannot be received before the collection it is for');
+    const scans = await prisma.attachment.count({ where: { entityType: 'payment_ewt', entityId: payment.id } });
+    if (!scans) throw badRequest('Attach the scanned certificate (BIR 2307) first — the EWT is marked paid only with its scan on file');
+
+    const claimed = await prisma.payment.updateMany({
+      where: { id: payment.id, ewtCertificateAt: null },
+      data: {
+        ewtCertificateAt: receivedOn,
+        ewtCertificateNo: body.certificateNo?.trim() || null,
+        ewtCertificateById: me.id,
+        ewtCertificateRecordedAt: new Date(),
+      },
+    });
+    if (!claimed.count) throw conflict('Its EWT certificate is already recorded');
+    await audit(
+      {
+        entityType: 'payment',
+        entityId: payment.id,
+        action: 'UPDATED',
+        summary: `EWT certificate${body.certificateNo ? ` ${body.certificateNo.trim()}` : ''} recorded on ${payment.orNumber ?? payment.number} — ${ewt.amount} withheld, now paid`,
+        before: { ewtStatus: 'UNCOLLECTED' },
+        after: { ewtStatus: 'PAID', receivedOn, certificateNo: body.certificateNo?.trim() || null, scans },
+      },
+      req,
+    );
+    const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id }, include: paymentInclude });
+    res.json(presentPayment(updated));
+  }),
+);
+
+/** "Not received after all": the record and its scan go, the EWT is uncollected again. */
+paymentRoutes.delete(
+  '/:id/ewt-certificate',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, orNumber: true, ewtCertificateAt: true, ewtCertificateNo: true } });
+    if (!payment) throw notFound('Payment not found');
+    if (!payment.ewtCertificateAt) throw badRequest('No EWT certificate is recorded on it');
+    const claimed = await prisma.payment.updateMany({
+      where: { id: payment.id, ewtCertificateAt: { not: null } },
+      data: { ewtCertificateAt: null, ewtCertificateNo: null, ewtCertificateById: null, ewtCertificateRecordedAt: null },
+    });
+    if (!claimed.count) throw badRequest('No EWT certificate is recorded on it');
+    await deleteAttachmentsOf('payment_ewt', [payment.id]);
+    await audit(
+      {
+        entityType: 'payment',
+        entityId: payment.id,
+        action: 'UPDATED',
+        summary: `EWT certificate taken off ${payment.orNumber ?? payment.number} — the EWT is uncollected again`,
+        before: { ewtStatus: 'PAID', receivedOn: payment.ewtCertificateAt, certificateNo: payment.ewtCertificateNo },
+        after: { ewtStatus: 'UNCOLLECTED' },
+      },
+      req,
+    );
+    const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id }, include: paymentInclude });
+    res.json(presentPayment(updated));
   }),
 );
 
@@ -5204,6 +5633,7 @@ paymentRoutes.delete(
       await tx.payment.delete({ where: { id: payment.id } });
       for (const t of touched) await refreshSettlement(tx, t.kind, t.id);
     });
+    await deleteAttachmentsOf('payment_ewt', [payment.id]);
 
     await audit(
       {

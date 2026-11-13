@@ -803,6 +803,62 @@ four databases and four copies of "customer".
   `report.csv` and `report.pdf`. Ratings never reach the audit trail.
   verify-hr pins it.
 
+## Money In, one tab at a time; EWT on collections (2026-11-13)
+
+The owner's calls: "show in separate column status and value of uncollected
+EWT (paid once collected, attached file for scanned) under Collection";
+"editable for access for Credit and Collection, Accounts Payable and Finance
+Manager"; "once reserve invoice it should move to Accounts Receivable then
+move to Collection — one tab at a time"; and, Accounts Receivable now holding
+the SCORO import, its invoices "editable", amounts included.
+
+- **One tab at a time**: `stage=open|closed` is a declared filter on both
+  lists and each opens on `defaultFilters={{ stage: 'open' }}` (a bare visit
+  only, rule 16; the chip removed shows everything; an unknown stage a 400).
+  Invoice Requests: open = DRAFT, PENDING_APPROVAL (an approved request is its
+  invoice's; the cards still count under everything but status and stage).
+  Accounts Receivable: open = DRAFT, ISSUED, PARTIALLY_PAID — a paid invoice
+  is its collection's, under Collections; a cancelled one is history.
+- **The EWT of a collection is `collectionEwt()`** (routes/finance.ts), never
+  stored: per invoice it settles, the EWT the collection states
+  (`ewtWithheld`), else — where no collection of that invoice states one
+  (`ewtAsBilled` null) — the invoice's EWT × the collection's amount over its
+  net collectible. `EWT_ON_COLLECTION` is the same rule as a where. Status
+  **Uncollected** until the BIR 2307 is recorded, **Paid** after, none where
+  nothing was withheld. Every payment leaves the API with `ewt: { amount,
+  status }`. Collections gains the EWT and EWT status columns, the `?ewt=
+  uncollected|paid|none` filter, the **EWT uncollected** card
+  (`summary.ewtUncollected`: G-CORE's collections; SCORO's counted apart,
+  `LIVE_MONEY`'s rule) and both columns on its paper (landscape).
+- **Recording it**: `Payment.ewtCertificateNo / At / ById / RecordedAt`.
+  The scan goes first — an attachment on `payment_ewt` (the payment's id;
+  read as the payment, written by `gfin.ar.create` / `edit_all` and only
+  while unrecorded) — then `POST /payments/:id/ewt-certificate { receivedOn?,
+  certificateNo? }`: a 400 without a scan, on a collection that withheld
+  nothing, on a day to come or before the collection; claimed once (409).
+  `DELETE /payments/:id/ewt-certificate` (`gfin.ar.edit_all`) takes the record
+  and its scan off. The collection page's "EWT certificate (BIR 2307)" card
+  and "Scanned certificate" card; ⋯ "Take off EWT certificate". The invoice's
+  own older `PATCH /invoices/:id/certificate` stays as it was.
+- **An issued invoice is corrected**: `PUT /invoices/:id/amend` (Edit on A/R;
+  ISSUED, PARTIALLY_PAID or PAID; claimed on `updatedAt`, `version` a 409) —
+  its DETAILS on any invoice: invoice no., countered date, terms (the expected
+  collection follows), PO reference, notes and the withholding rate (EWT again
+  on its gross; refused once a collection states the EWT). Its AMOUNTS —
+  invoice date, lines, VAT rate — only on an invoice the SCORO import brought
+  across (`importedFrom`) and only while no collection recorded in G-CORE
+  settles it (`amountsCorrectable()`; SCORO's own history collection does not
+  count); the sales order's "left to invoice" is not asked. Never less
+  collectible than was collected; the status is `refreshSettlement`'s. `GET
+  /invoices/:id` sends `canAmend` and `amounts: { ok, why }`; the page's
+  Modify opens `AmendPanel` in the page. An invoice raised in G-CORE with a
+  wrong amount is still cancelled and raised again.
+- **Access**: `applyMoneyInAccess()` (`shared/finAccess.ts`, the seed, once,
+  `seed.moneyInAccess20261113`) gave `credit_collection`, `finance` (Account
+  Payable Officer) and `finance_manager` every Accounts Receivable box but
+  Delete, and Collections' view. Delete stays Admin › Roles' to give.
+- verify-finance pins it (492 checks in all).
+
 ## The delete rule (2026-11-13)
 
 The owner's call: "make all the Delete function only by the one who created

@@ -47,7 +47,7 @@ import { seedSharedPosts } from '../src/shared/teamPosts';
 import { dropOverrides } from '../src/shared/overridesDrop';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
 import { applyHrAccess } from '../src/shared/hrAccess';
-import { applyFinAccess } from '../src/shared/finAccess';
+import { applyFinAccess, applyMoneyInAccess } from '../src/shared/finAccess';
 import { applyChainAccess } from '../src/shared/chainAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
@@ -1884,6 +1884,13 @@ async function main() {
   {
     const fin = await applyFinAccess();
     if (fin) console.log(`  ✓ G-FIN access: the common set on ${fin.roles} role(s), the selling roles' requests, the Finance Manager ${fin.manager} boxes`);
+  }
+
+  // ── Money In for Credit and Collection, Account Payable and the Finance
+  // Manager. Once (shared/finAccess.ts, 2026-11-13).
+  {
+    const moneyIn = await applyMoneyInAccess();
+    if (moneyIn) console.log(`  ✓ Money In access: ${moneyIn.added} right(s) added on ${moneyIn.roles} role(s)`);
   }
 
   // ── G-CHAIN's common rights on every role; all of G-CHAIN to both

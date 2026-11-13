@@ -348,8 +348,14 @@ export function requestListWhere(me: ResolvedUser, q: ReturnType<typeof listQuer
   const ids = idsFilter(q.filters.ids);
   if (ids) base.push({ id: { in: ids } });
   const status = choice(q.filters.status, InvoiceRequestStatus, 'Status');
-  const where: Prisma.InvoiceRequestWhereInput = { AND: [...base, ...(status ? [{ status }] : [])] };
-  return { base: { AND: base } as Prisma.InvoiceRequestWhereInput, where, mine, status, from, to };
+  // What the list opens on (2026-11-13, one tab at a time): the requests still
+  // in progress. An approved one has its invoice, in Accounts Receivable.
+  const stage = choice(q.filters.stage, { open: 'open', closed: 'closed' }, 'Stage', (v) => (v === 'open' ? 'In progress' : 'Approved or cancelled'));
+  const stageWhere: Prisma.InvoiceRequestWhereInput[] = stage
+    ? [{ status: { in: stage === 'open' ? ['DRAFT', 'PENDING_APPROVAL'] : ['APPROVED', 'CANCELLED'] } }]
+    : [];
+  const where: Prisma.InvoiceRequestWhereInput = { AND: [...base, ...(status ? [{ status }] : []), ...stageWhere] };
+  return { base: { AND: base } as Prisma.InvoiceRequestWhereInput, where, mine, status, stage, from, to };
 }
 
 const SORTS = ['number', 'status', 'createdAt'];
@@ -425,7 +431,7 @@ invoiceRequestRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { where, mine, status, from, to } = requestListWhere(me, q);
+    const { where, mine, status, stage, from, to } = requestListWhere(me, q);
     const [rows, count, project, order] = await Promise.all([
       prisma.invoiceRequest.findMany({ where, include: requestInclude, orderBy: orderBy(q, SORTS, { createdAt: 'desc' }), take: LIST_CAP }),
       prisma.invoiceRequest.count({ where }),
@@ -436,6 +442,7 @@ invoiceRequestRoutes.get(
     const reference = listReference(count, rows.length, ['invoice request', 'invoice requests'], [
       q.search && `search "${q.search}"`,
       status && `status ${statusLabel(status)}`,
+      stage && (stage === 'open' ? 'in progress' : 'approved or cancelled'),
       project,
       order,
       rangeNamed('raised', from ?? undefined, to ?? undefined),

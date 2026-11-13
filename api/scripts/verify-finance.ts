@@ -24,6 +24,7 @@ import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { deleteAttachment } from '../src/shared/attachments';
+import { MONEY_IN_ACCESS_MARK, MONEY_IN_KEYS, applyMoneyInAccess } from '../src/shared/finAccess';
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
@@ -1823,6 +1824,180 @@ async function main() {
           soaFuture.status === 400 && soaBefore.status === 200 && !soaBeforeText.includes(String(fifth.body.number)),
         `${soa.status} ${soaFuture.status} ${soaBefore.status} ${soaText.slice(0, 300)}`,
       );
+    }
+
+    // Money In, 2026-11-13: the EWT certificate on a collection, an issued
+    // invoice corrected, a SCORO invoice's amounts, and one tab at a time.
+    {
+      type Ewt = { amount: number; status: string | null };
+      const raise = async (label: string, extra: Record<string, unknown> = {}) => {
+        const inv = await api('POST', '/invoices', { customerId: customer.id, lines: [{ description: `${TAG} ${label}`, amount: 10_000 }], ...extra });
+        await api('POST', `/invoices/${inv.body.id}/issue`);
+        return String(inv.body.id);
+      };
+      const collect = (invoiceId: string, amount: number, ewtWithheld?: number) =>
+        api('POST', '/payments', { kind: 'RECEIPT', customerId: customer.id, allocations: [{ kind: 'invoice', id: invoiceId, amount, ...(ewtWithheld === undefined ? {} : { ewtWithheld }) }] });
+      const scan = (paymentId: string) => {
+        const form = new FormData();
+        form.append('files', new Blob([Buffer.from('%PDF-1.4\n%verify 2307\n')], { type: 'application/pdf' }), `${TAG}-2307.pdf`);
+        return fetch(`${BASE}/attachments/payment_ewt/${paymentId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
+      };
+
+      // ── The EWT of a collection ──
+      const sixth = await raise('ewt whole');
+      const whole = await collect(sixth, 11_000);
+      const wholeId = String(whole.body.id);
+      const seen = await api('GET', `/payments/${wholeId}`);
+      check(
+        'a collection shows the EWT its invoice withheld, Uncollected until the certificate is in',
+        whole.status === 201 && money((seen.body.ewt as Ewt).amount, 200) && (seen.body.ewt as Ewt).status === 'UNCOLLECTED' && seen.body.canRecordEwt === true,
+        `${whole.status} ${JSON.stringify(seen.body.ewt)}`,
+      );
+      const seventh = await raise('ewt half');
+      const half = await collect(seventh, 5_500);
+      const stated = await raise('ewt stated');
+      const statedPay = await collect(stated, 11_100, 100);
+      const none = await raise('ewt none', { ewtRate: 0 });
+      const nonePay = await collect(none, 11_200);
+      const halfSeen = await api('GET', `/payments/${half.body.id}`);
+      const statedSeen = await api('GET', `/payments/${statedPay.body.id}`);
+      const noneSeen = await api('GET', `/payments/${nonePay.body.id}`);
+      check(
+        'half an invoice collected carries half its EWT; an EWT the collection states is the figure; no EWT, no status',
+        money((halfSeen.body.ewt as Ewt).amount, 100) && money((statedSeen.body.ewt as Ewt).amount, 100) && (statedSeen.body.ewt as Ewt).status === 'UNCOLLECTED' &&
+          nonePay.status === 201 && (noneSeen.body.ewt as Ewt).status === null && noneSeen.body.canRecordEwt === false,
+        `${JSON.stringify(halfSeen.body.ewt)} ${JSON.stringify(statedSeen.body.ewt)} ${nonePay.status} ${JSON.stringify(noneSeen.body.ewt)}`,
+      );
+      type Row = { id: string; ewt: Ewt };
+      type Listed = { rows: Row[]; total: number; summary: { ewtUncollected: { amount: number; count: number } } };
+      const listOf = async (ewt: string) => (await api('GET', `/payments?register=collections&customerId=${customer.id}&pageSize=200&ewt=${ewt}`)).body as unknown as Listed;
+      const open = await listOf('uncollected');
+      const noEwt = await listOf('none');
+      check(
+        'the EWT status filter lists what its card counts: every row Uncollected, the card their sum; "No EWT" lists the one that withheld none',
+        open.rows.every((r) => r.ewt.status === 'UNCOLLECTED') && open.rows.some((r) => r.id === wholeId) && open.summary.ewtUncollected.count === open.total &&
+          money(open.summary.ewtUncollected.amount, open.rows.reduce((t, r) => t + Math.round(r.ewt.amount * 100), 0) / 100) &&
+          noEwt.rows.some((r) => r.id === String(nonePay.body.id)) && noEwt.rows.every((r) => r.ewt.status === null),
+        `${open.total} ${JSON.stringify(open.summary.ewtUncollected)} none ${noEwt.total}`,
+      );
+      const bogusEwt = await api('GET', '/payments?ewt=maybe');
+      const noScan = await api('POST', `/payments/${wholeId}/ewt-certificate`, {});
+      const noneRefused = await api('POST', `/payments/${nonePay.body.id}/ewt-certificate`, {});
+      const up = await scan(wholeId);
+      const future = await api('POST', `/payments/${wholeId}/ewt-certificate`, { receivedOn: '2999-01-01' });
+      const recorded = await api('POST', `/payments/${wholeId}/ewt-certificate`, { certificateNo: `${TAG}-2307-001` });
+      const again = await api('POST', `/payments/${wholeId}/ewt-certificate`, {});
+      const lateScan = await scan(wholeId);
+      const paidSeen = await api('GET', `/payments/${wholeId}`);
+      const paidList = await listOf('paid');
+      const openAfter = await listOf('uncollected');
+      check(
+        'the certificate is refused without its scan, on a collection that withheld nothing and on a day to come; recorded with the scan it is Paid, once; the scan is then fixed',
+        bogusEwt.status === 400 && noScan.status === 400 && /scan/i.test(String(noScan.body.error)) && noneRefused.status === 400 && up.status < 300 && future.status === 400 &&
+          recorded.status === 200 && (recorded.body.ewt as Ewt).status === 'PAID' && again.status === 409 && lateScan.status === 403 &&
+          paidSeen.body.ewtCertificateNo === `${TAG}-2307-001` && !!paidSeen.body.ewtCertificateBy && paidSeen.body.canRecordEwt === false && paidSeen.body.canClearEwt === true &&
+          paidList.rows.some((r) => r.id === wholeId) && !openAfter.rows.some((r) => r.id === wholeId),
+        `${bogusEwt.status} ${noScan.status} ${noneRefused.status} ${up.status} ${future.status} ${recorded.status} ${again.status} ${lateScan.status} ${JSON.stringify(paidSeen.body.ewt)}`,
+      );
+      const paperRes = await fetch(`${BASE}/payments/pdf?register=collections&customerId=${customer.id}`, { headers: { Authorization: `Bearer ${token}` } });
+      const paperText = paperRes.ok ? pdfText(Buffer.from(await paperRes.arrayBuffer())).replace(/\s+/g, ' ') : '';
+      check('the Collections paper prints the EWT and its status', paperRes.status === 200 && /EWT STATUS/i.test(paperText) && /Uncollected/.test(paperText) && /Paid/.test(paperText), `${paperRes.status} ${paperText.slice(0, 200)}`);
+      const takenOff = await api('DELETE', `/payments/${wholeId}/ewt-certificate`);
+      const scansLeft = await prisma.attachment.count({ where: { entityType: 'payment_ewt', entityId: wholeId } });
+      const offAgain = await api('DELETE', `/payments/${wholeId}/ewt-certificate`);
+      check(
+        'taken off, the record and its scan go and the EWT is Uncollected again',
+        takenOff.status === 200 && (takenOff.body.ewt as Ewt).status === 'UNCOLLECTED' && takenOff.body.ewtCertificateAt === null && scansLeft === 0 && offAgain.status === 400,
+        `${takenOff.status} ${JSON.stringify(takenOff.body.ewt)} scans ${scansLeft} ${offAgain.status}`,
+      );
+
+      // ── An issued invoice corrected ──
+      const eighth = await raise('amend');
+      const before = await api('GET', `/invoices/${eighth}`);
+      const stale = await api('PUT', `/invoices/${eighth}/amend`, { siNumber: `${TAG}-SI-9`, version: '2000-01-01T00:00:00.000Z' });
+      const details = await api('PUT', `/invoices/${eighth}/amend`, { siNumber: `${TAG}-SI-9`, termsDays: 45, poReference: `${TAG}-PO`, ewtRate: 0.01, version: before.body.updatedAt });
+      const linesRefused = await api('PUT', `/invoices/${eighth}/amend`, { lines: [{ description: `${TAG} changed`, amount: 5_000 }] });
+      const dateRefused = await api('PUT', `/invoices/${eighth}/amend`, { invoiceDate: '2026-01-05' });
+      const draftInv = await api('POST', '/invoices', { customerId: customer.id, lines: [{ description: `${TAG} amend draft`, amount: 1_000 }] });
+      const draftRefused = await api('PUT', `/invoices/${draftInv.body.id}/amend`, { poReference: 'x' });
+      check(
+        'an issued invoice takes its details — invoice no., terms, PO, withholding rate (the net collectible follows) — and never its amounts; a stale save is a 409, a draft uses Modify',
+        before.body.canAmend === true && (before.body.amounts as { ok: boolean }).ok === false && stale.status === 409 && details.status === 200 &&
+          details.body.siNumber === `${TAG}-SI-9` && details.body.termsDays === 45 && money(details.body.ewtAmount, 100) && money(details.body.netCollectible, 11_100) && details.body.status === 'ISSUED' &&
+          linesRefused.status === 400 && dateRefused.status === 400 && draftRefused.status === 400,
+        `${before.body.canAmend} ${stale.status} ${details.status} ${JSON.stringify(details.body).slice(0, 160)} ${linesRefused.status} ${dateRefused.status} ${draftRefused.status}`,
+      );
+      // Paid at 11,000 (sixth): a rate that would leave less collectible than
+      // was collected is refused; none withheld, it is owed 200 again.
+      const tooLittle = await api('PUT', `/invoices/${sixth}/amend`, { ewtRate: 0.05 });
+      const owedAgain = await api('PUT', `/invoices/${sixth}/amend`, { ewtRate: 0 });
+      const statedRate = await api('PUT', `/invoices/${stated}/amend`, { ewtRate: 0.01 });
+      check(
+        'a correction never leaves less collectible than was collected; with no EWT a paid invoice is partly paid again; once a collection states the EWT the rate no longer decides it',
+        tooLittle.status === 400 && /collected/.test(String(tooLittle.body.error)) && owedAgain.status === 200 && owedAgain.body.status === 'PARTIALLY_PAID' &&
+          money(owedAgain.body.outstanding, 200) && statedRate.status === 400,
+        `${tooLittle.status} ${owedAgain.status} ${owedAgain.body.status} ${owedAgain.body.outstanding} ${statedRate.status}`,
+      );
+
+      // ── A SCORO invoice's amounts ──
+      const ninth = await raise('scoro amounts');
+      await prisma.invoice.update({ where: { id: ninth }, data: { importedFrom: 'SCORO' } });
+      const scoroSeen = await api('GET', `/invoices/${ninth}`);
+      const amounts = await api('PUT', `/invoices/${ninth}/amend`, {
+        invoiceDate: '2026-01-05',
+        counteredDate: '2026-01-06',
+        termsDays: 30,
+        lines: [
+          { description: `${TAG} corrected a`, amount: 12_000 },
+          { description: `${TAG} corrected b`, amount: 8_000 },
+        ],
+      });
+      const zero = await api('PUT', `/invoices/${ninth}/amend`, { lines: [{ description: `${TAG} nothing`, amount: 0 }] });
+      await collect(ninth, 1_000);
+      const afterCollect = await api('PUT', `/invoices/${ninth}/amend`, { lines: [{ description: `${TAG} again`, amount: 9_000 }] });
+      const detailsStill = await api('PUT', `/invoices/${ninth}/amend`, { poReference: `${TAG}-PO-2` });
+      const amendTrail = await prisma.auditLog.count({ where: { entityType: 'invoice', entityId: ninth, action: 'UPDATED', summary: { contains: 'corrected after issue' } } });
+      check(
+        'an invoice the SCORO import brought across takes its date, lines and so its tax (20,000 → 22,400, 22,000 collectible, due 30 days from countering); once G-CORE collects on it the amounts are fixed, the details still change; audited',
+        (scoroSeen.body.amounts as { ok: boolean }).ok === true && amounts.status === 200 && money(amounts.body.grossAmount, 20_000) && money(amounts.body.invoiceTotal, 22_400) &&
+          money(amounts.body.netCollectible, 22_000) && (amounts.body.lines as unknown[]).length === 2 && String(amounts.body.dueDate).startsWith('2026-02-05') &&
+          zero.status === 400 && afterCollect.status === 400 && detailsStill.status === 200 && detailsStill.body.status === 'PARTIALLY_PAID' && amendTrail === 2,
+        `${JSON.stringify(scoroSeen.body.amounts)} ${amounts.status} ${amounts.body.invoiceTotal} ${amounts.body.netCollectible} ${amounts.body.dueDate} ${zero.status} ${afterCollect.status} ${detailsStill.status} trail ${amendTrail}`,
+      );
+
+      // ── One tab at a time ──
+      type Inv = { status: string };
+      const stage = async (s: string) => (await api('GET', `/invoices?customerId=${customer.id}&pageSize=200${s ? `&stage=${s}` : ''}`)).body as unknown as { rows: Inv[]; total: number };
+      const [all, toCollect, closed] = [await stage(''), await stage('open'), await stage('closed')];
+      const bogusStage = await api('GET', '/invoices?stage=sideways');
+      check(
+        'Accounts Receivable opens on what is still to collect — draft, issued, partly paid — and the paid and cancelled ones are the other half',
+        toCollect.total > 0 && closed.total > 0 && toCollect.total + closed.total === all.total &&
+          toCollect.rows.every((r) => ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'].includes(r.status)) && closed.rows.every((r) => ['PAID', 'CANCELLED'].includes(r.status)) && bogusStage.status === 400,
+        `${toCollect.total} + ${closed.total} = ${all.total} ${bogusStage.status}`,
+      );
+      type Req = { status: string };
+      const reqStage = async (s: string) => (await api('GET', `/invoice-requests?scope=all&pageSize=200${s ? `&stage=${s}` : ''}`)).body as unknown as { rows: Req[]; total: number };
+      const [reqAll, reqOpen, reqClosed] = [await reqStage(''), await reqStage('open'), await reqStage('closed')];
+      const reqBogus = await api('GET', '/invoice-requests?stage=sideways');
+      check(
+        'Invoice Requests opens on the requests in progress; an approved one is its invoice’s, in Accounts Receivable',
+        reqOpen.total + reqClosed.total === reqAll.total && reqOpen.rows.every((r) => ['DRAFT', 'PENDING_APPROVAL'].includes(r.status)) &&
+          reqClosed.rows.every((r) => ['APPROVED', 'CANCELLED'].includes(r.status)) && reqBogus.status === 400,
+        `${reqOpen.total} + ${reqClosed.total} = ${reqAll.total} ${reqBogus.status}`,
+      );
+
+      // ── The three who work Money In ──
+      const granted = await prisma.permission.count({ where: { key: { in: MONEY_IN_KEYS } } });
+      check(
+        'Money In access is every Accounts Receivable box but Delete and Collections to view, given once',
+        granted === MONEY_IN_KEYS.length && !MONEY_IN_KEYS.some((k) => k.endsWith('.delete')) && MONEY_IN_KEYS.includes('gfin.ar.edit_all') &&
+          MONEY_IN_KEYS.includes('gfin.payments.view_all') && ((await prisma.setting.findUnique({ where: { key: MONEY_IN_ACCESS_MARK } })) ? (await applyMoneyInAccess()) === null : true),
+        `${granted} of ${MONEY_IN_KEYS.length}`,
+      );
+      for (const a of await prisma.attachment.findMany({ where: { entityType: 'payment_ewt', uploadedBy: { email: { endsWith: '.local' } } }, select: { id: true } })) {
+        await deleteAttachment(a.id).catch(() => undefined);
+      }
     }
 
     const badDue = await api('POST', '/invoices', {

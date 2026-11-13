@@ -132,6 +132,8 @@ const SCREEN: Record<string, string> = {
   // Finance. A payment has its own page since 2026-10-09; a disbursement is
   // the same record seen from the money-out side.
   payment: '/g-fin/payments',
+  // The scanned BIR 2307 of a collection — filed on the payment's own id.
+  payment_ewt: '/g-fin/payments',
   disbursement: '/g-fin/payments-out',
   operations_budget: '/g-fin/operations-budget',
   office_budget: '/g-fin/operations-budget',

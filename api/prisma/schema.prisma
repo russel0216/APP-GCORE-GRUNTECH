@@ -5196,6 +5196,16 @@ model Payment {
   /// (`LIVE_MONEY` in shared/finance.ts).
   importedFrom String?
 
+  /// The BIR 2307 for the EWT the customer withheld on this collection
+  /// (2026-11-13, the owner's call: "status and value of uncollected EWT —
+  /// paid once collected, attached file for the scan"). The EWT is
+  /// UNCOLLECTED until the certificate is recorded here with its scan (an
+  /// attachment on `payment_ewt`); `ewtCertificateAt` is the day received.
+  ewtCertificateNo         String?
+  ewtCertificateAt         DateTime? @db.Date
+  ewtCertificateById       String?
+  ewtCertificateRecordedAt DateTime?
+
   notes String?
 
   recordedById String

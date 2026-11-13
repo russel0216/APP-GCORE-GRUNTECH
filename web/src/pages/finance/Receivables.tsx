@@ -47,6 +47,12 @@ export interface Invoice {
   /** Edit All, or Edit Own on an invoice the viewer raised (2026-10-18) — the API's word. */
   canEdit?: boolean;
   canDelete?: boolean;
+  /** Its details may be corrected after issue (2026-11-13). */
+  canAmend?: boolean;
+  /** Whether its AMOUNTS may be corrected too — a SCORO import no G-CORE collection settles — and why not. */
+  amounts?: { ok: boolean; why: string | null };
+  importedFrom?: string | null;
+  updatedAt?: string;
   number: string;
   status: string;
   invoiceDate: string;
@@ -344,6 +350,16 @@ export function Receivables() {
   ];
 
   const filters: FilterDef[] = [
+    // One tab at a time (2026-11-13): the list opens on what is still to
+    // collect; a paid invoice is its collection's, under Collections.
+    {
+      key: 'stage',
+      label: 'Stage',
+      options: [
+        { value: 'open', label: 'To collect — draft, issued, partly paid' },
+        { value: 'closed', label: 'Paid or cancelled' },
+      ],
+    },
     { key: 'status', label: 'Status', options: INVOICE_STATUSES },
     { key: 'outstanding', label: 'Balance', options: [{ value: 'true', label: 'Outstanding only' }] },
     { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
@@ -475,6 +491,7 @@ export function Receivables() {
         onRowClick={(r) => navigate(`/g-fin/ar/${r.id}`)}
         selectable
         filters={filters}
+        defaultFilters={{ stage: 'open' }}
         summary={(raw) => {
           const sum = raw as unknown as ReceivablesSummary | undefined;
           if (!sum) return null;
@@ -1086,7 +1103,7 @@ export function InvoiceDetail() {
   const [paying, setPaying] = useState(false);
   const [certificate, setCertificate] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [panel, setPanel] = useState<'counter' | 'credit' | null>(null);
+  const [panel, setPanel] = useState<'counter' | 'credit' | 'amend' | null>(null);
   const confirm = useConfirm();
 
   const load = useCallback(async () => {
@@ -1253,11 +1270,22 @@ export function InvoiceDetail() {
             },
           },
         ]}
-        modify={canModify ? () => setEditing(true) : undefined}
+        modify={canModify ? () => setEditing(true) : row.canAmend ? () => setPanel('amend') : undefined}
         confirm={confirm}
       />
 
       <ErrorBox error={error} />
+
+      {panel === 'amend' && (
+        <AmendPanel
+          invoice={row}
+          onClose={() => setPanel(null)}
+          onSaved={() => {
+            setPanel(null);
+            load();
+          }}
+        />
+      )}
 
       {panel === 'counter' && (
         <CounterPanel
@@ -1363,7 +1391,7 @@ export function InvoiceDetail() {
             <dl className="kv">
               <dt>Invoice no.</dt>
               <dd className="mono">
-                {row.siNumber ?? <span className="faint">not yet typed — Modify the draft</span>}
+                {row.siNumber ?? <span className="faint">not yet typed — Modify to add it</span>}
                 {row.siNumber && !row.counteredDate && <span className="faint"> · reserved until it is countered</span>}
               </dd>
               <dt>Dated</dt>
@@ -1534,6 +1562,197 @@ function CounterPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose
           Cancel
         </button>
         <button className="btn btn-sm btn-primary" onClick={save} disabled={busy || !day}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Correcting an invoice that is already out (2026-11-13, the owner's call:
+ * the SCORO import's invoices are editable) — in the page, like countering.
+ * Every issued invoice takes its details; one the SCORO import brought
+ * across also takes its invoice date, lines and VAT while no collection
+ * recorded in G-CORE settles it (`amounts` from the API says which, and why
+ * not). Only what was changed is sent.
+ */
+function AmendPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const amounts = invoice.amounts?.ok ?? false;
+  const [siNumber, setSiNumber] = useState(invoice.siNumber ?? '');
+  const [invoiceDate, setInvoiceDate] = useState(invoice.invoiceDate.slice(0, 10));
+  const [countered, setCountered] = useState(invoice.counteredDate?.slice(0, 10) ?? '');
+  const [terms, setTerms] = useState(invoice.termsDays ?? daysFrom(invoice.invoiceDate, invoice.dueDate));
+  const [po, setPo] = useState(invoice.poReference ?? '');
+  const [notes, setNotes] = useState(invoice.notes ?? '');
+  const [ewtRate, setEwtRate] = useState(invoice.ewtRate);
+  const [vatPct, setVatPct] = useState(String(Math.round(invoice.vatRate * 10000) / 100));
+  const [lines, setLines] = useState(invoice.lines.map((l) => ({ description: l.description, detail: l.detail ?? '', amount: String(l.amount) })));
+  const [linesTouched, setLinesTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  const vatRate = Math.round((Number(vatPct) || 0) * 100) / 10000;
+  const gross = toCents(lines.reduce((t, l) => t + (Number(l.amount) || 0), 0));
+  const grossNow = amounts ? gross : invoice.grossAmount;
+  const vat = toCents(grossNow * (amounts ? vatRate : invoice.vatRate));
+  const ewt = toCents(grossNow * ewtRate);
+  const collectible = toCents(grossNow + vat - ewt);
+
+  const setLine = (i: number, patch: Partial<(typeof lines)[number]>) => {
+    setLinesTouched(true);
+    setLines((rows) => rows.map((r, n) => (n === i ? { ...r, ...patch } : r)));
+  };
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const body: Record<string, unknown> = { version: invoice.updatedAt };
+      if (siNumber.trim() !== (invoice.siNumber ?? '')) body.siNumber = siNumber.trim() || null;
+      if (countered !== (invoice.counteredDate?.slice(0, 10) ?? '')) body.counteredDate = countered || null;
+      if (terms !== invoice.termsDays) body.termsDays = terms;
+      if (po.trim() !== (invoice.poReference ?? '')) body.poReference = po.trim() || null;
+      if (notes.trim() !== (invoice.notes ?? '')) body.notes = notes.trim() || null;
+      if (Math.abs(ewtRate - invoice.ewtRate) > 0.000001) body.ewtRate = ewtRate;
+      if (amounts) {
+        if (invoiceDate !== invoice.invoiceDate.slice(0, 10)) body.invoiceDate = invoiceDate;
+        if (Math.abs(vatRate - invoice.vatRate) > 0.000001) body.vatRate = vatRate;
+        if (linesTouched) {
+          body.lines = lines.map((l) => ({ description: l.description.trim(), detail: l.detail.trim() || null, amount: Number(l.amount) || 0 }));
+        }
+      }
+      await api.put(`/invoices/${invoice.id}/amend`, body);
+      toast('ok', 'Invoice corrected');
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="ar-amend">
+      <h3 id="ar-amend" className="card-title">
+        Modify invoice {invoice.siNumber ?? invoice.number}
+      </h3>
+      <p className="faint">
+        {amounts
+          ? 'Brought across from SCORO: its details and its amounts can be corrected here until a collection is recorded on it in G-CORE.'
+          : `Its details can be corrected here. ${invoice.amounts?.why ?? 'Its amounts are fixed.'}`}
+      </p>
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Invoice no." hint="The printed sales invoice number">
+          <input value={siNumber} onChange={(e) => setSiNumber(e.target.value)} maxLength={60} />
+        </Field>
+        <Field label="PO reference">
+          <input value={po} onChange={(e) => setPo(e.target.value)} />
+        </Field>
+        {amounts && (
+          <Field label="Invoice date">
+            <input type="date" value={invoiceDate} max={todayLocal()} onChange={(e) => setInvoiceDate(e.target.value)} />
+          </Field>
+        )}
+        <Field label="Received by the customer on" hint={countered ? undefined : 'Empty: awaiting countering'}>
+          <input type="date" value={countered} min={invoiceDate} max={todayLocal()} onChange={(e) => setCountered(e.target.value)} />
+        </Field>
+        <Field label="Payment terms">
+          <TermsPicker value={terms} onChange={setTerms} />
+        </Field>
+        <Field label="Withholding tax (EWT)" hint="Withheld on the amount before VAT">
+          <EwtPicker value={ewtRate} onChange={setEwtRate} />
+        </Field>
+        {amounts && (
+          <Field label="VAT rate (%)">
+            <NumberInput kind="percent" min={0} max={100} value={vatPct} onChange={(e) => setVatPct(e.target.value)} />
+          </Field>
+        )}
+      </div>
+      <Field label="Notes">
+        <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+
+      {amounts && (
+        <>
+          <h4 className="svc-subhead">Lines — amounts before VAT</h4>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>Detail</th>
+                  <th className="right">Amount before VAT</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l, i) => (
+                  <tr key={i}>
+                    <td>
+                      <input aria-label={`Line ${i + 1} description`} value={l.description} onChange={(e) => setLine(i, { description: e.target.value })} />
+                    </td>
+                    <td>
+                      <input aria-label={`Line ${i + 1} detail`} value={l.detail} onChange={(e) => setLine(i, { detail: e.target.value })} />
+                    </td>
+                    <td className="right">
+                      <NumberInput kind="money" aria-label={`Line ${i + 1} amount`} value={l.amount} onChange={(e) => setLine(i, { amount: e.target.value })} />
+                    </td>
+                    <td className="right">
+                      {lines.length > 1 && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => {
+                            setLinesTouched(true);
+                            setLines((rows) => rows.filter((_, n) => n !== i));
+                          }}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="card-foot">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setLinesTouched(true);
+                setLines((rows) => [...rows, { description: '', detail: '', amount: '' }]);
+              }}
+            >
+              + Add line
+            </button>
+          </div>
+        </>
+      )}
+
+      <dl className="kv">
+        <dt>Before VAT</dt>
+        <dd className="mono">{formatMoney(grossNow)}</dd>
+        <dt>VAT</dt>
+        <dd className="mono">{formatMoney(vat)}</dd>
+        <dt>Invoice total</dt>
+        <dd className="mono">{formatMoney(toCents(grossNow + vat))}</dd>
+        <dt>Less EWT</dt>
+        <dd className="mono">{formatMoney(ewt)}</dd>
+        <dt>Net collectible</dt>
+        <dd className="mono">
+          <strong>{formatMoney(collectible)}</strong>
+          {invoice.amountCollected > 0 && <span className="faint"> · {formatMoney(invoice.amountCollected)} already collected</span>}
+        </dd>
+      </dl>
+      <div className="card-foot">
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="btn btn-sm btn-primary" onClick={save} disabled={busy}>
           {busy ? 'Saving…' : 'Save'}
         </button>
       </div>
@@ -2103,6 +2322,24 @@ interface PaymentRow {
   payeeUser: { id: string; name: string } | null;
   recordedBy: { id: string; name: string };
   allocations: Allocation[];
+  /**
+   * The EWT the customer withheld on this collection and whether its BIR 2307
+   * is in (2026-11-13): UNCOLLECTED until the scanned certificate is recorded,
+   * PAID after; null where nothing was withheld.
+   */
+  ewt?: { amount: number; status: 'UNCOLLECTED' | 'PAID' | null };
+  ewtCertificateNo?: string | null;
+  ewtCertificateAt?: string | null;
+  ewtCertificateRecordedAt?: string | null;
+  ewtCertificateBy?: { id: string; name: string } | null;
+  canRecordEwt?: boolean;
+  canClearEwt?: boolean;
+}
+
+/** The one pill for a collection's EWT. */
+function EwtBadge({ status }: { status: 'UNCOLLECTED' | 'PAID' | null | undefined }) {
+  if (!status) return <span className="faint">—</span>;
+  return <StatusBadge status={status} extra={{ UNCOLLECTED: 'warn', PAID: 'ok' }} label={status === 'PAID' ? 'Paid' : 'Uncollected'} />;
 }
 
 /** Where one allocation's document lives, and what to call it. */
@@ -2161,6 +2398,8 @@ interface PaymentsSummary {
   repayments: number;
   /** Every payment in the list not cleared yet, either way. */
   unclearedAll: number;
+  /** EWT withheld on collections whose certificate is not in yet; SCORO's apart. */
+  ewtUncollected?: { amount: number; count: number; historyAmount: number; historyCount: number };
 }
 
 /**
@@ -2274,6 +2513,17 @@ export function Payments({ register = 'collections' }: { register?: 'collections
         ),
     },
     {
+      key: 'ewt',
+      label: 'EWT',
+      align: 'right',
+      render: (r) => (r.ewt?.status ? <span className="mono">{formatMoney(r.ewt.amount)}</span> : <span className="faint">—</span>),
+    },
+    {
+      key: 'ewtStatus',
+      label: 'EWT status',
+      render: (r) => <EwtBadge status={r.ewt?.status} />,
+    },
+    {
       key: 'kind',
       label: 'Direction',
       optional: collections,
@@ -2293,6 +2543,15 @@ export function Payments({ register = 'collections' }: { register?: 'collections
       ],
     },
     { key: 'uncleared', label: 'Cleared', options: [{ value: 'true', label: 'Uncleared only' }] },
+    {
+      key: 'ewt',
+      label: 'EWT status',
+      options: [
+        { value: 'uncollected', label: 'Uncollected — certificate not in yet' },
+        { value: 'paid', label: 'Paid — certificate on file' },
+        { value: 'none', label: 'No EWT withheld' },
+      ],
+    },
     {
       key: 'method',
       label: 'Method',
@@ -2341,7 +2600,7 @@ export function Payments({ register = 'collections' }: { register?: 'collections
   // Collections are money in from customers: no direction to pick. The other
   // register has no salesperson, team or customer to narrow by.
   const filters = allFilters.filter((d) =>
-    collections ? d.key !== 'kind' : !['salespersonId', 'teamId', 'customerId'].includes(d.key),
+    collections ? d.key !== 'kind' : !['salespersonId', 'teamId', 'customerId', 'ewt'].includes(d.key),
   );
 
   return (
@@ -2358,7 +2617,7 @@ export function Payments({ register = 'collections' }: { register?: 'collections
         endpoint="/payments"
         printPath="/api/payments/pdf"
         reportPath={collections ? '/g-fin/reports?kind=collections' : '/g-fin/reports?kind=payments'}
-        columns={columns.filter((c) => collections || !['orNumber', 'salesperson', 'team'].includes(c.key))}
+        columns={columns.filter((c) => collections || !['orNumber', 'salesperson', 'team', 'ewt', 'ewtStatus'].includes(c.key))}
         rowKey={(r) => r.id}
         reloadToken={reload}
         searchPlaceholder={collections ? 'Search number, OR no., SI no., cheque, customer…' : 'Search number, reference, payee, document…'}
@@ -2429,6 +2688,21 @@ export function Payments({ register = 'collections' }: { register?: 'collections
                 sub={sum.cheques ? `${sum.chequesCleared} of ${sum.cheques} cheque${sum.cheques === 1 ? '' : 's'}, by value` : 'no cheques received'}
                 to="/g-fin/payments?method=CHECK"
               />
+              {sum.ewtUncollected && (
+                <Stat
+                  label="EWT uncollected"
+                  value={formatMoney(sum.ewtUncollected.amount)}
+                  figure
+                  accent={sum.ewtUncollected.amount > 0 ? 'warn' : undefined}
+                  sub={[
+                    `${sum.ewtUncollected.count} collection${sum.ewtUncollected.count === 1 ? '' : 's'} awaiting the certificate`,
+                    sum.ewtUncollected.historyCount ? `${sum.ewtUncollected.historyCount} from SCORO not counted` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                  to="/g-fin/payments?ewt=uncollected"
+                />
+              )}
               {teamCards(sum.teams, formatMoney, 'collection')}
             </>
           );
@@ -2563,6 +2837,20 @@ export function PaymentDetail() {
           )
         }
         more={[
+          !!row.canClearEwt && {
+            label: 'Take off EWT certificate',
+            danger: true,
+            confirm: {
+              title: 'Take the EWT certificate off this collection?',
+              body: `The record and its scanned file are removed, and the ${formatMoney(row.ewt?.amount ?? 0)} withheld reads Uncollected again.`,
+              confirmLabel: 'Take it off',
+              onConfirm: async () => {
+                await api.del(`/payments/${id}/ewt-certificate`);
+                toast('ok', 'EWT certificate taken off — uncollected again');
+                await load();
+              },
+            },
+          },
           canDelete && {
             label: 'Delete',
             danger: true,
@@ -2679,6 +2967,99 @@ export function PaymentDetail() {
           </div>
         </div>
       </div>
+
+      {row.ewt?.status && <EwtCertificateCard row={row} onChanged={load} />}
+    </div>
+  );
+}
+
+/**
+ * The EWT a collection withheld and its BIR 2307 (2026-11-13, the owner's
+ * call): Uncollected until the scanned certificate is attached and recorded,
+ * Paid after. The scan goes on first — the server refuses to mark it paid
+ * without one — then the day it was received and, where known, its number.
+ */
+function EwtCertificateCard({ row, onChanged }: { row: PaymentRow; onChanged: () => Promise<void> | void }) {
+  const toast = useToast();
+  const [receivedOn, setReceivedOn] = useState(todayLocal());
+  const [certificateNo, setCertificateNo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const paid = row.ewt?.status === 'PAID';
+
+  async function record() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/payments/${row.id}/ewt-certificate`, { receivedOn, certificateNo: certificateNo.trim() || null });
+      toast('ok', 'EWT certificate recorded — paid');
+      await onChanged();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid grid-2">
+      <div className="card">
+        <div className="card-head">
+          <h3 className="card-title">EWT certificate (BIR 2307)</h3>
+        </div>
+        <dl className="kv">
+          <dt>EWT withheld</dt>
+          <dd className="mono">
+            <strong>{formatMoney(row.ewt?.amount ?? 0)}</strong>
+          </dd>
+          <dt>Status</dt>
+          <dd>
+            <EwtBadge status={row.ewt?.status} />
+          </dd>
+          {paid && (
+            <>
+              <dt>Received on</dt>
+              <dd>{row.ewtCertificateAt ? formatDate(row.ewtCertificateAt) : '—'}</dd>
+              <dt>Certificate no.</dt>
+              <dd className="mono">{row.ewtCertificateNo ?? '—'}</dd>
+              <dt>Recorded by</dt>
+              <dd>{row.ewtCertificateBy?.name ?? '—'}</dd>
+            </>
+          )}
+        </dl>
+        {!paid && (
+          <p className="faint">
+            The customer kept this amount back as withholding tax and owes its certificate. It reads Paid once the scanned certificate
+            is attached and recorded here.
+          </p>
+        )}
+        {row.canRecordEwt && (
+          <>
+            <ErrorBox error={error} />
+            <div className="grid grid-2">
+              <Field label="Date received" required>
+                <input type="date" value={receivedOn} max={todayLocal()} onChange={(e) => setReceivedOn(e.target.value)} />
+              </Field>
+              <Field label="Certificate no." hint="Optional">
+                <input value={certificateNo} onChange={(e) => setCertificateNo(e.target.value)} maxLength={80} />
+              </Field>
+            </div>
+            <div className="card-foot">
+              <button className="btn btn-primary btn-sm" disabled={busy || !receivedOn} onClick={record}>
+                {busy ? 'Recording…' : 'Record EWT certificate'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      <Attachments
+        key={`${row.id}-${row.ewt?.status}`}
+        entityType="payment_ewt"
+        entityId={row.id}
+        title="Scanned certificate"
+        hint={paid ? 'The scan the EWT was marked paid with.' : 'Attach the scanned BIR 2307 here first, then record it.'}
+        canEdit={!!row.canRecordEwt}
+      />
     </div>
   );
 }
