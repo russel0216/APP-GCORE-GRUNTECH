@@ -8779,6 +8779,24 @@ liquidated it no longer exists on the travel request".
   Sales' list shows two cards (Travel requests, Pending approval); the money
   cards are G-FIN's. verify-finance pins the three stages.
 
+- **Sales' travel request is charged to a quotation, a sales order or an
+  office budget** (the same day, the owner's call): the form opened from
+  Sales › Travel Requests offers those three (`TRAVEL_KINDS` in
+  `BudgetRequestEditor.tsx`, starting on A quotation) — never a project or a
+  costing; a project's travel request is raised on the project's own Travel
+  Requests tab (`?jobId=`), and one opened from a record's card keeps that
+  record.
+- **Once a project holds the budget, the sales order and the quotation take
+  no new request** ("check always that the cost on the sales order is not
+  yet pulled to the Project Management budget"): `projectOfQuotation()` in
+  `shared/budgetRequestSources.ts` — a project, not cancelled, built on a
+  revision of the quotation or on a costing behind one — and `checkSource`
+  refuses a request (cash or travel) on such a quotation or on a sales order
+  booked from it, naming the project to raise it on. `GET
+  /budget-requests/sources` leaves them off the picker (by the revision's
+  own project; the save still decides). Requests raised before the project
+  was built were handed over to it, as ever. verify-delivery pins it.
+
 ## A reimbursement against the project budget (2026-11-09)
 
 The owner's question: "how can we see if the request in Reimbursement

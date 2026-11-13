@@ -175,6 +175,39 @@ async function mayRaiseOn(me: ResolvedUser, module: 'sales_orders' | 'quotations
  * and one the caller may raise it on. Returns the columns to write and the
  * number to name it by.
  */
+/**
+ * The project a quotation's cost was pulled into, if any (2026-11-14, the
+ * owner's call: "check always that the cost on the sales order is not yet
+ * pulled to the Project Management budget"): one built on a revision of it,
+ * or on a costing behind one of its revisions. A cancelled project holds no
+ * budget.
+ */
+export async function projectOfQuotation(quotationId: string, db: Db = prisma): Promise<{ id: string; number: string } | null> {
+  const revisions = await db.quotationRevision.findMany({
+    where: { quotationId },
+    select: { id: true, costingId: true, otherCostings: { select: { costingId: true } } },
+  });
+  if (!revisions.length) return null;
+  const costingIds = [...new Set(revisions.flatMap((r) => [r.costingId, ...r.otherCostings.map((o) => o.costingId)]).filter((c): c is string => !!c))];
+  return db.job.findFirst({
+    where: {
+      status: { not: 'CANCELLED' },
+      OR: [
+        { quotationRevisionId: { in: revisions.map((r) => r.id) } },
+        ...(costingIds.length ? [{ costingId: { in: costingIds } }, { otherCostings: { some: { costingId: { in: costingIds } } } }] : []),
+      ],
+    },
+    select: { id: true, number: true },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+/** Once a project holds the budget, a new request is the project's — never the sales order's or the quotation's. */
+async function refuseOncePulled(number: string, quotationId: string) {
+  const job = await projectOfQuotation(quotationId);
+  if (job) throw badRequest(`${number}'s cost is already in project ${job.number}'s budget — raise the request on ${job.number} instead`);
+}
+
 export async function checkSource(me: ResolvedUser, body: SourceInput, keepOfficeLine?: string | null) {
   const given = (['jobId', 'salesOrderId', 'quotationId', 'costingId', 'officeBudgetLineId'] as const).filter((k) => body[k]);
   if (given.length === 0) throw badRequest('What is the cash for? Name a project, a sales order, a quotation, a costing or an office budget line');
@@ -192,10 +225,11 @@ export async function checkSource(me: ResolvedUser, body: SourceInput, keepOffic
     return { columns: { ...columns, jobId: job.id }, number: job.number, kind: 'project' as const };
   }
   if (body.salesOrderId) {
-    const so = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { id: true, number: true, status: true, ownerId: true } });
+    const so = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { id: true, number: true, status: true, ownerId: true, quotationId: true } });
     if (!so) throw notFound('Sales order not found');
     if (so.status !== 'ISSUED') throw badRequest(`${so.number} is not issued — a budget request takes an issued sales order`);
     if (!(await mayRaiseOn(me, 'sales_orders', so.ownerId))) throw forbidden(`You cannot raise a budget request on ${so.number}`);
+    await refuseOncePulled(so.number, so.quotationId);
     return { columns: { ...columns, salesOrderId: so.id }, number: so.number, kind: 'sales_order' as const };
   }
   if (body.quotationId) {
@@ -203,6 +237,7 @@ export async function checkSource(me: ResolvedUser, body: SourceInput, keepOffic
     if (!q) throw notFound('Quotation not found');
     if (!(OPEN_OR_WON as readonly string[]).includes(q.outcome)) throw badRequest(`${q.number} is not open or won — a budget request takes an open or won quotation`);
     if (!(await mayRaiseOn(me, 'quotations', q.ownerId))) throw forbidden(`You cannot raise a budget request on ${q.number}`);
+    await refuseOncePulled(q.number, q.id);
     return { columns: { ...columns, quotationId: q.id }, number: q.number, kind: 'quotation' as const };
   }
   const c = await prisma.costing.findUnique({ where: { id: body.costingId! }, select: { id: true, number: true, status: true, ownerId: true } });

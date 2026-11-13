@@ -62,10 +62,13 @@ export const SOURCE_KEY: Record<SourceKind, 'jobId' | 'salesOrderId' | 'quotatio
   office: 'officeBudgetLineId',
 };
 
+/** What Sales' travel request may be charged to. */
+const TRAVEL_KINDS: SourceKind[] = ['quotation', 'sales_order', 'office'];
+
 const SOURCE_CHOICES: { kind: SourceKind; label: string; hint: string }[] = [
   { kind: 'project', label: 'A project', hint: 'Checked against Budget Monitoring' },
-  { kind: 'sales_order', label: 'A sales order', hint: 'An issued order — checked against its quoted cost' },
-  { kind: 'quotation', label: 'A quotation', hint: 'Open or won — checked against its costing' },
+  { kind: 'sales_order', label: 'A sales order', hint: 'An issued order with no project yet — checked against its quoted cost' },
+  { kind: 'quotation', label: 'A quotation', hint: 'Open or won, with no project yet — checked against its costing' },
   { kind: 'costing', label: 'A costing', hint: 'A final costing — checked against its budget lines' },
   { kind: 'office', label: 'An office budget', hint: 'An office expense — charged to a line of the Office Budget' },
 ];
@@ -118,7 +121,12 @@ export function BudgetRequestEditor() {
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const [header, setHeader] = useState<Header>({ kind: presetKind ?? 'project', sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '', ...NO_JOURNEY });
+  // Raised from Sales › Travel Requests (2026-11-14, the owner's call): a
+  // travel request is charged to a quotation, a sales order or an office
+  // budget — a project's is raised on the project's own Travel Requests tab.
+  const startPath = useLocation().pathname;
+  const startsAsTravel = params.get('kind') === 'travel' || startPath.includes('/travel-requests/');
+  const [header, setHeader] = useState<Header>({ kind: presetKind ?? (startsAsTravel ? 'quotation' : 'project'), sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '', ...NO_JOURNEY });
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
 
@@ -216,6 +224,7 @@ export function BudgetRequestEditor() {
   const onTravelPath = useLocation().pathname.includes('/travel-requests/');
   const travel = existing ? !!existing.isTravel : params.get('kind') === 'travel' || onTravelPath;
   const word = travel ? 'travel request' : 'budget request';
+  const kindChoices = travel ? SOURCE_CHOICES.filter((c) => TRAVEL_KINDS.includes(c.kind)) : SOURCE_CHOICES;
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);
   // Each item's place (2026-11-11): a project's or the office's request may
@@ -435,7 +444,7 @@ export function BudgetRequestEditor() {
                           setHeader((h) => ({ ...h, kind: e.target.value as SourceKind, sourceId: '', costCategoryId: '' }));
                         }}
                       >
-                        {SOURCE_CHOICES.map((c) => (
+                        {kindChoices.map((c) => (
                           <option key={c.kind} value={c.kind}>
                             {c.label}
                           </option>
@@ -473,7 +482,7 @@ export function BudgetRequestEditor() {
                         setHeader((h) => ({ ...h, kind: e.target.value as SourceKind, sourceId: '', costCategoryId: '' }));
                       }}
                     >
-                      {SOURCE_CHOICES.map((c) => (
+                      {kindChoices.map((c) => (
                         <option key={c.kind} value={c.kind}>
                           {c.label}
                         </option>

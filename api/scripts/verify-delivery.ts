@@ -2642,6 +2642,24 @@ async function main() {
           afterRead.budget?.source === 'project',
         `${built.status} ${built.body?.error ?? ''} · ${adopted.map((r) => r.jobId === builtId).join(',')} · ${num(committed?._sum.amount)} · ${afterRead.for?.kind}/${afterRead.raisedOn?.kind}/${afterRead.budget?.source}`,
       );
+      // Once the project holds the budget, a new request is the project's
+      // (2026-11-14, the owner's call) — travel requests included.
+      const lateBody = { costCategoryId: materials.id, reason: `${TAG} BR after the project`, amount: 1_000 };
+      const lateOrder = await http(engT, 'POST', '/budget-requests', { ...lateBody, salesOrderId: order.id });
+      const lateQuote = await http(engT, 'POST', '/budget-requests', {
+        ...lateBody,
+        quotationId: quotationB.id,
+        travel: { mode: 'LAND', from: 'Manila', to: 'Baguio', departOn: '2027-02-01' },
+      });
+      const pickOrders = await http(engT, 'GET', `/budget-requests/sources?kind=sales_order&q=${encodeURIComponent(order.number)}`);
+      const pickQuotes = await http(engT, 'GET', `/budget-requests/sources?kind=quotation&q=${encodeURIComponent(quotationB.number)}`);
+      const builtNumber = String(built.body?.number ?? '');
+      check(
+        'once a project holds its budget, a sales order or quotation takes no new request — the refusal names the project, and the picker leaves them out',
+        lateOrder.status === 400 && String(lateOrder.body?.error).includes(builtNumber) && lateQuote.status === 400 && String(lateQuote.body?.error).includes(builtNumber) &&
+          !(pickOrders.body as { id: string }[]).some((r) => r.id === order.id) && !(pickQuotes.body as { id: string }[]).some((r) => r.id === quotationB.id),
+        `${lateOrder.status} ${lateOrder.body?.error} · ${lateQuote.status} · ${JSON.stringify(pickOrders.body).slice(0, 80)}`,
+      );
       const costingRequests = await prisma.budgetRequest.findMany({ where: { costingId: costingA.id } });
       check('a request on a costing no project was built from stays on the costing', costingRequests.every((r) => r.jobId === null), costingRequests.map((r) => r.jobId).join(','));
       // The releases go with their requests (an allocation cascades, its payment would not).

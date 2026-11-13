@@ -550,7 +550,8 @@ budgetRequestRoutes.get(
     if (kind === 'sales_order') {
       const ids = await owners('sales_orders');
       const rows = await prisma.salesOrder.findMany({
-        where: { status: 'ISSUED', ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { quotation: { subject: like } }, { customer: { name: like } }] } : {}) },
+        // Never one whose cost a project already holds (2026-11-14) — the request is the project's then.
+        where: { status: 'ISSUED', quotation: { revisions: { none: { jobs: { some: { status: { not: 'CANCELLED' } } } } } }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { quotation: { subject: like } }, { customer: { name: like } }] } : {}) },
         select: { id: true, number: true, quotation: { select: { subject: true } }, customer: { select: { name: true } } },
         orderBy: { createdAt: 'desc' },
         take: 50,
@@ -561,7 +562,7 @@ budgetRequestRoutes.get(
     if (kind === 'quotation') {
       const ids = await owners('quotations');
       const rows = await prisma.quotation.findMany({
-        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { subject: like }, { customer: { name: like } }] } : {}) },
+        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] }, revisions: { none: { jobs: { some: { status: { not: 'CANCELLED' } } } } }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { subject: like }, { customer: { name: like } }] } : {}) },
         select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
         orderBy: { createdAt: 'desc' },
         take: 50,
