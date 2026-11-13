@@ -18,6 +18,8 @@ import { layoutSankey, type SankeyInput } from '../lib/sankey';
 
 const W = 1600;
 const H = 900;
+/** The strip the title and subtitle stand in, left off the saved picture. */
+const HEAD = 96;
 const INK = '#222222';
 const GREY = '#666666';
 const PURPLE = '#5B2A8C';
@@ -64,10 +66,10 @@ export function FlowPicture({ input, mode, title, subtitle, fileName }: { input:
       ) : (
         <svg ref={ref} xmlns="http://www.w3.org/2000/svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label={title}>
           <rect data-paper="" x={0} y={0} width={W} height={H} fill="#FFFFFF" />
-          <text x={40} y={52} fontFamily={FONT} fontSize={26} fontWeight={700} fill={PURPLE}>
+          <text data-heading="" x={40} y={52} fontFamily={FONT} fontSize={26} fontWeight={700} fill={PURPLE}>
             {title}
           </text>
-          <text x={40} y={80} fontFamily={FONT} fontSize={15} fill={GREY}>
+          <text data-heading="" x={40} y={80} fontFamily={FONT} fontSize={15} fill={GREY}>
             {subtitle}
           </text>
           {mode === 'down' ? <Down input={input} /> : <Side input={input} />}
@@ -229,8 +231,14 @@ function Down({ input }: { input: SankeyInput }) {
  * the saved copy, so it sits on a slide of any colour.
  */
 async function savePng(svg: SVGSVGElement, fileName: string): Promise<void> {
+  // The saved copy is the DIAGRAM alone (the owner's call the same day: "the
+  // centre details only, not the top details"): no white sheet, no title or
+  // subtitle, and the strip they stood in cut off the top.
   const copy = svg.cloneNode(true) as SVGSVGElement;
-  copy.querySelectorAll('[data-paper]').forEach((n) => n.remove());
+  copy.querySelectorAll('[data-paper], [data-heading]').forEach((n) => n.remove());
+  copy.setAttribute('viewBox', `0 ${HEAD} ${W} ${H - HEAD}`);
+  copy.setAttribute('width', String(W));
+  copy.setAttribute('height', String(H - HEAD));
   const text = new XMLSerializer().serializeToString(copy);
   const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml;charset=utf-8' }));
   try {
@@ -242,7 +250,7 @@ async function savePng(svg: SVGSVGElement, fileName: string): Promise<void> {
     });
     const canvas = document.createElement('canvas');
     canvas.width = W * 2;
-    canvas.height = H * 2;
+    canvas.height = (H - HEAD) * 2;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('No canvas');
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
