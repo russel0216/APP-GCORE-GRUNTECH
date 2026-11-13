@@ -921,7 +921,8 @@ export function QuotationDetail() {
   const due = revision && issued ? addDays(issued, revision.validityDays) : null;
   const canSubmit = editable && !!revision && revision.items.length > 0 && !revision.importedUnchanged;
   const canMove = quotation.canMove ?? quotation.canEdit;
-  const canSend = canMove && moves.some((m) => m.value === 'SUBMITTED');
+  // Sent only once approved (2026-11-14): a draft or one still with its approver is not the customer's yet.
+  const canSend = canMove && moves.some((m) => m.value === 'SUBMITTED') && (!!approved || !!unchangedImport);
   const address = quotation.site?.address
     ? [quotation.site.address, quotation.site.city].filter(Boolean).join(', ')
     : quotation.customer.address;
