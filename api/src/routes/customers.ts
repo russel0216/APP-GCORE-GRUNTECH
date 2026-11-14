@@ -17,6 +17,7 @@ import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { requireCustomerPicker } from '../shared/pickers';
+import { customerNameKey, subIndustryFromNotes, tidyPaymentTerms } from '../shared/customerNames';
 import { nextNumber, previewNext, setCounter } from '../shared/numbering';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
@@ -78,6 +79,9 @@ export function customerListWhere(
   if (openQuote !== null) and.push(openQuote ? { quotations: { some: OPEN_QUOTE } } : { quotations: { none: OPEN_QUOTE } });
   const project = yesNo(f.project, 'Project');
   if (project !== null) and.push(project ? { jobs: { some: {} } } : { jobs: { none: {} } });
+  // Nobody to call (2026-11-15): the customers with no contact person on file.
+  const contacts = yesNo(f.contacts, 'Contact person');
+  if (contacts !== null) and.push(contacts ? { contacts: { some: {} } } : { contacts: { none: {} } });
   const ids = idsFilter(f.ids);
   if (ids) and.push({ id: { in: ids } });
   // The team who handles them (2026-10-09, the owner's call): an Industry row's id, or 'none'.
@@ -125,11 +129,15 @@ async function customerForEdit(me: ReturnType<typeof currentUser>, id: string) {
  * `where`. Sent as `tabs` / `tabCounts`: the filter's choices, with counts.
  */
 export async function customerListSummary(base: Prisma.CustomerWhereInput, where: Prisma.CustomerWhereInput) {
-  const [perSubIndustry, subIndustries, count, inactive] = await Promise.all([
+  const [perSubIndustry, subIndustries, count, inactive, noTeam, noSubIndustry, noContact] = await Promise.all([
     prisma.customer.groupBy({ by: ['subIndustryId'], where: base, _count: { _all: true } }),
     prisma.subIndustry.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, isActive: true } }),
     prisma.customer.count({ where }),
     prisma.customer.count({ where: { AND: [where, { isActive: false }] } }),
+    // What is still to be filled in (2026-11-15) — each card opens the list on its gap.
+    prisma.customer.count({ where: { AND: [where, { industryId: null }] } }),
+    prisma.customer.count({ where: { AND: [where, { subIndustryId: null }] } }),
+    prisma.customer.count({ where: { AND: [where, { contacts: { none: {} } }] } }),
   ]);
   const byId = new Map(perSubIndustry.map((r) => [r.subIndustryId, r._count._all]));
   const tabCounts: Record<string, number> = { '': perSubIndustry.reduce((t, r) => t + r._count._all, 0) };
@@ -145,7 +153,7 @@ export async function customerListSummary(base: Prisma.CustomerWhereInput, where
     tabs.push({ value: 'none', label: 'Not stated' });
     tabCounts.none = unclassified;
   }
-  return { tabs, tabCounts, count, inactive };
+  return { tabs, tabCounts, count, inactive, noTeam, noSubIndustry, noContact };
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -347,14 +355,83 @@ async function holdings(customerId: string, db: Prisma.TransactionClient | typeo
   return out;
 }
 
+/**
+ * Every group of look-alike customers (2026-11-15) — the clean-up page's list.
+ * The System Administrator's, as the merge is. Each row says what it holds, so
+ * the one to keep is plain; inactive ones (already merged away) are left out.
+ */
+customerRoutes.get(
+  '/duplicates',
+  requireSuperAdmin,
+  handler(async (_req, res) => {
+    const all = await prisma.customer.findMany({
+      where: { isActive: true },
+      select: { id: true, code: true, name: true, address: true, createdAt: true, createdBy: { select: { name: true } }, industry: { select: { code: true } }, _count: { select: { contacts: true, sites: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    const groups = new Map<string, typeof all>();
+    for (const c of all) {
+      const key = customerNameKey(c.name);
+      if (key) groups.set(key, [...(groups.get(key) ?? []), c]);
+    }
+    const out = [];
+    for (const [key, rows] of groups) {
+      if (rows.length < 2) continue;
+      const withHolds = await Promise.all(
+        rows.map(async (c) => {
+          const holds = await holdings(c.id);
+          return { id: c.id, code: c.code, name: c.name, address: c.address, team: c.industry?.code ?? null, createdAt: c.createdAt, createdBy: c.createdBy, contacts: c._count.contacts, sites: c._count.sites, holds, documents: Object.values(holds).reduce((n, v) => n + v, 0) };
+        }),
+      );
+      // The one holding the most is the natural keeper, and listed first.
+      out.push({ key, rows: withHolds.sort((a, b) => b.documents - a.documents || b.contacts - a.contacts) });
+    }
+    res.json({ words: HOLD_WORDS, groups: out.sort((a, b) => a.key.localeCompare(b.key)) });
+  }),
+);
+
+/**
+ * The sub-industry the SCORO import left in a customer's notes ("SCORO tags:
+ * Healthcare, …") filed as its sub-industry where it has none (2026-11-15):
+ * a dry run that says how many, or — `{ apply: true }` — the fill, one audit
+ * row. Only a tag that IS an active sub-industry by name; never over one set.
+ */
+customerRoutes.post(
+  '/fill-sub-industries',
+  require_('gops.customers.edit_all'),
+  handler(async (req, res) => {
+    const { apply } = parseBody(z.object({ apply: z.boolean().optional() }), req.body ?? {});
+    const subs = await prisma.subIndustry.findMany({ where: { isActive: true }, select: { id: true, name: true } });
+    const blank = await prisma.customer.findMany({ where: { subIndustryId: null, notes: { contains: 'SCORO tag', mode: 'insensitive' } }, select: { id: true, code: true, name: true, notes: true } });
+    const found = blank.map((c) => ({ c, sub: subIndustryFromNotes(c.notes, subs) })).filter((x): x is { c: (typeof blank)[number]; sub: { id: string; name: string } } => !!x.sub);
+    const bySub = new Map<string, number>();
+    for (const x of found) bySub.set(x.sub.name, (bySub.get(x.sub.name) ?? 0) + 1);
+    let filled = 0;
+    if (apply) {
+      for (const x of found) filled += (await prisma.customer.updateMany({ where: { id: x.c.id, subIndustryId: null }, data: { subIndustryId: x.sub.id } })).count;
+      if (filled) await audit({ entityType: 'customer', entityId: 'list', action: 'UPDATED', summary: `Filled the sub-industry of ${filled} customer${filled === 1 ? '' : 's'} from their SCORO tags`, after: Object.fromEntries(bySub) }, req);
+    }
+    res.json({
+      withoutSubIndustry: await prisma.customer.count({ where: { subIndustryId: null } }),
+      canFill: found.length,
+      filled,
+      bySubIndustry: [...bySub.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count })),
+      sample: found.slice(0, 8).map((x) => ({ code: x.c.code, name: x.c.name, subIndustry: x.sub.name })),
+    });
+  }),
+);
+
 customerRoutes.get(
   '/:id/duplicates',
   requireSuperAdmin,
   handler(async (req, res) => {
     const me = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true } });
     if (!me) throw notFound('Customer not found');
+    // Look-alike names (2026-11-15): "OLEO FATS, INC" and "OLEO-FATS, INCORPORATED" are offered to each other.
+    const key = customerNameKey(me.name);
+    const alike = key ? (await prisma.customer.findMany({ where: { id: { not: me.id } }, select: { id: true, name: true } })).filter((c) => customerNameKey(c.name) === key).map((c) => c.id) : [];
     const same = await prisma.customer.findMany({
-      where: { id: { not: me.id }, name: { equals: me.name.trim(), mode: 'insensitive' } },
+      where: { id: { in: alike } },
       select: { id: true, code: true, name: true, isActive: true, address: true, createdAt: true, createdBy: { select: { name: true } }, _count: { select: { contacts: true, sites: true } } },
       orderBy: { createdAt: 'asc' },
     });
@@ -519,6 +596,7 @@ customerRoutes.get(
               outcome: true,
               createdAt: true,
               currency: true,
+              exchangeRate: true,
               revisions: {
                 orderBy: { revision: 'desc' },
                 select: { revision: true, status: true, total: true },
@@ -666,8 +744,43 @@ customerRoutes.get(
         : [],
     ]);
 
+    // Its sales orders (2026-11-15) — the booking record — behind the sales order list's own right.
+    const salesOrders = can(me, 'gops.sales_orders.view_all')
+      ? await prisma.salesOrder.findMany({
+          where: { customerId },
+          orderBy: { orderDate: 'desc' },
+          select: { id: true, number: true, status: true, orderDate: true, poNumber: true, total: true, vatAmount: true, owner: { select: { id: true, name: true } }, team: { select: { code: true } }, quotation: { select: { currency: true, exchangeRate: true } } },
+        })
+      : null;
+    // The money at a glance, in pesos — each figure only where the reader may
+    // open the list it comes from (null otherwise, never a zero).
+    const pesos = (v: number, q: { currency: string; exchangeRate: Prisma.Decimal | null }) => (q.currency !== 'PHP' && q.exchangeRate ? v * Number(q.exchangeRate) : v);
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const valueOf = (q: (typeof quotations)[number]) => {
+      const best = q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0];
+      return best ? pesos(Number(best.total), q) : 0;
+    };
+    const liveOrders = (salesOrders ?? []).filter((o) => o.status !== 'CANCELLED');
+    const liveInvoices = invoices.filter((i) => i.status !== 'CANCELLED');
+    const figures = {
+      quoted: can(me, 'gops.quotations.view_all') ? { count: quotations.length, value: round(quotations.reduce((n, q) => n + valueOf(q), 0)) } : null,
+      won: can(me, 'gops.quotations.view_all')
+        ? { count: quotations.filter((q) => q.outcome === 'WON').length, value: round(quotations.filter((q) => q.outcome === 'WON').reduce((n, q) => n + valueOf(q), 0)) }
+        : null,
+      open: can(me, 'gops.quotations.view_all')
+        ? { count: quotations.filter((q) => ['OPEN', 'SUBMITTED', 'NEGOTIATION'].includes(q.outcome)).length, value: round(quotations.filter((q) => ['OPEN', 'SUBMITTED', 'NEGOTIATION'].includes(q.outcome)).reduce((n, q) => n + valueOf(q), 0)) }
+        : null,
+      booked: salesOrders ? { count: liveOrders.length, value: round(liveOrders.reduce((n, o) => n + pesos(Number(o.total), o.quotation), 0)) } : null,
+      invoiced: can(me, 'gfin.ar.view_all') ? { count: liveInvoices.length, value: round(liveInvoices.reduce((n, i) => n + Number(i.invoiceTotal), 0)) } : null,
+      outstanding: can(me, 'gfin.ar.view_all')
+        ? round(liveInvoices.filter((i) => ['ISSUED', 'PARTIALLY_PAID'].includes(i.status)).reduce((n, i) => n + Math.max(0, Number(i.netCollectible) - Number(i.amountCollected)), 0))
+        : null,
+    };
+
     res.json({
       ...customer,
+      figures,
+      salesOrders: salesOrders?.map((o) => ({ id: o.id, number: o.number, status: o.status, orderDate: o.orderDate, poNumber: o.poNumber, total: Number(o.total), currency: o.quotation.currency, owner: o.owner, team: o.team?.code ?? null })) ?? [],
       creditLimit: customer.creditLimit ? Number(customer.creditLimit) : null,
       canEdit: mayEdit(me, 'gops', 'customers', customer.createdById === me.id, customer.createdById),
       quotations: quotations.map((q) => {
@@ -773,7 +886,7 @@ customerRoutes.post(
           tin: body.tin || null,
           subIndustryId: subIndustry?.id ?? null,
           industryId: team?.id ?? null,
-          paymentTerms: body.paymentTerms || null,
+          paymentTerms: tidyPaymentTerms(body.paymentTerms),
           creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null,
           phone: body.phone || null,
           email: body.email || null,
@@ -826,7 +939,7 @@ customerRoutes.patch(
         ...(body.tin !== undefined ? { tin: body.tin || null } : {}),
         ...(body.subIndustryId !== undefined ? { subIndustryId: body.subIndustryId || null } : {}),
         ...(body.industryId !== undefined ? { industryId: body.industryId || null } : {}),
-        ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
+        ...(body.paymentTerms !== undefined ? { paymentTerms: tidyPaymentTerms(body.paymentTerms) } : {}),
         ...(body.creditLimit !== undefined
           ? { creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null }
           : {}),

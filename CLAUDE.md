@@ -2454,6 +2454,29 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   switched OFF with a note, never deleted; one audit row on each. The keeper
   must be active; never into itself. A new table pointing at Customer joins
   `HOLDS` in routes/customers.ts. verify-partners pins it.
+- **The customer list's clean-up** (2026-11-15, the owner's audit: eight
+  groups of the same company filed twice, 414 of 459 with no sub-industry,
+  payment terms typed five ways). `shared/customerNames.ts`:
+  `customerNameKey()` — capitals, punctuation and the legal form (Inc.,
+  Corp., Co., Ltd., The) aside; it only SUGGESTS, a person confirms every
+  merge, and it never drops a word that tells two companies apart —
+  `tidyPaymentTerms()` ("30", "30 days" → "30 Days"; anything else kept; on
+  create, PATCH and `tidyCustomerTerms()` in the seed every deploy) and
+  `subIndustryFromNotes()` (a "SCORO tags:" entry that IS an active
+  sub-industry by name). `GET /customers/duplicates` (super admin) groups
+  the active look-alikes with what each holds, the fullest first; `GET
+  /customers/:id/duplicates` offers look-alikes too, so the merge works
+  across spellings; `POST /customers/fill-sub-industries { apply? }`
+  (`gops.customers.edit_all`) is a dry run unless `apply`, never over one
+  set, one audit row. The page is **Customers › ⋯ › Clean up…**
+  (`/g-ops/customers/clean-up`, `pages/masters/CustomerCleanup.tsx`). The
+  list's cards add No team yet, No sub-industry and No contact person (each
+  opens its gap; `summary.noTeam` / `noSubIndustry` / `noContact`), with a
+  new `contacts=yes|no` filter. **Customer 360** opens on the money in
+  pesos — Quoted, Still open, Won, Booked, Invoiced, Outstanding
+  (`figures`, each null without the right to the list it comes from) — and
+  has a Sales orders card (`salesOrders`, behind
+  `gops.sales_orders.view_all`). verify-partners pins it.
 - **Customer 360 and Supplier 360 are a window, never a way around.** Each
   collection loads only when the caller holds the list permission of the screen
   it comes from, and arrives as `[]` otherwise. Add a collection the same way —

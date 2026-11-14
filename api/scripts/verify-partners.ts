@@ -16,6 +16,7 @@
  * refuses to run against production.
  */
 
+import { customerNameKey, subIndustryFromNotes, tidyPaymentTerms } from '../src/shared/customerNames';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -680,6 +681,55 @@ async function httpCases(ctx: {
   const plant = await prisma.customer.create({
     data: { code: `${TAG}-C2`, name: `${TAG} Plant`, subIndustryId: manufacturingSub.id },
   });
+  // The customer list's clean-up (2026-11-15): look-alike names, the SCORO tag
+  // read as a sub-industry, payment terms in one spelling, the gaps counted.
+  {
+    check(
+      'two spellings of one company share a key — punctuation, capitals and the legal form aside — and two companies never do',
+      customerNameKey('ABOITIZ LAND , INC.') === customerNameKey('Aboitiz Land, Inc') &&
+        customerNameKey('OLEO FATS, INC') === customerNameKey('OLEO-FATS, INCORPORATED') &&
+        customerNameKey('Makati Life Medical Center') === customerNameKey('MAKATI LIFE MEDICAL CENTER, INC.') &&
+        customerNameKey('ABOITIZ LAND') !== customerNameKey('ABOITIZ INFRACAPITAL') &&
+        customerNameKey('ACME PHILIPPINES') !== customerNameKey('ACME'),
+    );
+    check(
+      'payment terms typed as days read one way; anything else is kept',
+      tidyPaymentTerms('30') === '30 Days' && tidyPaymentTerms(' 30  DAYS ') === '30 Days' && tidyPaymentTerms('45 day') === '45 Days' &&
+        tidyPaymentTerms('C.O.D') === 'C.O.D' && tidyPaymentTerms('') === null,
+    );
+    const subsNow = [{ id: 'a', name: 'Healthcare' }, { id: 'b', name: 'Commercial Building and Land Development' }];
+    check(
+      'a SCORO tag that is a sub-industry is read from the notes; one that is not is left',
+      subIndustryFromNotes('Imported from SCORO\nSCORO tags: Regular, commercial building and land development', subsNow)?.id === 'b' &&
+        subIndustryFromNotes('SCORO tags: VIP', subsNow) === null && subIndustryFromNotes('nothing here', subsNow) === null,
+    );
+    const alikeA = await prisma.customer.create({ data: { code: `${TAG}-C6`, name: `${TAG} Alike, Inc.`, paymentTerms: '30' } });
+    const alikeB = await prisma.customer.create({ data: { code: `${TAG}-C7`, name: `${TAG} ALIKE INCORPORATED`, contacts: { create: [{ name: 'Cora Diaz' }] } } });
+    const groups = await http(adminT, 'GET', '/customers/duplicates');
+    const mine = ((groups.body.groups ?? []) as { rows: { id: string }[] }[]).find((g) => g.rows.some((r) => r.id === alikeA.id));
+    const notAdminList = await http(viewerT, 'GET', '/customers/duplicates');
+    const offered = await http(adminT, 'GET', `/customers/${alikeA.id}/duplicates`);
+    check(
+      'look-alike customers are grouped for the System Administrator alone, and offered to each other for the merge',
+      groups.status === 200 && !!mine && mine.rows.some((r) => r.id === alikeB.id) && notAdminList.status === 403 &&
+        ((offered.body.rows ?? []) as { id: string }[]).some((r) => r.id === alikeB.id),
+      `${groups.status} ${mine?.rows.length} ${notAdminList.status} ${offered.status}`,
+    );
+    const gaps = await http(adminT, 'GET', `/customers?scope=all&contacts=no&search=${encodeURIComponent(`${TAG} Alike`)}`);
+    const badGap = await http(adminT, 'GET', '/customers?scope=all&contacts=maybe');
+    const saved = await http(adminT, 'PATCH', `/customers/${alikeA.id}`, { paymentTerms: '45 days' });
+    const one = await http(adminT, 'GET', `/customers/${alikeA.id}`);
+    check(
+      'the list finds customers with no contact person and counts the gaps; a customer’s page carries its figures and its sales orders; saved terms take the one spelling',
+      gaps.status === 200 && ((gaps.body.rows ?? []) as { id: string }[]).some((r) => r.id === alikeA.id) && !((gaps.body.rows ?? []) as { id: string }[]).some((r) => r.id === alikeB.id) &&
+        Number((gaps.body.summary as { noContact?: number }).noContact) >= 1 && badGap.status === 400 &&
+        saved.status === 200 && one.body.paymentTerms === '45 Days' && Array.isArray(one.body.salesOrders) && !!(one.body.figures as { quoted?: unknown })?.quoted,
+      `${gaps.status} ${badGap.status} ${saved.status} ${one.body.paymentTerms} ${JSON.stringify(one.body.figures).slice(0, 120)}`,
+    );
+    const dry = await http(adminT, 'POST', '/customers/fill-sub-industries', {});
+    check('the sub-industry fill says what it would do before it does anything', dry.status === 200 && Number(dry.body.filled) === 0 && typeof dry.body.canFill === 'number', `${dry.status} ${JSON.stringify(dry.body).slice(0, 120)}`);
+  }
+
   // A customer filed twice is merged into the one kept (2026-11-14).
   {
     const keep = await prisma.customer.create({ data: { code: `${TAG}-C8`, name: `${TAG} Twin Co`, contacts: { create: [{ name: 'Ana Reyes', isPrimary: true }] } }, include: { contacts: true } });

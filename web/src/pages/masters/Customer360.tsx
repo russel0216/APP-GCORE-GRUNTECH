@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ActivityLog } from '../../components/ActivityLog';
+import { Stat } from '../../components/charts';
 import { useConfirm } from '../../components/Confirm';
 import { RecordHeader } from '../../components/RecordHeader';
 import {
@@ -17,6 +18,7 @@ import {
   formatDate,
   formatDateTime,
   formatMoney,
+  formatWholeMoney,
   humanise,
   useToast,
 } from '../../components/ui';
@@ -182,6 +184,16 @@ interface Customer360 extends CustomerRow {
   serviceReports?: ReportLine[];
   payments?: PaymentLine[];
   jobOrders?: JobOrderLine[];
+  /** Its sales orders, and the money at a glance — each only where the reader may open the list (2026-11-15). */
+  salesOrders?: { id: string; number: string; status: string; orderDate: string; poNumber: string | null; total: number; currency: string; owner: { id: string; name: string }; team: string | null }[];
+  figures?: {
+    quoted: { count: number; value: number } | null;
+    won: { count: number; value: number } | null;
+    open: { count: number; value: number } | null;
+    booked: { count: number; value: number } | null;
+    invoiced: { count: number; value: number } | null;
+    outstanding: number | null;
+  };
 }
 
 interface HistoryRow {
@@ -335,6 +347,19 @@ export function Customer360Page() {
             navigate(`/g-ops/customers/${targetId}`);
           }}
         />
+      )}
+
+      {customer.figures && Object.values(customer.figures).some((v) => v !== null) && (
+        <div className="kpi-grid list-summary">
+          {customer.figures.quoted && <Stat label="Quoted" value={formatWholeMoney(customer.figures.quoted.value)} figure sub={`${customer.figures.quoted.count} quotation${customer.figures.quoted.count === 1 ? '' : 's'}`} />}
+          {customer.figures.open && <Stat label="Still open" value={formatWholeMoney(customer.figures.open.value)} figure sub={`${customer.figures.open.count} in play`} />}
+          {customer.figures.won && <Stat label="Won" value={formatWholeMoney(customer.figures.won.value)} figure sub={`${customer.figures.won.count} quotation${customer.figures.won.count === 1 ? '' : 's'}`} />}
+          {customer.figures.booked && <Stat label="Booked" value={formatWholeMoney(customer.figures.booked.value)} figure sub={`${customer.figures.booked.count} sales order${customer.figures.booked.count === 1 ? '' : 's'}`} />}
+          {customer.figures.invoiced && <Stat label="Invoiced" value={formatWholeMoney(customer.figures.invoiced.value)} figure sub={`${customer.figures.invoiced.count} invoice${customer.figures.invoiced.count === 1 ? '' : 's'}`} />}
+          {customer.figures.outstanding !== null && (
+            <Stat label="Outstanding" value={formatWholeMoney(customer.figures.outstanding)} figure accent={customer.figures.outstanding > 0 ? 'warn' : undefined} sub="still to collect" />
+          )}
+        </div>
       )}
 
       <div className="stack">
@@ -531,6 +556,33 @@ export function Customer360Page() {
             </tr>
           ))}
         </Collection>
+
+        {can('gops.sales_orders.view_all') && (
+          <Collection
+            title="Sales orders"
+            count={(customer.salesOrders ?? []).length}
+            empty="Nothing booked for this customer yet."
+            head={['Number', 'Date', 'Customer PO', 'Booked by', 'Team', 'Total', 'Status']}
+          >
+            {(customer.salesOrders ?? []).map((o) => (
+              <tr key={o.id}>
+                <td>
+                  <Link className="mono" to={`/g-ops/sales-orders/${o.id}`}>
+                    {o.number}
+                  </Link>
+                </td>
+                <td>{formatDate(o.orderDate)}</td>
+                <td>{o.poNumber ?? '—'}</td>
+                <td>{o.owner.name}</td>
+                <td>{o.team ?? '—'}</td>
+                <td className="num">{formatMoney(o.total, o.currency)}</td>
+                <td>
+                  <StatusBadge status={o.status} />
+                </td>
+              </tr>
+            ))}
+          </Collection>
+        )}
 
         <Collection
           title="Projects"

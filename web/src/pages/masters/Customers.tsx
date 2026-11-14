@@ -45,6 +45,10 @@ export interface CustomerRow {
 interface CustomerSummary {
   count?: number;
   inactive?: number;
+  /** What is still to be filled in (2026-11-15) — each card opens the list on its gap. */
+  noTeam?: number;
+  noSubIndustry?: number;
+  noContact?: number;
 }
 
 /**
@@ -371,6 +375,14 @@ export function Customers() {
         { value: 'no', label: 'No project yet' },
       ],
     },
+    {
+      key: 'contacts',
+      label: 'Contact person',
+      options: [
+        { value: 'no', label: 'None on file' },
+        { value: 'yes', label: 'Has one' },
+      ],
+    },
   ];
 
   return (
@@ -400,6 +412,15 @@ export function Customers() {
         menuItems={
           can('gops.customers.create')
             ? [
+                ...(can('gops.customers.edit_all')
+                  ? [
+                      {
+                        label: 'Clean up…',
+                        hint: 'Look-alike customers to merge, and sub-industries from the SCORO notes',
+                        onSelect: () => navigate('/g-ops/customers/clean-up'),
+                      },
+                    ]
+                  : []),
                 {
                   label: 'Import customers…',
                   hint: 'From a spreadsheet, checked before anything is saved',
@@ -418,6 +439,9 @@ export function Customers() {
             <>
               <Stat label="Customers" value={total} />
               {!!sum.inactive && <Stat label="Inactive" value={sum.inactive} />}
+              <Stat label="No team yet" value={sum.noTeam ?? 0} sub="nobody handles them" to="/g-ops/customers?team=none" />
+              <Stat label="No sub-industry" value={sum.noSubIndustry ?? 0} sub="not classified" to="/g-ops/customers?subIndustry=none" />
+              <Stat label="No contact person" value={sum.noContact ?? 0} sub="nobody to call" to="/g-ops/customers?contacts=no" />
             </>
           );
         }}

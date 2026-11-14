@@ -22,6 +22,7 @@ import { PdfTemplates } from './pages/admin/PdfTemplates';
 import { PipelineStages } from './pages/admin/PipelineStages';
 import { Customers } from './pages/masters/Customers';
 import { Customer360Page } from './pages/masters/Customer360';
+import { CustomerCleanup } from './pages/masters/CustomerCleanup';
 import { Suppliers, SupplierDetail } from './pages/masters/Suppliers';
 import { Employees } from './pages/masters/Employees';
 import { Items } from './pages/masters/Items';
@@ -341,6 +342,15 @@ function Routed() {
           element={
             <Guard permission="gops.customers.view_all">
               <Customers />
+            </Guard>
+          }
+        />
+        {/* Look-alike customers to merge and the sub-industry fill (2026-11-15). Above `:id`. */}
+        <Route
+          path="/g-ops/customers/clean-up"
+          element={
+            <Guard permission="gops.customers.view_all">
+              <CustomerCleanup />
             </Guard>
           }
         />

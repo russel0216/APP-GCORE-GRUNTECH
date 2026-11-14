@@ -31,6 +31,7 @@ import { ENTRANCE_EXAMS, seedEntranceExams } from '../src/shared/hiring';
 import { flushFaceSamples, migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
+import { tidyCustomerTerms } from '../src/shared/customerNames';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
@@ -1212,6 +1213,9 @@ async function main() {
   // The customer's own address (2026-10-11): once, every customer without
   // one takes its first site's, so quotations print what they printed before.
   {
+    // Payment terms typed as days read one way ("30 Days") — every deploy, idempotent.
+    const tidied = await tidyCustomerTerms();
+    if (tidied) console.log(`  ✓ ${tidied} customer payment term${tidied === 1 ? '' : 's'} brought to one spelling`);
     const filled = await backfillCustomerAddresses();
     if (filled) console.log(`  · Gave ${filled} customer(s) their first site's address as their own`);
   }
