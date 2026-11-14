@@ -679,7 +679,9 @@ export interface Revision {
   /** totalCost is absent when this viewer may not see cost. */
   costing: { id: string; number: string; title: string; contractValue: number; totalCost?: number } | null;
   /** Every costing the revision is quoted from, the first first (2026-10-19). */
-  costings?: { id: string; number: string; title: string; contractValue: number; totalCost?: number }[];
+  costings?: { id: string; number: string; title: string; contractValue: number; totalCost?: number; scope?: 'WHOLE' | 'INSTALLATION' }[];
+  /** Equipment against installation, by costing — internal, never printed; only for a viewer who may see cost. */
+  costMakeup?: CostMakeup;
   approvedBy: { id: string; name: string } | null;
   /** The project this revision became, if any (Job.quotationRevisionId). */
   jobs: { id: string; number: string; name: string; status: string }[];
@@ -1594,6 +1596,7 @@ export function QuotationDetail() {
             <div className={`quote-summary${showPanel ? '' : ' quote-summary-single'}`}>
               <TotalsBlock revision={revision} currency={quotation.currency} />
               {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} currency={quotation.currency} />}
+              {quotation.canSeeCost && revision.costMakeup && <CostMakeupBlock makeup={revision.costMakeup} />}
             </div>
           </div>
 
@@ -1797,6 +1800,77 @@ function TotalsBlock({ revision, currency }: { revision: Revision; currency: str
 }
 
 /** SCORO's right-hand panel: cost and margin, in-house against outsourced. */
+export interface CostMakeup {
+  costings: { number: string; scope: string; supply: number; installation: number; leftOut: number }[];
+  supply: number;
+  installation: number;
+  supplierLines: number;
+  lineCost: number;
+  doubleCount: boolean;
+}
+
+/**
+ * Where the cost comes from (2026-11-14): equipment (A) against installation
+ * (B), costing by costing, beside the equipment sales quotes on its own
+ * lines. Internal — the customer's paper never carries it. Costings are in
+ * pesos, as costed.
+ */
+function CostMakeupBlock({ makeup }: { makeup: CostMakeup }) {
+  return (
+    <div className="card qd-makeup" role="group" aria-label="Cost make-up">
+      <h3 className="card-title">Cost make-up — internal, never printed</h3>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>From</th>
+              <th className="right">Equipment (A)</th>
+              <th className="right">Installation (B)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {makeup.costings.map((c) => (
+              <tr key={c.number}>
+                <td>
+                  <span className="mono">{c.number}</span>
+                  <div className="faint">
+                    {c.scope === 'INSTALLATION'
+                      ? `Installation only${c.leftOut > 0 ? ` — its ${formatMoney(c.leftOut)} of equipment is left out` : ''}`
+                      : 'Counts whole'}
+                  </div>
+                </td>
+                <td className="right mono">{c.scope === 'INSTALLATION' ? '—' : formatMoney(c.supply)}</td>
+                <td className="right mono">{formatMoney(c.installation)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td>
+                Supplier lines on this quotation
+                <div className="faint">Equipment sales quotes itself</div>
+              </td>
+              <td className="right mono">{formatMoney(makeup.supplierLines)}</td>
+              <td className="right mono">—</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td>Together</td>
+              <td className="right mono">{formatMoney(makeup.supply + makeup.supplierLines)}</td>
+              <td className="right mono">{formatMoney(makeup.installation)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      {makeup.doubleCount && (
+        <p className="alert warn" role="alert">
+          Check the equipment is not counted twice: a costing counted whole already holds equipment, and this quotation also has lines costed from a
+          supplier. If sales quotes the equipment, set that costing to “Installation only” under Modify.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function CostPanelBlock({ panel, currency = 'PHP' }: { panel: CostPanel; currency?: string }) {
   const row = (label: string, value: number, share: number | null, strong = false) => (
     <div className={strong ? 'quote-totals-grand' : undefined}>

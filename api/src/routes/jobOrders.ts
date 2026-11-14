@@ -41,7 +41,7 @@ import { toCsv } from '../shared/csv';
 import { valueRevision } from '../shared/pipeline';
 import { inBase, RATE_SELECT } from '../shared/exchangeRates';
 import { costingsForJob, createJobRecord } from './jobs';
-import { jobCostingIds, jobsOnCostingWhere, revisionCostingIds, revisionsCostingIds } from '../shared/costingSets';
+import { jobCostingIds, jobsOnCostingWhere, revisionCostingIds, revisionCostingScopes, revisionsCostingIds } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { viewScope } from '../shared/ownScope';
@@ -1279,7 +1279,7 @@ export async function settleJobOrder(
       const rev = valueRevision(revisions);
       if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
       // Every costing the quotation was costed from (2026-10-19), the first first.
-      const costing = await costingsForJob(await revisionCostingIds(rev), jo.customerId);
+      const costing = await costingsForJob(await revisionCostingIds(rev), jo.customerId, await revisionCostingScopes(rev));
       const tally = await laborTally(jo);
       const t = targets(jo);
       built = await prisma.$transaction(async (tx) => {

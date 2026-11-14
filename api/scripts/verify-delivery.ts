@@ -2660,6 +2660,64 @@ async function main() {
           !(pickOrders.body as { id: string }[]).some((r) => r.id === order.id) && !(pickQuotes.body as { id: string }[]).some((r) => r.id === quotationB.id),
         `${lateOrder.status} ${lateOrder.body?.error} · ${lateQuote.status} · ${JSON.stringify(pickOrders.body).slice(0, 80)}`,
       );
+      // A costing the quotation counts for its INSTALLATION only (2026-11-14):
+      // 60,000 of materials and 20,000 of labour in a 120,000 contract — the
+      // project budgets the labour alone and takes 30,000 as its contract.
+      {
+        const labor = await prisma.costCategory.findFirstOrThrow({ where: { code: 'LAB' } });
+        const costingI = await prisma.costing.create({
+          data: {
+            number: await nextNumber('costing'),
+            title: `${TAG} supply and install`,
+            ownerId: engineer.id,
+            customerId: customer.id,
+            status: 'FINAL',
+            totalCost: d(80_000),
+            contractValue: d(120_000),
+            lines: {
+              create: [
+                { costCategoryId: materials.id, description: 'Pump', quantity: d(1), unit: 'lot', unitCost: d(60_000), amount: d(60_000) },
+                { costCategoryId: labor.id, description: 'Install', quantity: d(1), unit: 'lot', unitCost: d(20_000), amount: d(20_000) },
+              ],
+            },
+            scopeSections: {
+              create: [
+                { kind: 'MAIN_WORK', name: `${TAG} supply`, value: d(90_000), durationDays: 5, sortOrder: 0 },
+                { kind: 'MAIN_WORK', name: `${TAG} install`, value: d(30_000), durationDays: 5, sortOrder: 1 },
+              ],
+            },
+          },
+        });
+        const quotationI = await prisma.quotation.create({
+          data: {
+            number: await nextNumber('quotation', prisma, { ownerId: pm.id }),
+            customerId: customer.id,
+            ownerId: engineer.id,
+            subject: `${TAG} installation only plant`,
+            outcome: 'WON',
+            revisions: { create: [{ revision: 0, status: 'APPROVED', costingId: costingI.id, costingScope: 'INSTALLATION' }] },
+          },
+          include: { revisions: true },
+        });
+        const builtI = await http(leadToken, 'POST', '/jobs', {
+          costingId: costingI.id,
+          quotationRevisionId: quotationI.revisions[0].id,
+          name: `${TAG} installation only project`,
+          customerId: customer.id,
+        });
+        const jobI = builtI.body?.id
+          ? await prisma.job.findUnique({ where: { id: String(builtI.body.id) }, include: { scopeItems: true, costEntries: { where: { state: 'BUDGETED' } } } })
+          : null;
+        const scopeSum = (jobI?.scopeItems ?? []).reduce((sum, x) => sum + num(x.value), 0);
+        check(
+          'a project built from an installation-only costing budgets its installation alone: the labour as budget, its share of the contract, the schedule of values scaled to it exactly',
+          builtI.status === 201 && !!jobI && money(num(jobI.contractValue), 30_000) && jobI.costEntries.length === 1 &&
+            jobI.costEntries[0].costCategoryId === labor.id && money(num(jobI.costEntries[0].amount), 20_000) && money(scopeSum, 30_000),
+          `${builtI.status} ${builtI.body?.error ?? ''} ${jobI ? num(jobI.contractValue) : ''} ${jobI?.costEntries.length} ${scopeSum}`,
+        );
+        const untouched = await prisma.costing.findUniqueOrThrow({ where: { id: costingI.id }, include: { lines: true } });
+        check('the costing itself is not changed', money(num(untouched.contractValue), 120_000) && untouched.lines.length === 2);
+      }
       const costingRequests = await prisma.budgetRequest.findMany({ where: { costingId: costingA.id } });
       check('a request on a costing no project was built from stays on the costing', costingRequests.every((r) => r.jobId === null), costingRequests.map((r) => r.jobId).join(','));
       // The releases go with their requests (an allocation cascades, its payment would not).

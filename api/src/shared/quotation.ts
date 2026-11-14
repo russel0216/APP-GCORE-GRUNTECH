@@ -332,6 +332,9 @@ export function quotationLinesFromSections(sections: ScopeSectionForQuote[]) {
   }));
 }
 
+/** The line an installation-only costing gives a quotation. */
+export const INSTALLATION_LINE = 'INSTALLATION AND COMMISSIONING';
+
 /** A costing's scope sections, in their order — what the mapping above reads. */
 export function costingScopeSections(costingId: string, tx: Prisma.TransactionClient = prisma) {
   return tx.scopeSection.findMany({
@@ -339,6 +342,32 @@ export function costingScopeSections(costingId: string, tx: Prisma.TransactionCl
     orderBy: { sortOrder: 'asc' },
     select: { name: true, description: true, value: true },
   });
+}
+
+/**
+ * A costing's two halves (2026-11-14): SUPPLY — its Materials and Equipment
+ * lines — and INSTALLATION, everything else; each priced as the costing
+ * prices it (cost × contract ÷ total cost), the installation taking the
+ * rounding so the two prices add up to the contract value.
+ */
+export function costingSplit(costing: { contractValue: Prisma.Decimal | number; lines: { amount: Prisma.Decimal | number; costCategory: { code: string } }[] }) {
+  const cents = (v: Prisma.Decimal | number) => Math.round(Number(v) * 100);
+  let supply = 0;
+  let install = 0;
+  for (const l of costing.lines) {
+    if (['MAT', 'EQP'].includes(l.costCategory.code)) supply += cents(l.amount);
+    else install += cents(l.amount);
+  }
+  const total = supply + install;
+  const contract = cents(costing.contractValue);
+  const supplyPrice = total > 0 ? Math.round((supply * contract) / total) : 0;
+  return {
+    supplyCost: supply / 100,
+    installCost: install / 100,
+    totalCost: total / 100,
+    supplyPrice: supplyPrice / 100,
+    installPrice: (contract - supplyPrice) / 100,
+  };
 }
 
 /** A costing as the several-costings mapping reads it. */
@@ -387,16 +416,34 @@ export function quotationLinesFromCostings(costings: CostingForQuote[]) {
 }
 
 /** The costings named, in the order given, with their scope sections — what the mapping above reads. */
-export async function costingsForQuote(costingIds: string[], tx: Prisma.TransactionClient = prisma): Promise<CostingForQuote[]> {
-  const rows = await tx.costing.findMany({
+export async function costingsForQuote(
+  costingIds: string[],
+  tx: Prisma.TransactionClient = prisma,
+  scopes: Record<string, string> = {},
+): Promise<CostingForQuote[]> {
+  const found = await tx.costing.findMany({
     where: { id: { in: costingIds } },
     select: {
       id: true,
       number: true,
       title: true,
+      contractValue: true,
+      lines: { select: { amount: true, costCategory: { select: { code: true } } } },
       scopeSections: { orderBy: { sortOrder: 'asc' }, select: { name: true, description: true, value: true } },
     },
   });
+  // Installation only: ONE line worth the costing's installation part, never
+  // its scope of work — whose phases price the equipment too.
+  const rows = found.map((c) =>
+    scopes[c.id] === 'INSTALLATION'
+      ? {
+          ...c,
+          scopeSections: [
+            { name: INSTALLATION_LINE, description: c.title.trim() || c.number, value: new Prisma.Decimal(costingSplit(c).installPrice.toFixed(2)) },
+          ],
+        }
+      : c,
+  );
   return costingIds
     .map((id) => rows.find((r) => r.id === id))
     .filter((r): r is NonNullable<typeof r> => !!r)

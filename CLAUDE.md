@@ -8820,6 +8820,44 @@ or approved).
   container; `clamp(--fs-xs, 11.5cqi, --fs-base)`).
 - verify-sales and verify-pipeline pin it.
 
+## A costing counts whole, or for its installation only (2026-11-14)
+
+The owner's question: "Sales quotation X = A equipment + B job order /
+installation by Project Management; sometimes the engineer's costing contains
+A + B — how do we distinguish it?" The costing already knows: its lines sit
+under budget lines. **SUPPLY (A) is Materials and Equipment
+(`SUPPLY_CATEGORY_CODES`), INSTALLATION (B) everything else.**
+
+- **The choice is per costing on a revision**: `QuotationRevision.costingScope`
+  (the first costing) and `QuotationRevisionCosting.scope` — `WHOLE` (the
+  default) or `INSTALLATION`. `costingScopes: { <costingId>: scope }` on `POST
+  /quotations` and `PATCH …/revisions/:id` (`costingScopesOf`, an unknown word
+  a 400); `setRevisionCostings(tx, id, ids, scopes?)` writes it and keeps a
+  kept costing's choice; `revisionCostingScopes(revision)` reads it; a new
+  revision carries it. All in `shared/costingSets.ts`.
+- **`costingSplit(costing)`** (`shared/quotation.ts`, exact in centavos) gives
+  supply and installation cost and each priced as the costing prices it (cost
+  × contract ÷ total cost), the installation taking the rounding.
+- **Installation only gives ONE line**: `costingsForQuote(ids, tx, scopes)`
+  hands such a costing to the mapping as a single section,
+  `INSTALLATION_LINE` ("INSTALLATION AND COMMISSIONING"), worth its
+  installation price — "Fill from costing" and the editor's preview
+  (`GET /quotations/costing-lines?installation=a,b`) alike.
+- **The make-up is internal, never printed**: `GET /quotations/:id` sends each
+  revision's `costings[].scope` and, to a cost viewer, `costMakeup` — per
+  costing its equipment and installation counted (and equipment left out),
+  the quotation's own supplier-costed lines, and `doubleCount` when a costing
+  counted whole holds equipment while the quotation also has supplier lines.
+  The page draws it under the cost panel (`CostMakeupBlock`); the editor has
+  "It counts for" beside each costing.
+- **A project budgets what was counted**: `costingsForJob(ids, customerId,
+  scopes)` — `POST /jobs` (the revision's scopes) and a job order's approval —
+  runs an installation-only costing through `installationOnly()`: its
+  non-supply lines as the budget, the installation's share of the contract
+  value, the schedule of values scaled to it exactly (the last phase takes
+  the rounding). The costing itself never changes.
+- verify-sales and verify-delivery pin it.
+
 ## Travel requests, one place at a time (2026-11-14)
 
 The owner's calls: "why when a travel request is clicked it goes to Project

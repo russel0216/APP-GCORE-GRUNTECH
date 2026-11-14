@@ -97,6 +97,8 @@ interface Header {
   costingId: string;
   /** The other costings, after the first (2026-10-19: a quotation may come from two costings). */
   otherCostingIds: string[];
+  /** The costings that count for their INSTALLATION only — sales quotes the equipment on its own lines (2026-11-14). */
+  installationOnly: string[];
   prNumber: string;
   delivery: string;
   paymentTerms: string;
@@ -273,6 +275,7 @@ export function QuotationEditor() {
     leadId: preset.leadId,
     costingId: preset.costingId,
     otherCostingIds: [],
+    installationOnly: [],
     prNumber: '',
     delivery: '',
     paymentTerms: '',
@@ -375,6 +378,7 @@ export function QuotationEditor() {
             leadId: q.lead?.id ?? '',
             costingId: draft.costing?.id ?? '',
             otherCostingIds: (draft.costings ?? []).slice(1).map((c) => c.id),
+            installationOnly: (draft.costings ?? []).filter((c) => c.scope === 'INSTALLATION').map((c) => c.id),
             prNumber: draft.prNumber ?? '',
             delivery: draft.delivery ?? '',
             paymentTerms: draft.paymentTerms ?? '',
@@ -642,19 +646,36 @@ export function QuotationEditor() {
     scope of work as the lines — the same mapping "Fill from costing" writes.
     Once the table has been touched, only the button replaces it.
   */
-  const loadCostingLines = useCallback(async (costingIds: string) => {
-    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingIds })}`);
+  const loadCostingLines = useCallback(async (costingIds: string, installation = '') => {
+    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingIds, installation: installation || undefined })}`);
     return rows.map(fromCostingLine);
   }, []);
 
   /** Every costing chosen, the first first, as the API takes them. */
   const costingIds = [header.costingId, ...header.otherCostingIds].filter(Boolean);
   const costingKey = costingIds.join(',');
+  const installationKey = header.installationOnly.filter((cid) => costingIds.includes(cid)).join(',');
+  const costingScopes = Object.fromEntries(costingIds.map((cid) => [cid, header.installationOnly.includes(cid) ? 'INSTALLATION' : 'WHOLE']));
+  /** "The whole costing" or "Its installation only", for one costing. */
+  const scopeSelect = (cid: string) => (
+    <select
+      aria-label="What this costing counts for"
+      value={header.installationOnly.includes(cid) ? 'INSTALLATION' : 'WHOLE'}
+      onChange={(e) => {
+        const only = e.target.value === 'INSTALLATION';
+        setHeader((h) => ({ ...h, installationOnly: only ? [...new Set([...h.installationOnly, cid])] : h.installationOnly.filter((x) => x !== cid) }));
+        setDirty(true);
+      }}
+    >
+      <option value="WHOLE">Counts whole — equipment and installation</option>
+      <option value="INSTALLATION">Installation only — I quote the equipment on my own lines</option>
+    </select>
+  );
 
   useEffect(() => {
     if (editing || !costingKey || linesTouched.current) return;
     let live = true;
-    loadCostingLines(costingKey)
+    loadCostingLines(costingKey, installationKey)
       .then((filled) => {
         if (!live || linesTouched.current || filled.length === 0) return;
         setLines((prev) => (prev.every(isBlank) ? filled : prev));
@@ -663,11 +684,11 @@ export function QuotationEditor() {
     return () => {
       live = false;
     };
-  }, [editing, costingKey, loadCostingLines]);
+  }, [editing, costingKey, installationKey, loadCostingLines]);
 
   /** The table becomes the costing's scope of work. Throws, so the confirm bar can say why not. */
   async function fillLines() {
-    const filled = await loadCostingLines(costingKey);
+    const filled = await loadCostingLines(costingKey, installationKey);
     if (!filled.length) throw new Error('That costing has no scope of work yet — add sections to it first');
     setLines(filled);
     linesTouched.current = true;
@@ -886,6 +907,7 @@ export function QuotationEditor() {
           siteId: header.siteId || null,
           leadId: header.leadId || null,
           costingIds,
+          costingScopes,
           subject: upperText(header.subject.trim()),
           // Sent only when it is not the suggestion: otherwise the next free
           // number is issued as the quotation is saved.
@@ -920,6 +942,7 @@ export function QuotationEditor() {
       await api.put(`${base}/lines`, { lines: payloadLines });
       await api.patch(base, {
         costingIds,
+        costingScopes,
         validityDays,
         notes: header.notes || null,
         terms: header.terms || null,
@@ -1388,6 +1411,14 @@ export function QuotationEditor() {
                 ))}
               </select>
             </Field>
+            {header.costingId && (
+              <Field
+                label="It counts for"
+                hint="Never printed. Installation only: the costing gives one installation line, and a project built from it budgets only that part"
+              >
+                {scopeSelect(header.costingId)}
+              </Field>
+            )}
             {/* A second (third…) costing, 2026-10-19: its scope follows the first's, under a subheading each. */}
             {header.costingId &&
               header.otherCostingIds.map((cid, i) => {
@@ -1396,6 +1427,7 @@ export function QuotationEditor() {
                   <Field key={cid} label={`Costing ${i + 2}`}>
                     <div className="row">
                       <span>{c ? `${c.number} — ${c.title}` : 'A costing'}</span>
+                      {scopeSelect(cid)}
                       <button
                         type="button"
                         className="btn btn-sm"

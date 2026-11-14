@@ -38,6 +38,42 @@ export function costingIdsOf(body: { costingId?: string | null; costingIds?: (st
   return undefined;
 }
 
+/**
+ * What a costing contributes to a quotation (2026-11-14, the owner's call:
+ * "Sales quotation = A equipment + B job order / installation; sometimes the
+ * engineer's costing contains A + B — how do we distinguish it"): WHOLE, or
+ * INSTALLATION — everything but its Materials and Equipment lines, for a
+ * quotation whose equipment sales quotes on its own lines.
+ */
+export const COSTING_SCOPES = ['WHOLE', 'INSTALLATION'] as const;
+export type CostingScope = (typeof COSTING_SCOPES)[number];
+export type CostingScopes = Record<string, CostingScope>;
+/** The cost categories that are SUPPLY (A); every other one is installation (B). */
+export const SUPPLY_CATEGORY_CODES = ['MAT', 'EQP'];
+
+/** `costingScopes` off a body — unknown words refused; undefined when not sent. */
+export function costingScopesOf(body: { costingScopes?: Record<string, string> | null }): CostingScopes | undefined {
+  if (!body.costingScopes) return undefined;
+  const out: CostingScopes = {};
+  for (const [id, scope] of Object.entries(body.costingScopes)) {
+    if (!(COSTING_SCOPES as readonly string[]).includes(scope)) throw badRequest('A costing counts whole, or for its installation only');
+    out[id] = scope as CostingScope;
+  }
+  return out;
+}
+
+/** A revision's costings with what each contributes. */
+export async function revisionCostingScopes(revision: { id: string; costingId: string | null }, tx: Tx = prisma): Promise<CostingScopes> {
+  if (!revision.costingId) return {};
+  const [first, others] = await Promise.all([
+    tx.quotationRevision.findUnique({ where: { id: revision.id }, select: { costingScope: true } }),
+    tx.quotationRevisionCosting.findMany({ where: { revisionId: revision.id }, select: { costingId: true, scope: true } }),
+  ]);
+  const out: CostingScopes = { [revision.costingId]: (first?.costingScope ?? 'WHOLE') as CostingScope };
+  for (const o of others) out[o.costingId] = o.scope as CostingScope;
+  return out;
+}
+
 /** Every costing named exists, or a 400 naming how many do not. */
 export async function assertCostingsExist(ids: string[], tx: Tx = prisma): Promise<void> {
   if (!ids.length) return;
@@ -82,13 +118,17 @@ export async function revisionsCostingIds(
  * Writes a revision's costings: the first on `costingId`, the others as rows,
  * replaced whole. An empty list unlinks every costing.
  */
-export async function setRevisionCostings(tx: Tx, revisionId: string, ids: string[]): Promise<void> {
+export async function setRevisionCostings(tx: Tx, revisionId: string, ids: string[], scopes?: CostingScopes): Promise<void> {
   const clean = cleanCostingIds(ids);
-  await tx.quotationRevision.update({ where: { id: revisionId }, data: { costingId: clean[0] ?? null } });
+  // A costing kept keeps what it contributed unless the caller says otherwise.
+  const before = await tx.quotationRevision.findUnique({ where: { id: revisionId }, select: { costingId: true } });
+  const was = before ? await revisionCostingScopes({ id: revisionId, costingId: before.costingId }, tx) : {};
+  const scopeOf = (id: string): CostingScope => scopes?.[id] ?? was[id] ?? 'WHOLE';
+  await tx.quotationRevision.update({ where: { id: revisionId }, data: { costingId: clean[0] ?? null, costingScope: clean[0] ? scopeOf(clean[0]) : 'WHOLE' } });
   await tx.quotationRevisionCosting.deleteMany({ where: { revisionId } });
   if (clean.length > 1) {
     await tx.quotationRevisionCosting.createMany({
-      data: clean.slice(1).map((costingId, i) => ({ revisionId, costingId, sortOrder: i })),
+      data: clean.slice(1).map((costingId, i) => ({ revisionId, costingId, sortOrder: i, scope: scopeOf(costingId) })),
     });
   }
 }

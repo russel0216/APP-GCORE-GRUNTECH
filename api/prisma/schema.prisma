@@ -1722,6 +1722,12 @@ model QuotationRevision {
   jobs          Job[]
   /// The other costings this revision is quoted from — see QuotationRevisionCosting.
   otherCostings QuotationRevisionCosting[]
+  /// What the FIRST costing contributes (2026-11-14, the owner's call: sales
+  /// quotes the equipment on its own lines, the engineer's costing holds
+  /// equipment AND installation): WHOLE, or INSTALLATION — its labour,
+  /// subcontract, indirect and contingency lines only.
+  costingScope  String @default("WHOLE")
+
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6292,6 +6298,9 @@ model QuotationRevisionCosting {
   costingId  String
   costing    Costing           @relation(fields: [costingId], references: [id], onDelete: Cascade)
   sortOrder  Int               @default(0)
+  /// WHOLE, or INSTALLATION — only the costing's installation part counts
+  /// (2026-11-14); the first costing's is `QuotationRevision.costingScope`.
+  scope      String            @default("WHOLE")
 
   @@id([revisionId, costingId])
   @@index([costingId])

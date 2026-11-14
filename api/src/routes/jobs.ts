@@ -16,7 +16,7 @@ import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
 import { workingDayDate, workingDaysBetween } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
-import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
+import { SUPPLY_CATEGORY_CODES, cleanCostingIds, costingIdsOf, revisionCostingScopes } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 import { visibleOwners } from '../shared/team';
 import { projectBudgetByLine, requestedByLine } from '../shared/projectBudget';
@@ -706,12 +706,48 @@ export async function costingForJob(costingId: string, customerId: string): Prom
  * scope adds up to its own contract value, so together they add up to the
  * project's — the schedule of values stays exact.
  */
-export async function costingsForJob(costingIds: string[], customerId: string): Promise<JobCosting[]> {
+export async function costingsForJob(costingIds: string[], customerId: string, scopes: Record<string, string> = {}): Promise<JobCosting[]> {
   const ids = cleanCostingIds(costingIds);
   if (!ids.length) throw badRequest('A project needs a costing');
+  const supply = ids.some((id) => scopes[id] === 'INSTALLATION')
+    ? new Set((await prisma.costCategory.findMany({ where: { code: { in: SUPPLY_CATEGORY_CODES } }, select: { id: true } })).map((c) => c.id))
+    : null;
   const out: JobCosting[] = [];
-  for (const id of ids) out.push(await costingForJob(id, customerId));
+  for (const id of ids) {
+    const costing = await costingForJob(id, customerId);
+    out.push(supply && scopes[id] === 'INSTALLATION' ? installationOnly(costing, supply) : costing);
+  }
   return out;
+}
+
+/**
+ * A costing counted for its INSTALLATION only (2026-11-14, the owner's call:
+ * the equipment is quoted by sales and bought through the sales order): the
+ * project takes its labour, subcontract, indirect and contingency lines as
+ * its budget, the installation's share of the contract value as its own, and
+ * the schedule of values scaled to it — exactly, the last phase taking the
+ * rounding. The costing itself is not changed.
+ */
+function installationOnly(costing: JobCosting, supplyCategoryIds: Set<string>): JobCosting {
+  const cents = (v: Prisma.Decimal | number) => Math.round(Number(v) * 100);
+  const lines = costing.lines.filter((l) => !supplyCategoryIds.has(l.costCategoryId));
+  const total = costing.lines.reduce((s, l) => s + cents(l.amount), 0);
+  const install = lines.reduce((s, l) => s + cents(l.amount), 0);
+  const contract = cents(costing.contractValue);
+  const installPrice = total > 0 ? contract - Math.round(((total - install) * contract) / total) : 0;
+  let left = installPrice;
+  const scopeSections = costing.scopeSections.map((s, i) => {
+    const share = i === costing.scopeSections.length - 1 ? left : contract > 0 ? Math.round((cents(s.value) * installPrice) / contract) : 0;
+    left -= share;
+    return { ...s, value: new Prisma.Decimal((share / 100).toFixed(2)) };
+  });
+  return {
+    ...costing,
+    lines,
+    scopeSections,
+    contractValue: new Prisma.Decimal((installPrice / 100).toFixed(2)),
+    totalCost: new Prisma.Decimal((install / 100).toFixed(2)),
+  };
 }
 
 /**
@@ -904,7 +940,11 @@ jobRoutes.post(
     const me = currentUser(req);
     const body = parseBody(createJobSchema, req.body);
 
-    const costings = await costingsForJob(costingIdsOf(body) ?? [], body.customerId);
+    // A costing the quotation counts for its installation only budgets only that (2026-11-14).
+    const fromRevision = body.quotationRevisionId
+      ? await prisma.quotationRevision.findUnique({ where: { id: body.quotationRevisionId }, select: { id: true, costingId: true } })
+      : null;
+    const costings = await costingsForJob(costingIdsOf(body) ?? [], body.customerId, fromRevision ? await revisionCostingScopes(fromRevision) : {});
     const costing = costings[0];
 
     if (body.quotationRevisionId) {

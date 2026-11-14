@@ -3941,6 +3941,46 @@ async function main() {
       check('naming one costing again drops the second', backToOne.status === 200 && left === 0, `${backToOne.status} ${left}`);
     }
 
+    // Equipment (A) against installation (B), 2026-11-14: a costing counts
+    // whole, or for its installation only — 600,000 of supply and 400,000 of
+    // installation in a 1,200,000 contract is 720,000 + 480,000.
+    {
+      const instPreview = await http(salesToken, 'GET', `/quotations/costing-lines?costingIds=${costing.id}&installation=${costing.id}`);
+      const instLines = (instPreview.body as unknown as { isHeading: boolean; title: string; unitPrice: number }[]).filter((l) => !l.isHeading);
+      check(
+        'a costing counted for its installation only gives ONE line worth its installation part, priced as the costing prices it',
+        instPreview.status === 200 && instLines.length === 1 && instLines[0].title === 'INSTALLATION AND COMMISSIONING' && money(Number(instLines[0].unitPrice), 480_000),
+        `${instPreview.status} ${JSON.stringify(instLines).slice(0, 200)}`,
+      );
+      const instMade = await http(salesToken, 'POST', '/quotations', {
+        customerId: customer.id,
+        subject: `${TAG} installation only`,
+        costingIds: [costing.id],
+        costingScopes: { [costing.id]: 'INSTALLATION' },
+      });
+      const instId = String(instMade.body.id);
+      type Makeup = { supply: number; installation: number; doubleCount: boolean; costings: { scope: string; leftOut: number; supply: number }[] };
+      const readMakeup = async () => {
+        const page = await http(salesToken, 'GET', `/quotations/${instId}`);
+        const rev = (page.body.revisions as { id: string; costings: { scope: string }[]; costMakeup?: Makeup }[])[0];
+        return rev;
+      };
+      const asInst = await readMakeup();
+      check(
+        'the quotation keeps the choice and shows the make-up: installation 400,000 counted, the costing’s 600,000 of equipment left out',
+        instMade.status === 201 && asInst.costings[0]?.scope === 'INSTALLATION' && money(asInst.costMakeup?.installation ?? -1, 400_000) &&
+          money(asInst.costMakeup?.supply ?? -1, 0) && money(asInst.costMakeup?.costings[0]?.leftOut ?? -1, 600_000) && asInst.costMakeup?.doubleCount === false,
+        `${instMade.status} ${JSON.stringify(asInst.costMakeup)}`,
+      );
+      const backWhole = await http(salesToken, 'PATCH', `/quotations/${instId}/revisions/${asInst.id}`, { costingScopes: { [costing.id]: 'WHOLE' } });
+      const badScope = await http(salesToken, 'PATCH', `/quotations/${instId}/revisions/${asInst.id}`, { costingScopes: { [costing.id]: 'HALF' } });
+      const asWhole = await readMakeup();
+      check(
+        'set back to whole, its equipment counts again; an unknown choice is refused',
+        backWhole.status === 200 && badScope.status === 400 && asWhole.costings[0]?.scope === 'WHOLE' && money(asWhole.costMakeup?.supply ?? -1, 600_000),
+        `${backWhole.status} ${badScope.status} ${JSON.stringify(asWhole.costMakeup)}`,
+      );
+    }
     const noCosting = await http(salesToken, 'GET', '/quotations/costing-lines');
     const unknownCosting = await http(salesToken, 'GET', '/quotations/costing-lines?costingId=nope');
     check(
