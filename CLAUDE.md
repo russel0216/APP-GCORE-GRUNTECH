@@ -7003,6 +7003,22 @@ import for the wrong document is refused.
   each approver's phone and email; the author's are read in
   `quotationPrintData()` for the paper only — `GET /quotations/:id` never
   carries a mobile. `renderDocument`'s sign-offs print the same lines.
+- **Nothing on a designed page is drawn over anything else** (2026-11-14,
+  the owner's report: "The name, date and time are considered a digital
+  signature" printed across PREPARED BY on the quotation). Two rules in
+  `shared/pdfDesign.ts`: a sign-off's one-word line — an email — is laid on
+  ONE line and set smaller to fit its column (5pt the floor), never broken
+  (a broken address made the block a line taller); and a `last` box that
+  rises above where it was drawn takes every `last` box drawn above and over
+  it up by the same distance, worked from the foot of the page up — a
+  grown box keeps its bottom edge, so it grows UPWARD into whatever sits
+  just over it. **`scripts/audit-papers.ts`** is the read-only check
+  (`overlaps(pdf)`: two lines closer than 0.82 of the taller one's size whose
+  ink overlaps sideways, or two runs on one line running into each other):
+  `npx tsx scripts/audit-papers.ts [n]` prints the newest n of every kind and
+  every list's paper through the API as a super admin and lists what
+  overlaps. Pages of ATTACHED files are other people's layouts and will
+  flag; read the page number. verify-foundation pins both rules with it.
 - **A layout travels as a FILE, never with a push.** It is a Setting row in
   one database, so a layout tried on the laptop reaches the live server by
   Export layout (`{ type, exportedAt, layout }`, downloaded in the browser)

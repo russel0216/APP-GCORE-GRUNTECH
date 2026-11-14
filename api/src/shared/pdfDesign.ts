@@ -888,6 +888,23 @@ class Renderer {
       })
       .filter((x): x is { b: DesignBlock; top: number } => x !== null);
     if (!lasts.length) return;
+    // A box that grew keeps its bottom edge, so it grew UPWARD — and whatever
+    // was placed just over it (a note above the sign-offs) moves up with it,
+    // never under it (2026-11-14, the owner's report: the "digital signature"
+    // line printed across PREPARED BY). Worked from the foot of the page up,
+    // so a box pushed up pushes the one above it in turn.
+    const fromFoot = [...lasts].sort((p, q) => q.b.y - p.b.y);
+    for (const low of fromFoot) {
+      // How far it rose above where it was drawn (its own growth, plus any push from below).
+      const rose = low.b.y - low.top;
+      if (rose <= 0.01) continue;
+      for (const high of fromFoot) {
+        if (high === low || high.b.y >= low.b.y) continue; // only what was drawn above it
+        if (Math.min(high.b.x + high.b.w, low.b.x + low.b.w) - Math.max(high.b.x, low.b.x) <= 0) continue; // and over it
+        const own = high.b.y + high.b.h - (this.heightOf(high.b, flowEnd.page) ?? high.b.h);
+        high.top = Math.min(high.top, own - rose);
+      }
+    }
     const highest = Math.min(...lasts.map((l) => l.top));
     const page = flowEnd.y + 12 > highest ? flowEnd.page + 1 : flowEnd.page;
     this.goTo(page);
@@ -1172,8 +1189,25 @@ class Renderer {
     } else {
       details.push('Pending');
     }
-    const rest = wrap(this.doc, details.map((t) => [{ text: t, bold: false }]), width, text);
-    return { role, name, rest, head, nameStyle, text };
+    // One line each. A single word wider than its column — an email — is set
+    // smaller, never broken (2026-11-14: a broken address made the block a
+    // line taller, and a `last` block grows UPWARD into the box above it).
+    const rest: Laid[] = [];
+    const restStyle: Style[] = [];
+    for (const t of details) {
+      let st = text;
+      const oneWord = !/\s/.test(t);
+      if (oneWord) {
+        const w = measure(this.doc, t, false, text);
+        if (w > width) st = { ...text, size: Math.max(5, Math.floor(((text.size * width) / w) * 10) / 10) };
+      }
+      // A single word is laid on one line whatever its width — wrapping would break it mid-address.
+      for (const laid of wrap(this.doc, [[{ text: t, bold: false }]], oneWord ? 100_000 : width, st)) {
+        rest.push(laid);
+        restStyle.push(st);
+      }
+    }
+    return { role, name, rest, restStyle, head, nameStyle, text };
   }
 
   /** The table style's cells: equal columns across the block, each padded. */
@@ -1260,7 +1294,7 @@ class Renderer {
     const cols = this.signoffColumns(b);
     this.data.signatories.forEach((person, i) => {
       const { x, width } = cols[i];
-      const { role, name, rest, head, nameStyle, text } = this.signoffLines(b, person, width);
+      const { role, name, rest, restStyle, head, nameStyle, text } = this.signoffLines(b, person, width);
       let y = top;
       for (const line of role) {
         drawLaid(this.doc, line, x, y, width, 'left', head, b.headColor);
@@ -1271,10 +1305,10 @@ class Renderer {
         drawLaid(this.doc, line, x, y, width, 'left', nameStyle, b.textColor);
         y += nameStyle.size * LINE + 1;
       }
-      for (const line of rest) {
-        drawLaid(this.doc, line, x, y, width, 'left', text, b.textColor);
+      rest.forEach((line, n) => {
+        drawLaid(this.doc, line, x, y, width, 'left', restStyle[n], b.textColor);
         y += text.size * LINE + 1;
-      }
+      });
     });
   }
 }

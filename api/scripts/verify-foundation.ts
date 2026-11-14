@@ -127,6 +127,7 @@ import * as apiCanvassMath from '../src/shared/canvassMath';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
+import { overlaps } from './audit-papers';
 import { attachmentKind, fitImage } from '../src/shared/pdfAttachments';
 import { contentDisposition, kindOfFile, paperFileName } from '../src/shared/paperName';
 import { issueTicket, redeemTicket, ticketPath, TICKET_TTL_MS, TICKET_REUSE_MS } from '../src/shared/printTickets';
@@ -2521,6 +2522,43 @@ async function main() {
       'a last-page box too short for its lines grows upward, its foot where it was drawn',
       !!crampedHead && !!crampedLast && crampedHead.y < 750 && crampedLast.y <= 770 && crampedLast.y > 760,
       `${crampedHead?.y} … ${crampedLast?.y}`,
+    );
+    // A note placed just over the sign-offs (the owner's saved layout,
+    // 2026-11-14): a long email is set smaller on ONE line, and when the
+    // sign-offs still grow — a role on two lines — the note moves up with
+    // them, never under them.
+    const signNote = { ...(STANDARD_QUOTATION_DESIGN.blocks.find((b) => b.type === 'text' && b.id === 'page-number') as Extract<PdfDesign['blocks'][number], { type: 'text' }>) };
+    const noted: PdfDesign = {
+      ...STANDARD_QUOTATION_DESIGN,
+      blocks: [
+        ...STANDARD_QUOTATION_DESIGN.blocks,
+        { ...signNote, id: 'sign-note', name: 'Sign note', anchor: 'last', x: 36, y: 703, w: 400, h: 9, text: 'The name, date and time are considered a digital signature of approval.', align: 'left', multiPageOnly: false, italic: true },
+      ],
+    };
+    const longEmail = 'a.very.long.salesperson.name@gruntechnology.com';
+    const notedDoc = await renderDesigned(
+      noted,
+      quoteData({
+        rows: [lineRow(1)],
+        signatories: [
+          { role: 'Prepared by', name: employee.name, phone: '0917 555 0199', email: longEmail, at: ot.createdAt },
+          { role: 'Approved by the Chief Executive Officer and President of the company', name: 'Approver Person', phone: '0917 555 0100', email: longEmail },
+        ],
+      }),
+    );
+    const notedRuns = pdfRuns(notedDoc);
+    const emailRuns = notedRuns.filter((r) => r.text === longEmail);
+    const noteRun = notedRuns.find((r) => r.text.startsWith('The name, date and time'));
+    const headRun = notedRuns.filter((r) => /PREPARED BY|APPROVED BY/.test(r.text)).sort((p, q) => p.y - q.y)[0];
+    check(
+      'a long email in a sign-off is ONE line, set smaller — never broken in two',
+      emailRuns.length === 2 && emailRuns.every((r) => r.size < 8 && r.size >= 5 && runWidth(r) <= 133.5),
+      emailRuns.map((r) => `${r.size}pt ${runWidth(r).toFixed(1)}`).join(', ') + ' / ' + notedRuns.filter((r) => r.text.includes('gruntechnology')).map((r) => `${r.text} ${r.size}`).join(' | '),
+    );
+    check(
+      'a note placed over the sign-offs moves up when they grow, and nothing on the page is drawn over anything else',
+      !!noteRun && !!headRun && headRun.y - noteRun.y >= 8 && overlaps(notedDoc).length === 0,
+      `note ${noteRun?.y} head ${headRun?.y} · ${JSON.stringify(overlaps(notedDoc).slice(0, 2))}`,
     );
     const withPosition: PdfDesign = {
       ...STANDARD_QUOTATION_DESIGN,
