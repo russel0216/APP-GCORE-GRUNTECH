@@ -8499,6 +8499,21 @@ percentage each invoice's share of the quotation.
   the dashboard and the Sales Order report — and each part's.
 - verify-finance pins it.
 
+- **"Not yet invoiced" is a kind of the Sales Order report** (2026-11-14, the
+  owner's call: "a view of sales orders without a sales invoice — by
+  personnel, by team"): `to-invoice` in routes/salesReports.ts
+  (`toInvoiceReport`), on the report page's Report select. ISSUED orders
+  dated in the range under the list's visibility, each with what is LEFT to
+  invoice before VAT (its net less `ordersInvoiced`); one invoiced in full
+  drops out (a peso of tolerance). Cards: orders to invoice, left, never
+  invoiced, partly invoiced, already requested (open invoice requests, single
+  and batch), delivered and not invoiced (a DR number), oldest waiting.
+  Tables: by salesperson, team, customer, by how long it has waited (0–30,
+  31–60, 61–90, over 90 days since booked) and the orders (the 100 with the
+  most left), each row a link. Narrowed by `ownerId`, `teamId`,
+  `customerId`. On this kind the page hides the product group, status,
+  flows and target. verify-finance pins it.
+
 ## Accounts Payable (2026-10-15)
 
 The owner's `Financial_Management_UI_Specification_Money_In-Money_out.pdf`,

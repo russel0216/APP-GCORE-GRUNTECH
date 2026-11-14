@@ -255,6 +255,160 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
 }
 
 /**
+ * Sales orders with NO sales invoice yet — or not all of it (2026-11-14, the
+ * owner's call: "a view of sales orders without a sales invoice, to better
+ * understand their sales — by personnel, by team"). ISSUED orders dated in
+ * the range, under the list's visibility, each with what is left of it to
+ * invoice before VAT (its net less its own share of the live invoices —
+ * `ordersInvoiced`, one S.I. for several orders included). An order invoiced
+ * in full drops out. Narrowed like the Sales Order report: `ownerId`,
+ * `teamId`, `customerId`. Nothing stored: read off the orders, their
+ * invoices and the open invoice requests.
+ */
+async function toInvoiceReport(range: Range, ctx: ReportContext): Promise<Report> {
+  const me = currentUser(ctx.req);
+  const f = rowFilterOf(ctx.query);
+  const words = await filterWords({ ...f, status: undefined, groups: undefined });
+  const and: Prisma.SalesOrderWhereInput[] = [{ status: 'ISSUED' }];
+  if (f.ownerIds) and.push({ ownerId: { in: f.ownerIds } });
+  if (f.teamIds) {
+    and.push({
+      OR: f.teamIds.map((t) =>
+        t === 'none' ? { teamId: null, quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } } : orderTeamWhere(t),
+      ),
+    });
+  }
+  if (f.customerIds) and.push({ customerId: { in: f.customerIds } });
+  const orders = await salesOrderRows(me, range.from, range.to, and);
+  const ids = orders.map((o) => o.id);
+  const live = { status: { in: ['DRAFT', 'PENDING_APPROVAL'] as ('DRAFT' | 'PENDING_APPROVAL')[] } };
+  const [invoicedOf, singles, parts, poOf] = await Promise.all([
+    ordersInvoiced(prisma, ids),
+    ids.length
+      ? prisma.invoiceRequest.findMany({ where: { salesOrderId: { in: ids }, parts: { none: {} }, ...live }, select: { salesOrderId: true, grossAmount: true, progressBilling: { select: { grossAmount: true } } } })
+      : [],
+    ids.length ? prisma.invoiceRequestPart.findMany({ where: { salesOrderId: { in: ids }, request: live }, select: { salesOrderId: true, amount: true } }) : [],
+    ids.length ? prisma.salesOrder.findMany({ where: { id: { in: ids } }, select: { id: true, poNumber: true, drNumber: true } }) : [],
+  ]);
+  const requestedOf = new Map<string, number>();
+  for (const r of singles) requestedOf.set(r.salesOrderId, (requestedOf.get(r.salesOrderId) ?? 0) + num(r.progressBilling?.grossAmount ?? r.grossAmount));
+  for (const p of parts) requestedOf.set(p.salesOrderId, (requestedOf.get(p.salesOrderId) ?? 0) + num(p.amount));
+  const po = new Map(poOf.map((o) => [o.id, o]));
+
+  const today = new Date();
+  const rows = orders
+    .map((o) => {
+      const invoiced = cents((invoicedOf.get(o.id) ?? 0) * o.rate);
+      const left = cents(Math.max(0, o.net - invoiced));
+      const requested = cents(Math.min(left, (requestedOf.get(o.id) ?? 0) * o.rate));
+      const age = Math.max(0, Math.floor((today.getTime() - o.orderDate.getTime()) / 86_400_000));
+      return { o, invoiced, left, requested, age, never: invoiced < 0.005, team: o.team ? o.team.code : 'No team', teamId: o.team ? o.team.id : 'none' };
+    })
+    // A peso of tolerance: rounding between an order and its invoice is not a backlog.
+    .filter((x) => x.left > 1);
+
+  const sum = (pick: (x: (typeof rows)[number]) => number, of = rows) => cents(of.reduce((n, x) => n + pick(x), 0));
+  const left = sum((x) => x.left);
+  const never = rows.filter((x) => x.never);
+  const partly = rows.filter((x) => !x.never);
+  const requested = sum((x) => x.requested);
+  const oldest = rows.reduce((m, x) => Math.max(m, x.age), 0);
+  const delivered = rows.filter((x) => po.get(x.o.id)?.drNumber);
+
+  const months = monthsOf(range);
+  const series = new Series('Left to invoice, by the month the order was booked', [{ label: 'Orders', align: 'right' }, { label: 'Left to invoice', money: true }], months);
+  for (const x of rows) {
+    series.add(x.o.orderDate, 0, 1);
+    series.add(x.o.orderDate, 1, x.left);
+  }
+
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const listLink = (extra: Record<string, string | null | undefined>) =>
+    linkTo('/g-ops/sales-orders', { dateFrom: day(range.from), dateTo: day(range.to), scope: 'all', status: 'ISSUED', ...extra });
+  const cols = [
+    { label: 'Orders', align: 'right' as const },
+    { label: 'Never invoiced', align: 'right' as const },
+    { label: 'Before VAT', money: true },
+    { label: 'Invoiced', money: true },
+    { label: 'Left to invoice', money: true },
+    { label: 'Share %', align: 'right' as const },
+    { label: 'Oldest (days)', align: 'right' as const },
+  ];
+  const grouped = (keyOf: (x: (typeof rows)[number]) => string, top?: number) => {
+    const m = new Map<string, { n: number; never: number; net: number; inv: number; left: number; oldest: number }>();
+    for (const x of rows) {
+      const cur = m.get(keyOf(x)) ?? { n: 0, never: 0, net: 0, inv: 0, left: 0, oldest: 0 };
+      m.set(keyOf(x), { n: cur.n + 1, never: cur.never + (x.never ? 1 : 0), net: cur.net + x.o.net, inv: cur.inv + x.invoiced, left: cur.left + x.left, oldest: Math.max(cur.oldest, x.age) });
+    }
+    const sorted = [...m.entries()].sort((a, b) => b[1].left - a[1].left);
+    return top ? sorted.slice(0, top) : sorted;
+  };
+  const cells = (v: { n: number; never: number; net: number; inv: number; left: number; oldest: number }): Cell[] => [v.n, v.never, cents(v.net), cents(v.inv), cents(v.left), pct(v.left, left), v.oldest];
+  const ownerName = new Map(rows.map((x) => [x.o.ownerId, x.o.ownerName]));
+  const customerName = new Map(rows.map((x) => [x.o.customerId, x.o.customerName]));
+  const teamName = new Map(rows.map((x) => [x.teamId, x.team]));
+  const byOwner = grouped((x) => x.o.ownerId);
+  const byTeam = grouped((x) => x.teamId);
+  const byCustomer = grouped((x) => x.o.customerId, 20);
+
+  // How long it has waited since it was booked.
+  const BUCKETS: [string, number, number][] = [['0–30 days', 0, 30], ['31–60 days', 31, 60], ['61–90 days', 61, 90], ['Over 90 days', 91, Infinity]];
+  const byAge = BUCKETS.map(([label, lo, hi]) => {
+    const of = rows.filter((x) => x.age >= lo && x.age <= hi);
+    return [label, of.length, sum((x) => x.left, of), pct(sum((x) => x.left, of), left)] as Cell[];
+  });
+
+  const listed = [...rows].sort((a, b) => b.left - a.left).slice(0, 100);
+  const notes: string[] = ['Issued sales orders with something still to invoice, before VAT; an order invoiced in full is not listed, and neither is a draft, pending or cancelled order.'];
+  if (requested > 0) notes.push('“Already requested” is what open invoice requests ask of these orders — on its way to Accounts Receivable.');
+  if (rows.length > listed.length) notes.push(`The orders table lists the ${listed.length} with the most left to invoice, of ${rows.length}.`);
+  if (rows.some((x) => x.o.currency !== 'PHP')) notes.push('Orders in a foreign currency are converted to pesos at their quotation’s own rate.');
+
+  return {
+    kind: 'to-invoice',
+    title: 'Sales Orders Not Yet Invoiced',
+    from: day(range.from),
+    to: day(range.to),
+    ...(words.length ? { filterLine: words.join(' · ') } : {}),
+    cards: [
+      { label: 'Orders to invoice', value: rows.length, sub: `of ${orders.length} issued in the period` },
+      { label: 'Left to invoice', value: left, money: true, sub: 'before VAT' },
+      { label: 'Never invoiced', value: sum((x) => x.left, never), money: true, sub: `${never.length} order${never.length === 1 ? '' : 's'} with no invoice at all` },
+      { label: 'Partly invoiced', value: sum((x) => x.left, partly), money: true, sub: `${partly.length} order${partly.length === 1 ? '' : 's'} with a balance left` },
+      { label: 'Already requested', value: requested, money: true, sub: 'in open invoice requests' },
+      { label: 'Delivered, not invoiced', value: sum((x) => x.left, delivered), money: true, sub: `${delivered.length} with a DR number` },
+      { label: 'Oldest waiting', value: oldest, sub: 'days since it was booked' },
+    ],
+    series: series.done(),
+    tables: [
+      table('By salesperson', [{ label: 'Booked by' }, ...cols], byOwner.map(([k, v]) => [ownerName.get(k) ?? k, ...cells(v)]), byOwner.map(([k]) => listLink({ ownerId: k }))),
+      table('By team', [{ label: 'Team' }, ...cols], byTeam.map(([k, v]) => [teamName.get(k) ?? k, ...cells(v)]), byTeam.map(([k]) => listLink({ teamId: k }))),
+      table('By customer', [{ label: 'Customer' }, ...cols], byCustomer.map(([k, v]) => [customerName.get(k) ?? k, ...cells(v)]), byCustomer.map(([k]) => listLink({ customerId: k }))),
+      table('By how long it has waited', [{ label: 'Since booked' }, { label: 'Orders', align: 'right' }, { label: 'Left to invoice', money: true }, { label: 'Share %', align: 'right' }], byAge),
+      table(
+        'The orders',
+        [
+          { label: 'Number' },
+          { label: 'Booked' },
+          { label: 'Customer' },
+          { label: 'Booked by' },
+          { label: 'Team' },
+          { label: 'PO' },
+          { label: 'Before VAT', money: true },
+          { label: 'Invoiced', money: true },
+          { label: 'Left to invoice', money: true },
+          { label: 'Requested', money: true },
+          { label: 'Days', align: 'right' },
+        ],
+        listed.map((x) => [x.o.number, formatDate(x.o.orderDate), x.o.customerName, x.o.ownerName, x.team, po.get(x.o.id)?.poNumber ?? '—', x.o.net, x.invoiced, x.left, x.requested, x.age]),
+        listed.map((x) => `/g-ops/sales-orders/${x.o.id}`),
+      ),
+    ],
+    notes,
+  };
+}
+
+/**
  * The G-OPS dashboard's monthly sales analysis (2026-11-08, page 2 of the
  * owner's `G-OPS_Dashboard_1.pdf`): the months of the range across, the
  * teams down with each person under their team — or the key customers
@@ -592,4 +746,4 @@ salesReportRoutes.get(
   }),
 );
 
-mountReports(salesReportRoutes, { view: 'gops.sales_orders.view_own', auditType: 'sales_report', kinds: { 'sales-orders': salesOrdersReport, 'sales-matrix': salesMatrixReport } });
+mountReports(salesReportRoutes, { view: 'gops.sales_orders.view_own', auditType: 'sales_report', kinds: { 'sales-orders': salesOrdersReport, 'to-invoice': toInvoiceReport, 'sales-matrix': salesMatrixReport } });

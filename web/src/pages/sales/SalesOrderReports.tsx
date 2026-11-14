@@ -18,7 +18,11 @@ import { topOfFlow, type SankeyInput } from '../../lib/sankey';
  * salesperson, customer, product group and status, in pesos.
  */
 
-const KINDS: readonly ReportKind[] = [{ key: 'sales-orders', label: 'Sales orders', list: '/g-ops/sales-orders' }];
+const KINDS: readonly ReportKind[] = [
+  { key: 'sales-orders', label: 'Sales orders', list: '/g-ops/sales-orders' },
+  // Issued orders with something still to invoice (2026-11-14): by salesperson, team, customer and age.
+  { key: 'to-invoice', label: 'Not yet invoiced', list: '/g-ops/sales-orders?status=ISSUED&scope=all' },
+];
 
 const STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -108,6 +112,8 @@ export function SalesOrderReports() {
               value={listOf(params.get('customerId'))}
               onChange={(v) => set({ customerId: v.join(',') })}
             />
+            {/* Product group, status, the flows and the target belong to the main report alone. */}
+            {(params.get('kind') ?? 'sales-orders') === 'sales-orders' && <>
             <TickPicker
               search
               label="Product group"
@@ -125,8 +131,10 @@ export function SalesOrderReports() {
                 </option>
               ))}
             </select>
+            </>}
             </div>
           </div>
+          {(params.get('kind') ?? 'sales-orders') === 'sales-orders' && <>
           <div className="rep-row">
             <span className="rep-label">Show</span>
             <div className="rep-grid">
@@ -139,10 +147,12 @@ export function SalesOrderReports() {
             </div>
           </div>
           <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
+          </>}
         </>
       )}
-      below={({ from, to, params }) => (
-        <>
+      below={({ kind, from, to, params }) => (
+        // The flows still load on the other report (hidden): they feed the pickers their customers and salespeople.
+        <div hidden={kind !== 'sales-orders'}>
         <SalesMatrix year={Number(to.slice(0, 4))} />
         <SalesFlows
           from={from}
@@ -156,7 +166,7 @@ export function SalesOrderReports() {
           onOwners={setBooked}
           onCustomers={setCustomers}
         />
-        </>
+        </div>
       )}
     />
   );

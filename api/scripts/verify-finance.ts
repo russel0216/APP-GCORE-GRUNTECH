@@ -5396,6 +5396,19 @@ async function main() {
           money(tRows.find((r) => r.number === `${TAG}-SO-IRB-B`)?.invoiced ?? -1, 30_000) && inv2.status === 201 && inv2Over.status === 400,
         `${tally.status} ${JSON.stringify(tRows.map((r) => [r.number, r.invoiced]))} ${inv2.status} ${inv2Over.status}`,
       );
+      // The "Not yet invoiced" report (2026-11-14): the order invoiced in full is
+      // gone, the one invoiced in part shows what is left and what is already asked.
+      const today10 = dayKey(new Date()).toISOString().slice(0, 10);
+      const backlog = await seller('GET', `/sales-reports/to-invoice?from=${today10}&to=${today10}`);
+      const orderRows = ((backlog.body.tables as { title: string; rows: (string | number)[][] }[] | undefined)?.find((t) => t.title === 'The orders')?.rows ?? []);
+      const a2Row = orderRows.find((r) => r[0] === `${TAG}-SO-IRB-A2`);
+      const byPerson = ((backlog.body.tables as { title: string; rows: (string | number)[][] }[] | undefined)?.find((t) => t.title === 'By salesperson')?.rows ?? []);
+      check(
+        'the not-yet-invoiced report lists the order with a balance — 20,000 invoiced, 30,000 left, 30,000 already requested — and never the one invoiced in full; by salesperson, with its CSV',
+        backlog.status === 200 && !!a2Row && money(Number(a2Row[7]), 20_000) && money(Number(a2Row[8]), 30_000) && money(Number(a2Row[9]), 30_000) &&
+          !orderRows.some((r) => r[0] === `${TAG}-SO-IRB-A1`) && byPerson.some((r) => r[0] === irSeller.name),
+        `${backlog.status} ${JSON.stringify(a2Row)} ${orderRows.length}`,
+      );
       await seller('DELETE', `/invoice-requests/${inv2.body.id}`);
     }
     const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
