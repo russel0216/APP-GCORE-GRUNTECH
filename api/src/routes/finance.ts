@@ -35,7 +35,7 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
-import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling } from '../shared/billingInvoice';
+import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, ordersInvoiced } from '../shared/billingInvoice';
 import {
   LIST_CAP,
   listReference,
@@ -581,13 +581,14 @@ invoiceRoutes.get(
         vatRate: true,
         owner: { select: { id: true, name: true } },
         quotation: { select: { subject: true } },
-        invoices: { where: { status: { not: 'CANCELLED' } }, select: { grossAmount: true } },
       },
     });
+    // What is invoiced of each — its own share where one S.I. bills several orders.
+    const invoicedOf = await ordersInvoiced(prisma, orders.map((o) => o.id));
     res.json(
       orders.map((o) => {
         const net = cents(num(o.total) - num(o.vatAmount));
-        const invoiced = cents(o.invoices.reduce((s, i) => s + num(i.grossAmount), 0));
+        const invoiced = invoicedOf.get(o.id) ?? 0;
         return {
           id: o.id,
           number: o.number,

@@ -202,7 +202,9 @@ export interface InvoiceRequestDetail {
   id: string;
   number: string;
   status: string;
-  kind: 'billing' | 'order';
+  kind: 'billing' | 'order' | 'orders';
+  /** A batch (2026-11-14): the sales orders billed together on one S.I., each with its share. */
+  orders?: { id: string; number: string; owner: { id: string; name: string } | null; team: { code: string } | null; amount: number; description: string | null; net: number; left: number }[];
   job: { id: string; number: string; name: string } | null;
   customer: Named;
   description: string | null;
@@ -621,7 +623,8 @@ export function InvoiceRequestPage() {
             },
           },
         ]}
-        modify={row.canEdit ? () => setEditing(true) : undefined}
+        // A batch keeps the orders and amounts it was raised with: cancel it and raise another to change them.
+        modify={row.canEdit && row.kind !== 'orders' ? () => setEditing(true) : undefined}
         confirm={confirm}
       />
 
@@ -663,12 +666,25 @@ export function InvoiceRequestPage() {
                   </dd>
                 </>
               )}
-              <dt>Sales order</dt>
+              <dt>{row.orders?.length ? 'Sales orders' : 'Sales order'}</dt>
               <dd>
-                <Link to={`/g-ops/sales-orders/${row.salesOrder.id}`} className="mono">
-                  {row.salesOrder.number}
-                </Link>{' '}
-                <span className="faint">{formatMoney(row.salesOrder.left)} of {formatMoney(row.salesOrder.net)} left</span>
+                {row.orders?.length ? (
+                  row.orders.map((o, i) => (
+                    <span key={o.id}>
+                      {i > 0 && ', '}
+                      <Link to={`/g-ops/sales-orders/${o.id}`} className="mono">
+                        {o.number}
+                      </Link>
+                    </span>
+                  ))
+                ) : (
+                  <>
+                    <Link to={`/g-ops/sales-orders/${row.salesOrder.id}`} className="mono">
+                      {row.salesOrder.number}
+                    </Link>{' '}
+                    <span className="faint">{formatMoney(row.salesOrder.left)} of {formatMoney(row.salesOrder.net)} left</span>
+                  </>
+                )}
               </dd>
               <dt>Customer P.O.</dt>
               <dd>{row.poReference ?? '—'}</dd>
@@ -742,13 +758,28 @@ export function InvoiceRequestPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>
-                      {row.description ?? `Sales order ${row.salesOrder.number}`}
-                      <div className="faint">Sales order {row.salesOrder.number}</div>
-                    </td>
-                    <td className="num">{formatMoney(row.grossAmount)}</td>
-                  </tr>
+                  {row.orders?.length ? (
+                    row.orders.map((o) => (
+                      <tr key={o.id}>
+                        <td>
+                          {o.description ?? `Sales order ${o.number}`}
+                          <div className="faint">
+                            Sales order {o.number}
+                            {o.owner ? ` — booked by ${o.owner.name}${o.team ? ` (${o.team.code})` : ''}` : ''}
+                          </div>
+                        </td>
+                        <td className="num">{formatMoney(o.amount)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td>
+                        {row.description ?? `Sales order ${row.salesOrder.number}`}
+                        <div className="faint">Sales order {row.salesOrder.number}</div>
+                      </td>
+                      <td className="num">{formatMoney(row.grossAmount)}</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             )}

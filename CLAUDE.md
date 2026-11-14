@@ -8452,6 +8452,53 @@ approved it goes to Accounts Receivable", the paper in the standard dress.
 - **Assign Back Support with "Supports teams"** for every selling team —
   until then requests stall and `audit-workflows.ts` says so.
 
+## One S.I. for several sales orders (2026-11-14)
+
+The owner's scenario: one quotation booked by several orders — A by Sales, B by
+the Project Team — "A + A + B = progress billing 65%, requested by batch in a
+single S.I. #1; A + B = 35% in S.I. #2"; his answers: the orders of ONE
+quotation only, each order credited to its own salesperson and team, the
+percentage each invoice's share of the quotation.
+
+- **Two shapes, one reader.** An invoice that bills several orders carries
+  `InvoicePart` rows (order, amount before VAT, that order's salesperson and
+  team); one that bills a single order carries its own `salesOrderId` and no
+  parts, as ever. `orderInvoices(db, orderIds, opts)` in
+  `shared/billingInvoice.ts` reads BOTH and returns, per order, each invoice
+  with that order's `amount` and its share of what was `collected`;
+  `ordersInvoiced()` / `orderInvoiced()` sum it. **Every "invoiced of an
+  order" figure reads these** — `assertOrderLeft`, the Sales Order report
+  (`invoicedOf`), the New invoice form's order picker, the sales order page's
+  Invoicing card, `refuseWhileInvoiced`, the list's `rowExtras`
+  (`invoiced`, `collected`, `invoiceNumbers`) and a commission's
+  `orderSource()` (an order's share of each invoice and of its collections;
+  the eligible-orders list asks `orderSource` itself). Never read
+  `Invoice.salesOrderId` for money again.
+- **The batch request**: `POST /invoice-requests { orders: [{ salesOrderId,
+  grossAmount, description? }] }` (2–20) → `checkBatch()`: every order
+  ISSUED, the caller's to ask for (`mayRequestInvoice`), all of ONE
+  quotation, none twice, each amount within what is left of ITS order after
+  its invoices and the other live requests (a batch's parts count in
+  `orderLeft().requested`). `InvoiceRequestPart` rows; `salesOrderId` is the
+  first order, `grossAmount` the sum; `kind: 'orders'` and `orders[]` on the
+  read. Submit re-checks every part. A batch keeps its orders and amounts —
+  Modify changes its header only (the page offers no Modify; cancel and
+  raise another). Approved, `createInvoiceFromOrders()` raises ONE draft
+  invoice: a line per order (its `detail` names the order, who booked it and
+  the team), a part per order, VAT at the orders' rate, EWT on the whole,
+  each order locked and checked under `assertOrderLeft`.
+- **The quotation's Sales orders card is where sales does it**: tick the
+  issued orders with something left, "Request one invoice for N orders", set
+  what to bill of each (prefilled with what is left), see the invoice's share
+  of the quotation, Create — the draft request opens for Submit for approval.
+  One order ticked is the ordinary single request. The card's tally: Booked
+  from this quotation, Additional, Not booked yet, Invoiced and Left to
+  invoice (before VAT), and per order Invoiced (with its S.I.) and Left.
+- The invoice's own salesperson and team stay the requester's (A/R cards and
+  collections credit by invoice); the booking division is the ORDERS' —
+  the dashboard and the Sales Order report — and each part's.
+- verify-finance pins it.
+
 ## Accounts Payable (2026-10-15)
 
 The owner's `Financial_Management_UI_Specification_Money_In-Money_out.pdf`,

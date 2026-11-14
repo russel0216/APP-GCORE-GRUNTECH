@@ -1743,6 +1743,8 @@ model QuotationRevision {
 /// (progress booking). An internal document: its PDF prints cost and margin
 /// to those who may see cost, and it never goes to the customer.
 model SalesOrder {
+  invoiceParts        InvoicePart[]        @relation("InvoicePartOrder")
+  invoiceRequestParts InvoiceRequestPart[] @relation("InvoiceRequestPartOrder")
   id     String           @id @default(cuid())
   number String           @unique
   status SalesOrderStatus @default(DRAFT)
@@ -4716,6 +4718,8 @@ enum InvoiceStatus {
 /// What we billed the customer. Raised from a progress billing wherever one
 /// exists, so the figures are carried rather than retyped.
 model Invoice {
+  /// The sales orders one invoice bills, where it bills several (2026-11-14).
+  parts InvoicePart[]
   id     String        @id @default(cuid())
   number String        @unique
   status InvoiceStatus @default(DRAFT)
@@ -6112,6 +6116,8 @@ enum InvoiceRequestStatus {
 /// and the approval raises the DRAFT invoice in Accounts Receivable. The
 /// money is the billing's, never re-keyed; the order lends its PO and terms.
 model InvoiceRequest {
+  /// The sales orders a batch request bills together on one S.I. (2026-11-14).
+  parts InvoiceRequestPart[]
   id      String               @id @default(cuid())
   number  String
   /// The withholding rate the invoice will carry (2026-10-16: editable, e.g.
@@ -7103,3 +7109,40 @@ model EvaluationRunAnswer {
   @@unique([assignmentId, questionId])
 }
 
+
+/// One sales order's share of an invoice that bills several orders on one
+/// S.I. (2026-11-14, the owner's call: "A + A + B = progress billing 65% —
+/// request an invoice by batch, all enclosed in a single S.I."). `amount` is
+/// before VAT. An invoice with no parts bills its own `salesOrderId` whole —
+/// `shared/billingInvoice.ts` is the one reader of both shapes. Each part
+/// keeps its order's salesperson and team: the booking division of the S.I.
+model InvoicePart {
+  id            String     @id @default(cuid())
+  invoiceId     String
+  invoice       Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  salesOrderId  String
+  salesOrder    SalesOrder @relation("InvoicePartOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+  amount        Decimal    @db.Decimal(18, 2)
+  salespersonId String?
+  teamId        String?
+  sortOrder     Int        @default(0)
+
+  @@index([invoiceId])
+  @@index([salesOrderId])
+}
+
+/// One sales order's share of a batch invoice request (2026-11-14) — what the
+/// approved request turns into `InvoicePart` rows. Before VAT.
+model InvoiceRequestPart {
+  id           String         @id @default(cuid())
+  requestId    String
+  request      InvoiceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  salesOrderId String
+  salesOrder   SalesOrder     @relation("InvoiceRequestPartOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+  amount       Decimal        @db.Decimal(18, 2)
+  description  String?
+  sortOrder    Int            @default(0)
+
+  @@index([requestId])
+  @@index([salesOrderId])
+}

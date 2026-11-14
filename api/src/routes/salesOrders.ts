@@ -48,7 +48,7 @@ import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAt
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
 import { mayRequestInvoice } from './invoiceRequests';
-import { orderInvoiced, orderNet } from '../shared/billingInvoice';
+import { orderInvoiced, orderInvoices, orderNet } from '../shared/billingInvoice';
 import {
   companyCurrency,
   formatAmount,
@@ -461,6 +461,7 @@ async function rowExtras(rows: { id: string; number: string; quotationId: string
   const ids = rows.map((r) => r.id);
   const mains = [...new Set(rows.map((r) => mainOrderNumber(r.number)).filter((n): n is string => !!n))];
   const teamIds = [...new Set(rows.map((r) => r.teamId).filter((t): t is string => !!t))];
+  const invoicesOf = await orderInvoices(prisma, ids);
   const [lines, mainRows, teams] = await Promise.all([
     ids.length
       ? prisma.salesOrderLine.findMany({ where: { orderId: { in: ids }, isHeading: false }, select: { orderId: true, amount: true, quotationItemId: true, bookedItems: true } })
@@ -486,6 +487,10 @@ async function rowExtras(rows: { id: string; number: string; quotationId: string
           followOnOf: mainNo ? { number: mainNo, id: main?.id ?? null, owner: main?.owner ?? null } : null,
           fromQuotation: fromQuotation / 100,
           additional: (total - fromQuotation) / 100,
+          // Before VAT, each order's own share of its invoices (2026-11-14) — the tally on the quotation's card.
+          invoiced: invoicesOf.filter((i) => i.salesOrderId === r.id).reduce((s, i) => s + cents(i.amount), 0) / 100,
+          collected: invoicesOf.filter((i) => i.salesOrderId === r.id).reduce((s, i) => s + cents(i.collected), 0) / 100,
+          invoiceNumbers: invoicesOf.filter((i) => i.salesOrderId === r.id).map((i) => i.siNumber ?? i.number),
         },
       ] as const;
     }),
@@ -893,17 +898,18 @@ async function orderPurchasing(me: ReturnType<typeof currentUser>, order: { id: 
 async function orderInvoicing(me: ReturnType<typeof currentUser>, order: { id: string; status: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }) {
   const [requests, invoices, invoiced] = await Promise.all([
     prisma.invoiceRequest.findMany({
-      where: { salesOrderId: order.id },
+      // Its own requests, and the batch requests that bill it with other orders (2026-11-14).
+      where: { OR: [{ salesOrderId: order.id }, { parts: { some: { salesOrderId: order.id } } }] },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, number: true, status: true, grossAmount: true, progressBilling: { select: { number: true, grossAmount: true } }, invoice: { select: { id: true, number: true } } },
+      select: {
+        id: true, number: true, status: true, grossAmount: true,
+        progressBilling: { select: { number: true, grossAmount: true } },
+        invoice: { select: { id: true, number: true } },
+        parts: { select: { salesOrderId: true, amount: true } },
+      },
     }),
-    can(me, 'gfin.ar.view_all')
-      ? prisma.invoice.findMany({
-          where: { salesOrderId: order.id },
-          orderBy: { invoiceDate: 'desc' },
-          select: { id: true, number: true, siNumber: true, status: true, invoiceDate: true, grossAmount: true, netCollectible: true },
-        })
-      : Promise.resolve([]),
+    // Each invoice with THIS order's share of it; cancelled ones listed, as before.
+    can(me, 'gfin.ar.view_all') ? orderInvoices(prisma, [order.id], { includeCancelled: true }) : Promise.resolve([]),
     orderInvoiced(prisma, order.id),
   ]);
   const net = orderNet(order);
@@ -918,10 +924,15 @@ async function orderInvoicing(me: ReturnType<typeof currentUser>, order: { id: s
       number: r.number,
       status: r.status,
       billing: r.progressBilling?.number ?? null,
-      grossAmount: num(r.progressBilling?.grossAmount ?? r.grossAmount),
+      // A batch request: this order's part of it, and how many orders it bills.
+      grossAmount: r.parts.length ? num(r.parts.find((p) => p.salesOrderId === order.id)?.amount ?? 0) : num(r.progressBilling?.grossAmount ?? r.grossAmount),
+      withOrders: r.parts.length || null,
       invoice: r.invoice,
     })),
-    invoices: invoices.map((i) => ({ ...i, grossAmount: num(i.grossAmount), netCollectible: num(i.netCollectible) })),
+    invoices: invoices
+      .slice()
+      .reverse()
+      .map((i) => ({ id: i.id, number: i.number, siNumber: i.siNumber, status: i.status, invoiceDate: i.invoiceDate, grossAmount: i.amount, wholeGross: i.grossAmount, netCollectible: i.netCollectible })),
   };
 }
 
@@ -1689,10 +1700,8 @@ async function refuseWhileBuying(orderId: string, number: string, verb: string) 
  * the invoice first.
  */
 async function refuseWhileInvoiced(orderId: string, number: string, verb: string, ignoreScoro = false) {
-  const invoices = await prisma.invoice.findMany({
-    where: { salesOrderId: orderId, status: { not: 'CANCELLED' }, ...(ignoreScoro ? { importedFrom: null } : {}) },
-    select: { number: true },
-  });
+  // Every live invoice that bills it — alone, or with other orders on one S.I.
+  const invoices = (await orderInvoices(prisma, [orderId])).filter((i) => !ignoreScoro || i.importedFrom === null);
   if (invoices.length) throw badRequest(`${number} cannot be ${verb} — invoice ${invoices.map((i) => i.number).join(', ')} bills it`);
 }
 

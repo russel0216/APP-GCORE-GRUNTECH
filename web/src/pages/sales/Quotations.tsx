@@ -13,6 +13,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { loadPeople } from '../../components/People';
+import { NumberInput } from '../../components/NumberInput';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, formatWholeMoney, initials, useToast, type Tone } from '../../components/ui';
 import type { CostPanel } from '../../lib/quotationMath';
 import { RecordBudgetRequests } from '../delivery/BudgetRequests';
@@ -1603,6 +1604,7 @@ export function QuotationDetail() {
           {(can('gops.sales_orders.view_all') || can('gops.sales_orders.view_own')) && (
             <QuotationSalesOrders
               quotationId={quotation.id}
+              quotationNet={Number(valueRevision?.netOfTax ?? valueRevision?.net ?? 0)}
               quotationTotal={Number(valueRevision?.total ?? 0)}
               currency={quotation.currency}
               reloadToken={reload}
@@ -1649,17 +1651,55 @@ export function QuotationDetail() {
  */
 function QuotationSalesOrders({
   quotationId,
+  quotationNet,
   quotationTotal,
   currency,
   reloadToken,
 }: {
   quotationId: string;
+  /** The quotation before VAT — what an invoice's share of it is measured against. */
+  quotationNet: number;
   quotationTotal: number;
   currency: string;
   reloadToken: number;
 }) {
   const [rows, setRows] = useState<SalesOrderRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const { can } = useAuth();
+  const navigate = useNavigate();
+  // Invoicing several orders on ONE S.I. (2026-11-14, the owner's call: "A + A
+  // + B = progress billing 65% — request an invoice by batch, in a single
+  // S.I."): tick the orders, set what to bill of each, raise one request.
+  const [picked, setPicked] = useState<string[]>([]);
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [askError, setAskError] = useState<unknown>(null);
+  const mayAsk = can('gfin.invoice_requests.create');
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const leftOf = (r: SalesOrderRow) => Math.max(0, round(r.net - (r.invoiced ?? 0)));
+  const billable = (r: SalesOrderRow) => r.status === 'ISSUED' && leftOf(r) > 0;
+  const chosen = (rows ?? []).filter((r) => picked.includes(r.id) && billable(r));
+  const amountOf = (r: SalesOrderRow) => Number(amounts[r.id] ?? leftOf(r)) || 0;
+  const askTotal = round(chosen.reduce((n, r) => n + amountOf(r), 0));
+  const askProblem = chosen.find((r) => amountOf(r) <= 0 || amountOf(r) > leftOf(r) + 0.005);
+
+  async function raise() {
+    if (!chosen.length || askProblem) return;
+    setBusy(true);
+    setAskError(null);
+    try {
+      const body =
+        chosen.length === 1
+          ? { salesOrderId: chosen[0].id, grossAmount: amountOf(chosen[0]) }
+          : { salesOrderId: chosen[0].id, orders: chosen.map((r) => ({ salesOrderId: r.id, grossAmount: amountOf(r) })) };
+      const made = await api.post<{ id: string }>('/invoice-requests', body);
+      navigate(`/g-fin/invoice-requests/${made.id}`);
+    } catch (err) {
+      setAskError(err);
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1705,10 +1745,96 @@ function QuotationSalesOrders({
             </dl>
           )}
           <dl>
-            <dt>Outstanding</dt>
+            <dt>Not booked yet</dt>
             <dd className="mono">{formatMoney(outstanding, currency)}</dd>
           </dl>
+          <dl>
+            <dt>Invoiced (before VAT)</dt>
+            <dd className="mono">{formatMoney(sum((r) => r.invoiced ?? 0), currency)}</dd>
+          </dl>
+          <dl>
+            <dt>Left to invoice (before VAT)</dt>
+            <dd className="mono">{formatMoney(sum((r) => (r.status === 'ISSUED' ? leftOf(r) : 0)), currency)}</dd>
+          </dl>
         </div>
+      )}
+      {rows && rows.length > 0 && over <= 1 && outstanding > 1 && (
+        <p className="faint">
+          {formatMoney(outstanding, currency)} of this quotation is not booked by a sales order yet — the orders must add up to the quotation before it is
+          fully invoiced.
+        </p>
+      )}
+      {mayAsk && (rows ?? []).some(billable) && !asking && (
+        <div className="row">
+          <button type="button" className="btn btn-sm btn-primary" disabled={!chosen.length} onClick={() => setAsking(true)}>
+            {chosen.length > 1 ? `Request one invoice for ${chosen.length} orders` : chosen.length === 1 ? 'Request invoice for 1 order' : 'Request invoice'}
+          </button>
+          <span className="faint">
+            {chosen.length ? 'One request, one approval, one S.I. — a line per order.' : 'Tick the issued orders to bill together on one S.I., then press this.'}
+          </span>
+        </div>
+      )}
+      {asking && (
+        <section className="card" aria-label="Request one invoice">
+          <h3 className="card-title">One invoice for {chosen.length === 1 ? '1 sales order' : `${chosen.length} sales orders`}</h3>
+          <ErrorBox error={askError} />
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Sales order</th>
+                  <th>Booked by</th>
+                  <th className="num">Left to invoice</th>
+                  <th className="num">Bill now (before VAT)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chosen.map((r) => (
+                  <tr key={r.id}>
+                    <td className="mono">{r.number}</td>
+                    <td>
+                      {r.owner.name}
+                      {r.team ? <span className="faint"> · {r.team.code}</span> : null}
+                    </td>
+                    <td className="num mono">{formatMoney(leftOf(r), currency)}</td>
+                    <td className="num">
+                      <NumberInput
+                        kind="money"
+                        aria-label={`Bill now of ${r.number}`}
+                        value={amounts[r.id] ?? String(leftOf(r))}
+                        min={0.01}
+                        max={leftOf(r)}
+                        onChange={(e) => setAmounts((a) => ({ ...a, [r.id]: e.target.value }))}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={3}>
+                    This invoice, before VAT
+                    {quotationNet > 0 && <span className="faint"> — {round((askTotal / quotationNet) * 100)}% of the quotation</span>}
+                  </td>
+                  <td className="num mono">{formatMoney(askTotal, currency)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          {askProblem && <p className="alert warn">Bill between 0.01 and what is left of {askProblem.number}.</p>}
+          <p className="faint">
+            It is saved as a draft request and opened: check it there, then Submit for approval. Once approved it becomes one invoice in Accounts Receivable,
+            and each order is credited to whoever booked it.
+          </p>
+          <div className="panel-foot">
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-sm btn-primary" disabled={busy || !chosen.length || !!askProblem} onClick={() => void raise()}>
+              {busy ? 'Saving…' : 'Create invoice request'}
+            </button>
+          </div>
+        </section>
       )}
       {over > 1 && (
         <p className="alert warn" role="alert">
@@ -1726,13 +1852,14 @@ function QuotationSalesOrders({
           <table className="data so-table">
             <thead>
               <tr>
+                {mayAsk && <th aria-label="Bill together" />}
                 <th>Number</th>
                 <th>Date</th>
                 <th>Status</th>
                 <th>Customer PO</th>
-                <th>SI / BS No.</th>
-                <th>DR No.</th>
                 <th className="num">Total</th>
+                <th className="num">Invoiced</th>
+                <th className="num">Left to invoice</th>
                 <th>Booked by</th>
                 <th>Team</th>
               </tr>
@@ -1740,6 +1867,18 @@ function QuotationSalesOrders({
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id}>
+                  {mayAsk && (
+                    <td>
+                      {billable(r) && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Bill ${r.number} on this invoice`}
+                          checked={picked.includes(r.id)}
+                          onChange={(e) => setPicked((p) => (e.target.checked ? [...p, r.id] : p.filter((x) => x !== r.id)))}
+                        />
+                      )}
+                    </td>
+                  )}
                   <td>
                     <Link className="mono" to={`/g-ops/sales-orders/${r.id}`}>
                       {r.number}
@@ -1750,14 +1889,17 @@ function QuotationSalesOrders({
                     <StatusBadge status={r.status} extra={SO_TONES} />
                   </td>
                   <td>{r.poNumber ?? <span className="faint">—</span>}</td>
-                  <td>{r.siNumber ?? <span className="faint">—</span>}</td>
-                  <td>{r.drNumber ?? <span className="faint">—</span>}</td>
                   <td className="num mono">
                     {formatMoney(r.total, currency)}
                     {r.status !== 'CANCELLED' && (r.additional ?? 0) > 0 && (
                       <div className="faint">{(r.fromQuotation ?? 0) > 0 ? `${formatMoney(r.additional, currency)} additional` : 'additional'}</div>
                     )}
                   </td>
+                  <td className="num mono">
+                    {(r.invoiced ?? 0) > 0 ? formatMoney(r.invoiced, currency) : <span className="faint">—</span>}
+                    {r.invoiceNumbers?.length ? <div className="faint">{r.invoiceNumbers.join(', ')}</div> : null}
+                  </td>
+                  <td className="num mono">{r.status === 'ISSUED' ? formatMoney(leftOf(r), currency) : <span className="faint">—</span>}</td>
                   <td>{r.owner.name}</td>
                   <td>{r.team?.code ?? <span className="faint">—</span>}</td>
                 </tr>

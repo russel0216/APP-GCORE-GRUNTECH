@@ -20,6 +20,7 @@
  * Everything else here exists to keep those three honest.
  */
 
+import { ordersInvoiced } from '../src/shared/billingInvoice';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -5325,6 +5326,78 @@ async function main() {
       bossList.body.total === 2 && bossMine.body.total === 0 && strangerList.body.total === 0 && bossOne.status === 200,
       `${bossList.body.total} ${bossMine.body.total} ${strangerList.body.total} ${bossOne.status}`,
     );
+    // One S.I. for several sales orders of a quotation (2026-11-14, the
+    // owner's call: "A + A + B = progress billing 65% — request an invoice by
+    // batch, all in a single S.I."): 100,000 + 20,000 + 30,000 of three orders.
+    {
+      const bq = await prisma.quotation.create({ data: { number: `${TAG}-Q-IRB`, customerId: customer.id, ownerId: irSeller.id, subject: `${TAG} IR BATCH` } });
+      await prisma.quotationRevision.create({ data: { quotationId: bq.id, revision: 0, status: 'APPROVED' } });
+      const mkOrder = (n: string, ownerId: string, net: number, quotationId = bq.id) =>
+        prisma.salesOrder.create({
+          data: {
+            number: `${TAG}-SO-${n}`, status: 'ISSUED', quotationId, customerId: customer.id, ownerId, orderDate: dayKey(new Date()), termsDays: 30,
+            vatRate: D(0.12), subtotal: D(net), vatAmount: D(net * 0.12), total: D(net * 1.12),
+          },
+        });
+      const a1 = await mkOrder('IRB-A1', irSeller.id, 100_000);
+      const a2 = await mkOrder('IRB-A2', irSeller.id, 50_000);
+      const b1 = await mkOrder('IRB-B', irStranger.id, 30_000);
+      const elsewhere = await mkOrder('IRB-X', irSeller.id, 10_000, irQuote.id);
+      const ask = (orders: { salesOrderId: string; grossAmount: number }[]) => seller('POST', '/invoice-requests', { salesOrderId: orders[0].salesOrderId, orders });
+      const otherQuote = await ask([{ salesOrderId: a1.id, grossAmount: 1_000 }, { salesOrderId: elsewhere.id, grossAmount: 1_000 }]);
+      const twice = await ask([{ salesOrderId: a1.id, grossAmount: 1_000 }, { salesOrderId: a1.id, grossAmount: 1_000 }]);
+      const tooMuch = await ask([{ salesOrderId: a1.id, grossAmount: 100_000 }, { salesOrderId: a2.id, grossAmount: 50_001 }]);
+      const batch = await ask([
+        { salesOrderId: a1.id, grossAmount: 100_000 },
+        { salesOrderId: a2.id, grossAmount: 20_000 },
+        { salesOrderId: b1.id, grossAmount: 30_000 },
+      ]);
+      const parts = (batch.body.orders ?? []) as { number: string; amount: number; owner: { id: string } }[];
+      check(
+        'several orders of one quotation are asked for on ONE request — never another quotation’s, never one twice, never past what is left of each',
+        otherQuote.status === 400 && /another quotation/.test(String(otherQuote.body.error)) && twice.status === 400 && tooMuch.status === 400 &&
+          batch.status === 201 && batch.body.kind === 'orders' && parts.length === 3 && money(Number(batch.body.grossAmount), 150_000) &&
+          parts[2].owner.id === irStranger.id && money(parts[1].amount, 20_000),
+        `${otherQuote.status} ${twice.status} ${tooMuch.status} ${batch.status} ${JSON.stringify(batch.body).slice(0, 200)}`,
+      );
+      const restOfA1 = await seller('POST', '/invoice-requests', { salesOrderId: a1.id, grossAmount: 1 });
+      const restOfA2 = await seller('POST', '/invoice-requests', { salesOrderId: a2.id, grossAmount: 30_000 });
+      check(
+        'what the batch asks of each order is held: nothing more of the one asked whole, the rest of the one asked in part',
+        restOfA1.status === 400 && restOfA2.status === 201,
+        `${restOfA1.status} ${restOfA2.status}`,
+      );
+      await seller('DELETE', `/invoice-requests/${restOfA2.body.id}`);
+      const bSubmit = await seller('POST', `/invoice-requests/${batch.body.id}/submit`);
+      const bOpen = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'invoice_request', documentId: String(batch.body.id), status: 'PENDING' } });
+      await act({ requestId: bOpen.id, userId: irSupport.id, action: 'APPROVED' });
+      const bDone = await prisma.invoiceRequest.findUniqueOrThrow({
+        where: { id: String(batch.body.id) },
+        include: { invoice: { include: { lines: { orderBy: { sortOrder: 'asc' } }, parts: { orderBy: { sortOrder: 'asc' } } } } },
+      });
+      const inv = bDone.invoice;
+      check(
+        'approved, it is ONE invoice: 150,000 before VAT, a line and a part per order, each part its own order’s salesperson',
+        bSubmit.status === 200 && bDone.status === 'APPROVED' && !!inv && money(Number(inv.grossAmount), 150_000) && money(Number(inv.vatAmount), 18_000) &&
+          inv.lines.length === 3 && inv.parts.length === 3 && inv.parts[2].salespersonId === irStranger.id && inv.parts[0].salespersonId === irSeller.id &&
+          inv.lines[2].detail!.includes(`${TAG}-SO-IRB-B`) && (await prisma.invoice.count({ where: { salesOrderId: { in: [a1.id, a2.id, b1.id] } } })) === 1,
+        `${bSubmit.status} ${bDone.status} ${inv ? Number(inv.grossAmount) : ''} ${inv?.lines.length} ${inv?.parts.length}`,
+      );
+      // Each order's own share: on the sales order list, and for the next invoice.
+      const shares = await ordersInvoiced(prisma, [a1.id, a2.id, b1.id]);
+      const tally = { status: 200 };
+      const tRows = [a1, a2, b1].map((o) => ({ number: o.number, invoiced: shares.get(o.id) ?? 0 }));
+      const inv2 = await seller('POST', '/invoice-requests', { salesOrderId: a2.id, grossAmount: 30_000 });
+      const inv2Over = await seller('POST', '/invoice-requests', { salesOrderId: b1.id, grossAmount: 1 });
+      check(
+        'each order is invoiced by its own share of the S.I. — 100,000, 20,000 and 30,000 — so the next invoice takes only what is left of each',
+        tally.status === 200 && money(tRows.find((r) => r.number === `${TAG}-SO-IRB-A1`)?.invoiced ?? -1, 100_000) &&
+          money(tRows.find((r) => r.number === `${TAG}-SO-IRB-A2`)?.invoiced ?? -1, 20_000) &&
+          money(tRows.find((r) => r.number === `${TAG}-SO-IRB-B`)?.invoiced ?? -1, 30_000) && inv2.status === 201 && inv2Over.status === 400,
+        `${tally.status} ${JSON.stringify(tRows.map((r) => [r.number, r.invoiced]))} ${inv2.status} ${inv2Over.status}`,
+      );
+      await seller('DELETE', `/invoice-requests/${inv2.body.id}`);
+    }
     const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
     check(
       'the register lists the project’s requests with their cards, and prints',

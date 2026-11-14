@@ -137,6 +137,10 @@ export interface SalesOrderRow {
   /** How much of the order books its quotation's own lines, and how much is additional to it. */
   fromQuotation?: number;
   additional?: number;
+  /** Before VAT: this order's own share of its invoices, and of what was collected on them (2026-11-14). */
+  invoiced?: number;
+  collected?: number;
+  invoiceNumbers?: string[];
 }
 
 type ApprovalRoute = PreviewRoute;

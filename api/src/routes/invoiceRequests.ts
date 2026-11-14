@@ -45,7 +45,7 @@ import { expectedCollection, invoiceCredit, termsLabel } from '../shared/receiva
 import { quotationTeamOf, reportsTo, teamOf, visibleOwners } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
 import { assertSiNumberFree } from '../shared/siNumbers';
-import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, createInvoiceFromOrder, orderInvoiced, orderNet } from '../shared/billingInvoice';
+import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, createInvoiceFromOrder, createInvoiceFromOrders, orderInvoiced, orderNet } from '../shared/billingInvoice';
 
 /**
  * INVOICE REQUESTS (2026-10-15, the owner's call: "the Sales or Team Leader
@@ -102,6 +102,19 @@ const requestInclude = {
   team: { select: { id: true, code: true, name: true } },
   requestedBy: userSelect,
   invoice: { select: { id: true, number: true, status: true } },
+  // A batch request (2026-11-14): the sales orders billed together on one S.I.
+  parts: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      salesOrder: {
+        select: {
+          id: true, number: true, status: true, customerId: true, total: true, vatAmount: true, vatRate: true, ownerId: true, teamId: true, quotationId: true,
+          owner: { select: { id: true, name: true } },
+          team: { select: { id: true, code: true, name: true } },
+        },
+      },
+    },
+  },
 } satisfies Prisma.InvoiceRequestInclude;
 
 type RequestRow = Prisma.InvoiceRequestGetPayload<{ include: typeof requestInclude }>;
@@ -228,11 +241,16 @@ function billingMoney(b: NonNullable<RequestRow['progressBilling']>) {
 async function orderLeft(order: { id: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }, exceptRequestId?: string) {
   const net = orderNet(order);
   const invoiced = await orderInvoiced(prisma, order.id);
-  const live = await prisma.invoiceRequest.findMany({
-    where: { salesOrderId: order.id, status: { in: LIVE }, ...(exceptRequestId ? { id: { not: exceptRequestId } } : {}) },
-    select: { grossAmount: true, progressBilling: { select: { grossAmount: true } } },
-  });
-  const requested = cents(live.reduce((s, r) => s + num(r.progressBilling?.grossAmount ?? r.grossAmount), 0));
+  const others = { status: { in: LIVE }, ...(exceptRequestId ? { id: { not: exceptRequestId } } : {}) };
+  // A request for this order alone asks its own amount; a batch request asks this order's part.
+  const [live, parts] = await Promise.all([
+    prisma.invoiceRequest.findMany({
+      where: { salesOrderId: order.id, parts: { none: {} }, ...others },
+      select: { grossAmount: true, progressBilling: { select: { grossAmount: true } } },
+    }),
+    prisma.invoiceRequestPart.findMany({ where: { salesOrderId: order.id, request: others }, select: { amount: true } }),
+  ]);
+  const requested = cents(live.reduce((s, r) => s + num(r.progressBilling?.grossAmount ?? r.grossAmount), 0) + parts.reduce((s, p) => s + num(p.amount), 0));
   return { net, invoiced, requested, left: cents(Math.max(0, net - invoiced - requested)) };
 }
 
@@ -249,7 +267,7 @@ async function present(me: ResolvedUser, row: RequestRow) {
     id: row.id,
     number: row.number,
     status: row.status,
-    kind: b ? 'billing' : 'order',
+    kind: b ? 'billing' : row.parts.length ? 'orders' : 'order',
     job: row.job,
     customer: customerOf(row),
     description: row.description,
@@ -272,6 +290,18 @@ async function present(me: ResolvedUser, row: RequestRow) {
     },
     ...money,
     salesOrder: { id: row.salesOrder.id, number: row.salesOrder.number, poNumber: row.salesOrder.poNumber, ...order },
+    // A batch: each order with its share, who booked it and under which team.
+    orders: await Promise.all(
+      row.parts.map(async (p) => ({
+        id: p.salesOrder.id,
+        number: p.salesOrder.number,
+        owner: p.salesOrder.owner,
+        team: p.salesOrder.team,
+        amount: num(p.amount),
+        description: p.description,
+        ...(await orderLeft(p.salesOrder, row.id)),
+      })),
+    ),
     invoiceDate: row.invoiceDate,
     termsDays: row.termsDays,
     terms: termsLabel(row.termsDays ?? undefined),
@@ -594,7 +624,47 @@ const headerSchema = z.object({
   ewtRate: z.number().min(0).max(0.15).optional().nullable(),
   /** The BIR printed SI number set aside for it (2026-10-20). */
   siNumber: z.string().trim().max(40).optional().nullable(),
+  /**
+   * SEVERAL sales orders of one quotation on one S.I. (2026-11-14): each with
+   * what to invoice of it, before VAT. `salesOrderId` is then the first.
+   */
+  orders: z
+    .array(z.object({ salesOrderId: z.string().min(1), grossAmount: z.number().positive('Say how much to invoice'), description: z.string().trim().max(500).optional().nullable() }))
+    .min(2, 'A batch bills at least two sales orders')
+    .max(20, 'Twenty sales orders at most on one invoice')
+    .optional()
+    .nullable(),
 });
+
+/**
+ * A batch, checked: every order ISSUED and the caller's to ask for, all of
+ * ONE quotation (so one customer and one tax), none named twice, each amount
+ * within what is left of its order after its invoices and the other live
+ * requests.
+ */
+async function checkBatch(me: ResolvedUser, orders: NonNullable<z.infer<typeof headerSchema>['orders']>, exceptRequestId?: string) {
+  const currency = await companyCurrency();
+  const ids = orders.map((o) => o.salesOrderId);
+  if (new Set(ids).size !== ids.length) throw badRequest('A sales order is listed twice');
+  const found = await prisma.salesOrder.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, number: true, status: true, quotationId: true, customerId: true, total: true, vatAmount: true, vatRate: true, poNumber: true, termsDays: true },
+  });
+  const parts = [];
+  for (const [i, o] of orders.entries()) {
+    const so = found.find((x) => x.id === o.salesOrderId);
+    if (!so) throw notFound('One of the sales orders was not found');
+    if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — only an issued sales order is invoiced`);
+    if (so.quotationId !== found.find((x) => x.id === ids[0])!.quotationId) throw badRequest(`${so.number} is booked from another quotation — one invoice bills the orders of one quotation`);
+    if (!(await mayRequestInvoice(me, { salesOrderId: so.id }))) throw forbidden(`Only the salesperson who holds ${so.number}, or their Team Leader, can ask for its invoice`);
+    const left = (await orderLeft(so, exceptRequestId)).left;
+    const gross = cents(o.grossAmount);
+    if (gross > left + 0.005) throw badRequest(`Only ${formatMoney(left, currency)} of ${so.number} is left to invoice (before VAT) — this asks for ${formatMoney(gross, currency)}`);
+    parts.push({ salesOrderId: so.id, amount: new Prisma.Decimal(gross), description: o.description?.trim() || `Sales order ${so.number}`, sortOrder: i, number: so.number });
+  }
+  const first = found.find((x) => x.id === ids[0])!;
+  return { parts, first, total: cents(parts.reduce((s, p) => s + Number(p.amount), 0)) };
+}
 
 /**
  * The header a request may carry, checked. A billing's: the order ISSUED,
@@ -671,6 +741,40 @@ invoiceRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(headerSchema.extend({ progressBillingId: z.string().optional().nullable() }), req.body);
+    if (body.orders?.length && !body.progressBillingId) {
+      // Several orders on one S.I.: the header is the first order's, the amount their sum.
+      const batch = await checkBatch(me, body.orders);
+      const header = await checkHeader(
+        { ...body, salesOrderId: batch.first.id, grossAmount: Number(batch.parts[0].amount), description: `Sales orders ${batch.parts.map((p) => p.number).join(', ')}` },
+        { billing: null },
+      );
+      const credit = await requesterCredit(me.id, batch.first.id);
+      const job = await prisma.job.findFirst({
+        where: { quotationRevision: { quotationId: batch.first.quotationId } },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true },
+      });
+      const made = await prisma.$transaction(async (tx) => {
+        for (const id of batch.parts.map((p) => p.salesOrderId).sort()) await tx.$queryRaw`SELECT id FROM "SalesOrder" WHERE id = ${id} FOR UPDATE`;
+        return tx.invoiceRequest.create({
+          data: {
+            number: await nextNumber(DOC, tx),
+            jobId: job?.id ?? null,
+            ...header,
+            grossAmount: new Prisma.Decimal(batch.total),
+            ...credit,
+            requestedById: me.id,
+            parts: { create: batch.parts.map(({ number: _n, ...p }) => p) },
+          },
+        });
+      });
+      await audit(
+        { entityType: 'invoice_request', entityId: made.id, action: 'CREATED', summary: `Raised ${made.number} for sales orders ${batch.parts.map((p) => p.number).join(', ')} on one invoice` },
+        req,
+      );
+      res.status(201).json(await present(me, await loadVisible(me, made.id)));
+      return;
+    }
     const billing = body.progressBillingId
       ? await prisma.progressBilling.findUnique({ where: { id: body.progressBillingId }, include: { invoice: { select: { number: true } } } })
       : null;
@@ -733,7 +837,10 @@ invoiceRequestRoutes.put(
     if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request can change it');
     if (row.status !== 'DRAFT') throw badRequest('Only a draft can be changed — pull it back first');
     if (!row.progressBillingId && body.salesOrderId !== row.salesOrderId) throw badRequest('The sales order a request bills does not change — cancel it and raise another');
-    const header = await checkHeader(body, { billing: row.progressBilling, exceptRequestId: row.id });
+    // A batch keeps the orders and amounts it was raised with — its header changes; to bill other orders, cancel it and raise another.
+    const batchPart = row.parts.find((p) => p.salesOrderId === row.salesOrderId);
+    const checked = await checkHeader(batchPart ? { ...body, grossAmount: num(batchPart.amount) } : body, { billing: row.progressBilling, exceptRequestId: row.id });
+    const header = row.parts.length ? { ...checked, grossAmount: row.grossAmount ?? undefined, description: row.description ?? undefined } : checked;
     const claimed = await prisma.invoiceRequest.updateMany({ where: { id: row.id, status: 'DRAFT' }, data: header });
     if (!claimed.count) throw badRequest('It was submitted a moment ago — reload');
     await audit({ entityType: 'invoice_request', entityId: row.id, action: 'UPDATED', summary: `${row.number} changed` }, req);
@@ -755,10 +862,15 @@ invoiceRequestRoutes.post(
     if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request can submit it');
     if (row.status !== 'DRAFT') throw badRequest('This request has already been submitted');
     // The order must still hold it — another invoice may have taken it since.
-    await checkHeader(
-      { salesOrderId: row.salesOrderId, termsDays: row.termsDays, poReference: row.poReference, grossAmount: row.grossAmount ? num(row.grossAmount) : null, description: row.description },
-      { billing: row.progressBilling, exceptRequestId: row.id },
-    );
+    if (row.parts.length) {
+      // A batch: every order must still hold its own part.
+      await checkBatch(me, row.parts.map((p) => ({ salesOrderId: p.salesOrderId, grossAmount: num(p.amount), description: p.description })), row.id);
+    } else {
+      await checkHeader(
+        { salesOrderId: row.salesOrderId, termsDays: row.termsDays, poReference: row.poReference, grossAmount: row.grossAmount ? num(row.grossAmount) : null, description: row.description },
+        { billing: row.progressBilling, exceptRequestId: row.id },
+      );
+    }
     const money = await moneyOf(row);
 
     const claimed = await prisma.invoiceRequest.updateMany({
@@ -773,7 +885,9 @@ invoiceRequestRoutes.post(
         documentNumber: row.number,
         subject: row.progressBilling
           ? `${row.job?.number ?? ''} — invoice ${row.progressBilling.number} on ${row.salesOrder.number}`
-          : `${customerOf(row).name} — invoice ${row.salesOrder.number}`,
+          : row.parts.length
+            ? `${customerOf(row).name} — one invoice for ${row.parts.map((p) => p.salesOrder.number).join(', ')}`
+            : `${customerOf(row).name} — invoice ${row.salesOrder.number}`,
         amount: money.netCollectible,
         link: INVOICE_REQUEST_LINK(row.id),
         requesterId: row.requestedById,
@@ -899,6 +1013,25 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
         if (taken) throw new Error(`invoice no. ${row.siNumber} is already on ${taken.number}`);
       }
       const actor = last?.approverId ?? row.requestedById;
+      if (!row.progressBillingId && row.parts.length) {
+        for (const p of row.parts) if (p.salesOrder.status !== 'ISSUED') throw new Error(`${p.salesOrder.number} is ${statusLabel(p.salesOrder.status).toLowerCase()}`);
+        const invoice = await createInvoiceFromOrders(
+          tx,
+          row.parts.map((p) => ({
+            order: p.salesOrder,
+            gross: num(p.amount),
+            description: p.description ?? `Sales order ${p.salesOrder.number}`,
+            salespersonId: p.salesOrder.ownerId,
+            salespersonName: p.salesOrder.owner.name,
+            teamId: p.salesOrder.teamId,
+            teamCode: p.salesOrder.team?.code ?? null,
+          })),
+          { ...header, jobId: row.jobId },
+          actor,
+        );
+        await tx.invoiceRequest.update({ where: { id: row.id }, data: { invoiceId: invoice.id } });
+        return invoice.number;
+      }
       if (!row.progressBillingId) {
         const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: row.salesOrderId } });
         if (so.status !== 'ISSUED') throw new Error(`${so.number} is ${statusLabel(so.status).toLowerCase()}`);

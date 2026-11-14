@@ -1,4 +1,5 @@
 import { topOfFlow } from '../shared/sankey';
+import { ordersInvoiced } from '../shared/billingInvoice';
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -70,13 +71,12 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     liveIds.length
       ? prisma.salesOrderLine.findMany({ where: { orderId: { in: liveIds } }, select: { orderId: true, group: true, amount: true, costAmount: true, isHeading: true } })
       : [],
-    liveIds.length
-      ? prisma.invoice.groupBy({ by: ['salesOrderId'], where: { salesOrderId: { in: liveIds }, status: { not: 'CANCELLED' } }, _sum: { grossAmount: true } })
-      : [],
+    // Each order's own share of its invoices — an S.I. may bill several orders (2026-11-14).
+    ordersInvoiced(prisma, liveIds),
   ]);
   const linesOf = new Map<string, typeof lines>();
   for (const l of lines) linesOf.set(l.orderId, [...(linesOf.get(l.orderId) ?? []), l]);
-  const invoicedOf = new Map(invoiced.map((i) => [i.salesOrderId, num(i._sum.grossAmount)]));
+  const invoicedOf = invoiced;
 
   // Each live order in pesos: its total (with VAT), its net before VAT, what
   // live invoices bill of it (before VAT), and its margin where seen.

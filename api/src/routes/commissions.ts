@@ -33,7 +33,7 @@ import { cents, num, refreshAdvance, settleable } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
 import { quotationTeamOf, reportsTo, visibleOwners } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
-import { orderNet } from '../shared/billingInvoice';
+import { orderNet, orderInvoices } from '../shared/billingInvoice';
 import { quotationTotals } from '../shared/quotation';
 import { commissionFigures } from '../shared/commission';
 
@@ -120,45 +120,62 @@ export async function orderSource(salesOrderId: string) {
           owner: { select: { id: true, name: true, position: true, supervisorId: true, employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
         },
       },
-      invoices: {
-        where: { status: { not: 'CANCELLED' } },
-        orderBy: { invoiceDate: 'asc' },
-        select: {
-          id: true,
-          number: true,
-          siNumber: true,
-          status: true,
-          invoiceDate: true,
-          grossAmount: true,
-          invoiceTotal: true,
-          ewtAmount: true,
-          netCollectible: true,
-          amountCollected: true,
-          importedFrom: true,
-          allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true } } } },
-        },
-      },
     },
   });
   if (!order) throw notFound('Sales order not found');
+  // Its invoices — alone or with other orders on one S.I. (2026-11-14) — each
+  // at THIS order's share: what it bills of the order, and its share of what
+  // was collected.
+  const shares = await orderInvoices(prisma, [order.id]);
+  const detail = shares.length
+    ? await prisma.invoice.findMany({
+        where: { id: { in: shares.map((s) => s.id) } },
+        select: {
+          id: true,
+          invoiceTotal: true,
+          ewtAmount: true,
+          amountCollected: true,
+          allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true } } } },
+        },
+      })
+    : [];
+  const invoices = shares.map((s) => {
+    const d = detail.find((x) => x.id === s.id)!;
+    const share = s.grossAmount > 0 ? s.amount / s.grossAmount : 1;
+    return {
+      id: s.id,
+      number: s.number,
+      siNumber: s.siNumber,
+      status: s.status,
+      invoiceDate: s.invoiceDate,
+      grossAmount: new Prisma.Decimal(s.amount),
+      invoiceTotal: new Prisma.Decimal(cents(num(d.invoiceTotal) * share)),
+      ewtAmount: new Prisma.Decimal(cents(num(d.ewtAmount) * share)),
+      netCollectible: new Prisma.Decimal(cents(s.netCollectible * share)),
+      amountCollected: new Prisma.Decimal(cents(num(d.amountCollected) * share)),
+      importedFrom: s.importedFrom,
+      allocations: d.allocations.map((a) => ({ ...a, amount: new Prisma.Decimal(cents(num(a.amount) * share)) })),
+    };
+  });
+  const orderWithInvoices = { ...order, invoices };
   const totals = quotationTotals({ lines: order.lines, discountPct: order.discountPct, vatRate: order.vatRate, vatInclusive: order.vatInclusive });
   const net = orderNet(order);
-  const invoiced = cents(order.invoices.reduce((s, i) => s + num(i.grossAmount), 0));
-  const collected = cents(order.invoices.reduce((s, i) => s + num(i.amountCollected) + (i.status === 'PAID' ? num(i.ewtAmount) : 0), 0));
-  const collections = order.invoices.flatMap((i) => i.allocations.map((a) => ({ invoice: i.number, ...a.payment, amount: num(a.amount) })));
+  const invoiced = cents(invoices.reduce((s, i) => s + num(i.grossAmount), 0));
+  const collected = cents(invoices.reduce((s, i) => s + num(i.amountCollected) + (i.status === 'PAID' ? num(i.ewtAmount) : 0), 0));
+  const collections = invoices.flatMap((i) => i.allocations.map((a) => ({ invoice: i.number, ...a.payment, amount: num(a.amount) })));
   const orNumbers = [...new Set(collections.map((c) => c.orNumber).filter((x): x is string => !!x))];
   const collectedOn = collections.reduce<Date | null>((d, c) => (!d || c.paymentDate > d ? c.paymentDate : d), null);
-  const unpaid = order.invoices.filter((i) => i.status !== 'PAID');
-  const fully = order.invoices.length > 0 && invoiced + 0.005 >= net && unpaid.length === 0;
+  const unpaid = invoices.filter((i) => i.status !== 'PAID');
+  const fully = invoices.length > 0 && invoiced + 0.005 >= net && unpaid.length === 0;
   // A deal invoiced in SCORO was paid — and its commission settled — there
   // (2026-10-17, the owner's call): commissions start with deals G-CORE booked.
-  const fromScoro = order.invoices.some((i) => i.importedFrom === 'SCORO');
+  const fromScoro = invoices.some((i) => i.importedFrom === 'SCORO');
   const problem =
     fromScoro
       ? `${order.number} was invoiced in SCORO — commissions are raised on deals booked in G-CORE`
       : order.status !== 'ISSUED'
       ? `${order.number} is ${statusLabel(order.status).toLowerCase()} — a commission is raised on an issued sales order`
-      : !order.invoices.length
+      : !invoices.length
         ? `${order.number} has not been invoiced yet — a commission is raised once the order is fully collected`
         : invoiced + 0.005 < net
           ? `${order.number} is invoiced ${formatAmount(invoiced)} of ${formatAmount(net)} before VAT — a commission is raised once the whole order is invoiced and collected`
@@ -171,7 +188,7 @@ export async function orderSource(salesOrderId: string) {
     select: { id: true, number: true, name: true, projectManagerId: true },
   });
   return {
-    order,
+    order: orderWithInvoices,
     totals,
     figures: {
       totalAmount: num(order.total),
@@ -557,17 +574,18 @@ commissionRoutes.get(
       where: {
         status: 'ISSUED',
         commissionRequests: { none: { status: { in: STANDING } } },
-        invoices: { some: { status: 'PAID' }, none: { OR: [{ status: { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } }, { importedFrom: 'SCORO', status: { not: 'CANCELLED' } }] } },
+        // A paid invoice bills it — alone, or with other orders on one S.I.; `orderSource` decides the rest.
+        OR: [{ invoices: { some: { status: 'PAID' } } }, { invoiceParts: { some: { invoice: { status: 'PAID' } } } }],
         ...(q ? { OR: [{ number: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] } : {}),
       },
       orderBy: { orderDate: 'desc' },
       take: 100,
-      select: { id: true, number: true, orderDate: true, total: true, vatAmount: true, customer: { select: { name: true } }, invoices: { where: { status: { not: 'CANCELLED' } }, select: { grossAmount: true } } },
+      select: { id: true, number: true, orderDate: true, total: true, vatAmount: true, customer: { select: { name: true } } },
     });
     const out = [];
     for (const o of candidates) {
-      const invoiced = o.invoices.reduce((s, i) => s + num(i.grossAmount), 0);
-      if (invoiced + 0.005 < orderNet(o)) continue;
+      // Fully invoiced, every invoice paid, none of SCORO's — the one reading.
+      if ((await orderSource(o.id)).problem) continue;
       if (!(await mayRaiseCommission(me, o.id))) continue;
       out.push({ id: o.id, number: o.number, orderDate: o.orderDate, customer: o.customer.name, total: num(o.total) });
       if (out.length >= 50) break;
