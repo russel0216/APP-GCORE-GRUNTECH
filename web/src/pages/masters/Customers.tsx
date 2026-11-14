@@ -439,9 +439,9 @@ export function Customers() {
             <>
               <Stat label="Customers" value={total} />
               {!!sum.inactive && <Stat label="Inactive" value={sum.inactive} />}
-              <Stat label="No team yet" value={sum.noTeam ?? 0} sub="nobody handles them" to="/g-ops/customers?team=none" />
-              <Stat label="No sub-industry" value={sum.noSubIndustry ?? 0} sub="not classified" to="/g-ops/customers?subIndustry=none" />
-              <Stat label="No contact person" value={sum.noContact ?? 0} sub="nobody to call" to="/g-ops/customers?contacts=no" />
+              <Stat label="No team yet" value={sum.noTeam ?? 0} sub="nobody handles them" to="/g-ops/customers?team=none&isActive=true" />
+              <Stat label="No sub-industry" value={sum.noSubIndustry ?? 0} sub="not classified" to="/g-ops/customers?subIndustry=none&isActive=true" />
+              <Stat label="No contact person" value={sum.noContact ?? 0} sub="nobody to call" to="/g-ops/customers?contacts=no&isActive=true" />
             </>
           );
         }}

@@ -2471,7 +2471,9 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   set, one audit row. The page is **Customers › ⋯ › Clean up…**
   (`/g-ops/customers/clean-up`, `pages/masters/CustomerCleanup.tsx`). The
   list's cards add No team yet, No sub-industry and No contact person (each
-  opens its gap; `summary.noTeam` / `noSubIndustry` / `noContact`), with a
+  opens its gap; `summary.noTeam` / `noSubIndustry` / `noContact`, ACTIVE
+  customers only — a merged duplicate is switched off — the link carrying
+  `isActive=true`), with a
   new `contacts=yes|no` filter. **Customer 360** opens on the money in
   pesos — Quoted, Still open, Won, Booked, Invoiced, Outstanding
   (`figures`, each null without the right to the list it comes from) — and

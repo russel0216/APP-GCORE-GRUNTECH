@@ -134,10 +134,11 @@ export async function customerListSummary(base: Prisma.CustomerWhereInput, where
     prisma.subIndustry.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, isActive: true } }),
     prisma.customer.count({ where }),
     prisma.customer.count({ where: { AND: [where, { isActive: false }] } }),
-    // What is still to be filled in (2026-11-15) — each card opens the list on its gap.
-    prisma.customer.count({ where: { AND: [where, { industryId: null }] } }),
-    prisma.customer.count({ where: { AND: [where, { subIndustryId: null }] } }),
-    prisma.customer.count({ where: { AND: [where, { contacts: { none: {} } }] } }),
+    // What is still to be filled in (2026-11-15) — ACTIVE customers only (a merged duplicate is switched off and
+    // is nobody's gap); each card opens the list on its gap.
+    prisma.customer.count({ where: { AND: [where, { isActive: true, industryId: null }] } }),
+    prisma.customer.count({ where: { AND: [where, { isActive: true, subIndustryId: null }] } }),
+    prisma.customer.count({ where: { AND: [where, { isActive: true, contacts: { none: {} } }] } }),
   ]);
   const byId = new Map(perSubIndustry.map((r) => [r.subIndustryId, r._count._all]));
   const tabCounts: Record<string, number> = { '': perSubIndustry.reduce((t, r) => t + r._count._all, 0) };

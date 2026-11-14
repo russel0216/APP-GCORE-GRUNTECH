@@ -726,6 +726,18 @@ async function httpCases(ctx: {
         saved.status === 200 && one.body.paymentTerms === '45 Days' && Array.isArray(one.body.salesOrders) && !!(one.body.figures as { quoted?: unknown })?.quoted,
       `${gaps.status} ${badGap.status} ${saved.status} ${one.body.paymentTerms} ${JSON.stringify(one.body.figures).slice(0, 120)}`,
     );
+    // A switched-off customer (a merged duplicate) is nobody's gap.
+    const q = `/customers?scope=all&search=${encodeURIComponent(`${TAG} Alike`)}`;
+    const before = await http(adminT, 'GET', q);
+    await prisma.customer.update({ where: { id: alikeA.id }, data: { isActive: false } });
+    const after = await http(adminT, 'GET', q);
+    const card = await http(adminT, 'GET', `${q}&contacts=no&isActive=true`);
+    const n = (r: { body: { summary?: unknown } }) => Number((r.body.summary as { noContact?: number }).noContact);
+    check(
+      'the gap cards count active customers only, and the list a card opens holds as many',
+      n(before) === 1 && n(after) === 0 && Number(card.body.total) === 0,
+      `${n(before)} ${n(after)} ${card.body.total}`,
+    );
     const dry = await http(adminT, 'POST', '/customers/fill-sub-industries', {});
     check('the sub-industry fill says what it would do before it does anything', dry.status === 200 && Number(dry.body.filled) === 0 && typeof dry.body.canFill === 'number', `${dry.status} ${JSON.stringify(dry.body).slice(0, 120)}`);
   }
