@@ -252,6 +252,8 @@ export function salesOrderListWhere(
   team: string | null = null,
   /** `crossTeamOrderIds()` when `?crossTeam=yes` is asked. */
   crossIds: string[] | null = null,
+  /** `overQuotationOrderIds()` when `?overQuotation=yes` is asked. */
+  overIds: string[] | null = null,
 ): { base: Prisma.SalesOrderWhereInput; where: Prisma.SalesOrderWhereInput } {
   const and: Prisma.SalesOrderWhereInput[] = [];
   const readable = salesOrdersReadable(me);
@@ -272,6 +274,15 @@ export function salesOrderListWhere(
   // the order's salesperson's) — the ids `crossTeamOrderIds()` read.
   if (f.crossTeam === 'yes') and.push({ id: { in: crossIds ?? [] } });
   else if (f.crossTeam) throw badRequest("Team differs is yes (the quotation's team is not the salesperson's)");
+  // A follow-on order (2026-11-14): 4866.1, 4866.2 — SCORO's later invoices
+  // on one quotation, and G-CORE's own progress bookings.
+  if (f.followOn === 'yes') and.push({ number: { contains: '.' } });
+  else if (f.followOn === 'no') and.push({ NOT: { number: { contains: '.' } } });
+  else if (f.followOn) throw badRequest('Follow-on is yes or no');
+  // Orders whose quotation is booked for more than it is worth — a re-entry
+  // or a duplicate, or an addition nobody quoted.
+  if (f.overQuotation === 'yes') and.push({ id: { in: overIds ?? [] } });
+  else if (f.overQuotation) throw badRequest('Over its quotation is yes');
   // Booked: every order but a cancelled one — what the report counts.
   if (f.booked === 'yes') and.push({ status: { not: 'CANCELLED' } });
   else if (f.booked) throw badRequest('Booked is yes (every order but a cancelled one)');
@@ -406,6 +417,81 @@ export async function salesOrderListSummary(
  * their salesperson's own team, where the salesperson has one. A column
  * compared across three tables, which a Prisma where cannot say.
  */
+/**
+ * The live orders of every quotation whose live orders together come to more
+ * than the quotation is worth (its approved revision, else its latest) — a
+ * peso of tolerance for rounding.
+ */
+export async function overQuotationOrderIds(): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT so.id
+      FROM "SalesOrder" so
+      JOIN (
+        SELECT o."quotationId" AS qid, SUM(o.total) AS booked
+          FROM "SalesOrder" o
+         WHERE o.status <> 'CANCELLED'
+         GROUP BY o."quotationId"
+      ) b ON b.qid = so."quotationId"
+      JOIN LATERAL (
+        SELECT r.total
+          FROM "QuotationRevision" r
+         WHERE r."quotationId" = so."quotationId"
+         ORDER BY (r.status = 'APPROVED') DESC, r.revision DESC
+         LIMIT 1
+      ) v ON TRUE
+     WHERE so.status <> 'CANCELLED'
+       AND b.booked > v.total + 1`;
+  return rows.map((r) => r.id);
+}
+
+/** The main order's number of a follow-on (`4866.1` → `4866`); null when it is not one. */
+export function mainOrderNumber(number: string): string | null {
+  const m = /^(.+)\.\d+$/.exec(number);
+  return m ? m[1] : null;
+}
+
+/**
+ * What a list row says beyond the order itself (2026-11-14, the owner's
+ * question on 4866 by one salesperson and 4866.1 by another): its team, the
+ * main order a follow-on hangs on and who booked that, and how much of the
+ * order books lines OF ITS QUOTATION against how much is additional — lines
+ * that answer no quotation line. The quotation is never changed by either.
+ */
+async function rowExtras(rows: { id: string; number: string; quotationId: string; teamId: string | null; total: Prisma.Decimal }[]) {
+  const ids = rows.map((r) => r.id);
+  const mains = [...new Set(rows.map((r) => mainOrderNumber(r.number)).filter((n): n is string => !!n))];
+  const teamIds = [...new Set(rows.map((r) => r.teamId).filter((t): t is string => !!t))];
+  const [lines, mainRows, teams] = await Promise.all([
+    ids.length
+      ? prisma.salesOrderLine.findMany({ where: { orderId: { in: ids }, isHeading: false }, select: { orderId: true, amount: true, quotationItemId: true, bookedItems: true } })
+      : [],
+    mains.length ? prisma.salesOrder.findMany({ where: { number: { in: mains } }, select: { id: true, number: true, quotationId: true, owner: { select: { id: true, name: true } } } }) : [],
+    teamIds.length ? prisma.industry.findMany({ where: { id: { in: teamIds } }, select: { id: true, code: true, name: true } }) : [],
+  ]);
+  const cents = (v: Prisma.Decimal | number) => Math.round(Number(v) * 100);
+  return new Map(
+    rows.map((r) => {
+      const mine = lines.filter((l) => l.orderId === r.id);
+      const all = mine.reduce((s, l) => s + cents(l.amount), 0);
+      const linked = mine.filter((l) => l.quotationItemId || (Array.isArray(l.bookedItems) && l.bookedItems.length)).reduce((s, l) => s + cents(l.amount), 0);
+      const total = cents(r.total);
+      // The order's total (after its discount and tax) split as its lines split.
+      const fromQuotation = all > 0 ? Math.round((total * linked) / all) : total;
+      const mainNo = mainOrderNumber(r.number);
+      const main = mainNo ? mainRows.find((m) => m.number === mainNo && m.quotationId === r.quotationId) : null;
+      return [
+        r.id,
+        {
+          team: teams.find((t) => t.id === r.teamId) ?? null,
+          followOnOf: mainNo ? { number: mainNo, id: main?.id ?? null, owner: main?.owner ?? null } : null,
+          fromQuotation: fromQuotation / 100,
+          additional: (total - fromQuotation) / 100,
+        },
+      ] as const;
+    }),
+  );
+}
+
 export async function crossTeamOrderIds(): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT so.id
@@ -484,7 +570,8 @@ salesOrderRoutes.get(
     const q = listQuery(req);
     const team = await teamOf(me.id);
     const cross = q.filters.crossTeam === 'yes' ? await crossTeamOrderIds() : null;
-    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross);
+    const over = q.filters.overQuotation === 'yes' ? await overQuotationOrderIds() : null;
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross, over);
 
     const [rows, total, summary] = await Promise.all([
       prisma.salesOrder.findMany({
@@ -516,6 +603,7 @@ salesOrderRoutes.get(
         })
       : [];
 
+    const extras = await rowExtras(rows);
     res.json({
       ...listResult(
         rows.map((r) => {
@@ -531,7 +619,7 @@ salesOrderRoutes.get(
               margin = { amount: t.cost.totalMargin, pct: t.cost.totalMarginPct, costedLines: t.cost.costedLines, lineCount: t.cost.lineCount };
             }
           }
-          return { ...presentOrder(r as unknown as Record<string, unknown>, false), margin };
+          return { ...presentOrder(r as unknown as Record<string, unknown>, false), margin, ...extras.get(r.id) };
         }),
         total,
         q,
@@ -556,7 +644,8 @@ salesOrderRoutes.get(
     const q = listQuery(req);
     const team = await teamOf(me.id);
     const cross = q.filters.crossTeam === 'yes' ? await crossTeamOrderIds() : null;
-    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross);
+    const over = q.filters.overQuotation === 'yes' ? await overQuotationOrderIds() : null;
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross, over);
     const f = q.filters;
     const [rows, summary, currency, customer, owner, quotation] = await Promise.all([
       prisma.salesOrder.findMany({

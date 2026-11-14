@@ -1672,9 +1672,16 @@ function QuotationSalesOrders({
     };
   }, [quotationId, reloadToken]);
 
-  // Booked is what live orders carry; a cancelled order books nothing.
-  const booked = Math.round((rows ?? []).filter((r) => r.status !== 'CANCELLED').reduce((n, r) => n + r.total, 0) * 100) / 100;
+  // Booked is what live orders carry; a cancelled order books nothing. An
+  // order's lines that answer no line of this quotation are ADDITIONAL to it
+  // (2026-11-14: a follow-on booked by another salesperson, an add-on) — said
+  // apart, so the quotation's own figure is never overstated.
+  const live = (rows ?? []).filter((r) => r.status !== 'CANCELLED');
+  const sum = (pick: (r: SalesOrderRow) => number) => Math.round(live.reduce((n, r) => n + pick(r), 0) * 100) / 100;
+  const booked = sum((r) => r.fromQuotation ?? r.total);
+  const additional = sum((r) => r.additional ?? 0);
   const outstanding = Math.max(0, Math.round((quotationTotal - booked) * 100) / 100);
+  const over = Math.round((booked - quotationTotal) * 100) / 100;
 
   return (
     <div className="card sales-card-gap">
@@ -1688,14 +1695,26 @@ function QuotationSalesOrders({
             <dd className="mono">{formatMoney(quotationTotal, currency)}</dd>
           </dl>
           <dl>
-            <dt>Booked ({rows.filter((r) => r.status !== 'CANCELLED').length} order{rows.filter((r) => r.status !== 'CANCELLED').length === 1 ? '' : 's'})</dt>
+            <dt>Booked from this quotation ({live.length} order{live.length === 1 ? '' : 's'})</dt>
             <dd className="mono">{formatMoney(booked, currency)}</dd>
           </dl>
+          {additional > 0 && (
+            <dl>
+              <dt>Additional orders — not in the quotation</dt>
+              <dd className="mono">{formatMoney(additional, currency)}</dd>
+            </dl>
+          )}
           <dl>
             <dt>Outstanding</dt>
             <dd className="mono">{formatMoney(outstanding, currency)}</dd>
           </dl>
         </div>
+      )}
+      {over > 1 && (
+        <p className="alert warn" role="alert">
+          Its orders book {formatMoney(over, currency)} more than the quotation is worth. Check for an order entered twice — or cancel the one that should
+          not stand.
+        </p>
       )}
       <ErrorBox error={error} />
       {rows === null && !error ? (
@@ -1714,7 +1733,8 @@ function QuotationSalesOrders({
                 <th>SI / BS No.</th>
                 <th>DR No.</th>
                 <th className="num">Total</th>
-                <th>Prepared by</th>
+                <th>Booked by</th>
+                <th>Team</th>
               </tr>
             </thead>
             <tbody>
@@ -1732,8 +1752,14 @@ function QuotationSalesOrders({
                   <td>{r.poNumber ?? <span className="faint">—</span>}</td>
                   <td>{r.siNumber ?? <span className="faint">—</span>}</td>
                   <td>{r.drNumber ?? <span className="faint">—</span>}</td>
-                  <td className="num mono">{formatMoney(r.total, currency)}</td>
+                  <td className="num mono">
+                    {formatMoney(r.total, currency)}
+                    {r.status !== 'CANCELLED' && (r.additional ?? 0) > 0 && (
+                      <div className="faint">{(r.fromQuotation ?? 0) > 0 ? `${formatMoney(r.additional, currency)} additional` : 'additional'}</div>
+                    )}
+                  </td>
                   <td>{r.owner.name}</td>
+                  <td>{r.team?.code ?? <span className="faint">—</span>}</td>
                 </tr>
               ))}
             </tbody>

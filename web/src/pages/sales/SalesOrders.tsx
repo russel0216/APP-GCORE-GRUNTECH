@@ -130,6 +130,13 @@ export interface SalesOrderRow {
   quotation: { id: string; number: string; subject: string; currency?: string };
   owner: { id: string; name: string };
   createdAt: string;
+  /** The order's own team (2026-11-12). */
+  team?: { id: string; code: string; name: string } | null;
+  /** A follow-on order (4866.1): the main order it hangs on, and who booked that. */
+  followOnOf?: { number: string; id: string | null; owner: { id: string; name: string } | null } | null;
+  /** How much of the order books its quotation's own lines, and how much is additional to it. */
+  fromQuotation?: number;
+  additional?: number;
 }
 
 type ApprovalRoute = PreviewRoute;
@@ -229,7 +236,24 @@ export function SalesOrders() {
   }, [seesAll]);
 
   const columns: Column<SalesOrderListRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '120px', render: (r) => <span className="mono">{r.number}</span> },
+    {
+      key: 'number',
+      label: 'Number',
+      sortKey: 'number',
+      width: '150px',
+      render: (r) => (
+        <div>
+          <span className="mono">{r.number}</span>
+          {/* A follow-on (2026-11-14): which order it follows, and whose that is when it is somebody else's. */}
+          {r.followOnOf && (
+            <div className="faint">
+              follows {r.followOnOf.number}
+              {r.followOnOf.owner && r.followOnOf.owner.id !== r.owner.id ? ` · ${r.followOnOf.owner.name}` : ''}
+            </div>
+          )}
+        </div>
+      ),
+    },
     {
       key: 'quotation',
       label: 'Quotation',
@@ -279,6 +303,7 @@ export function SalesOrders() {
         ]
       : []),
     { key: 'owner', label: 'Booked by', render: (r) => r.owner.name },
+    { key: 'team', label: 'Team', render: (r) => (r.team ? <span title={r.team.name}>{r.team.code}</span> : <span className="faint">—</span>) },
     { key: 'orderDate', label: 'Date', sortKey: 'orderDate', render: (r) => formatDate(r.orderDate) },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', optional: true, render: (r) => formatDate(r.createdAt) },
     {
@@ -316,6 +341,15 @@ export function SalesOrders() {
     // The team the order counts under — its quotation's (the Sales Order report's rows open on it).
     { key: 'teamId', label: 'Team', options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }] },
     { key: 'booked', label: 'Booked', options: [{ value: 'yes', label: 'Not cancelled' }] },
+    {
+      key: 'followOn',
+      label: 'Follow-on',
+      options: [
+        { value: 'yes', label: 'Follow-on orders (.1, .2 …)' },
+        { value: 'no', label: 'Main orders only' },
+      ],
+    },
+    { key: 'overQuotation', label: 'Over its quotation', options: [{ value: 'yes', label: 'Booked for more than the quotation' }] },
     // The quotation's team is not the salesperson's own (2026-11-12): what crosses on the dashboard's Sankey.
     { key: 'crossTeam', label: 'Team differs', options: [{ value: 'yes', label: "Not the salesperson's team" }] },
     {

@@ -6390,6 +6390,25 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   (the quotation's team, or `none`) and `booked` filters; a largest order
   opens the order. verify-pipeline follows every link and asserts the list
   counts the row's orders.
+- **A follow-on order, and what is additional to the quotation**
+  (2026-11-14, the owner's question: 4866 booked by one salesperson, 4866.1
+  by another — "how can we reflect it without compromising the main
+  quotation"). Each order already keeps its own salesperson and team and
+  never rewrites its quotation; what was missing was saying so.
+  `rowExtras()` in routes/salesOrders.ts gives every list row its `team`,
+  `followOnOf` (`mainOrderNumber()`: `4866.1` → the order numbered `4866` on
+  the same quotation, with who booked it) and the split `fromQuotation` /
+  `additional` — the order's total divided as its priced lines divide
+  between those that book a quotation line (`quotationItemId` or
+  `bookedItems`) and those that answer none. The list shows "follows 4866 ·
+  <main order's salesperson>" under the number, a **Team** column, and two
+  filters: `followOn=yes|no` (a dot in the number) and `overQuotation=yes`
+  (`overQuotationOrderIds()`: the live orders of a quotation whose live
+  orders total more than its value revision, a peso of tolerance). The
+  quotation page's Sales orders card reads **Booked from this quotation**
+  (never the additions), **Additional orders — not in the quotation**, and
+  warns when the orders book more than the quotation is worth; its table
+  says who booked each and under which team. verify-sales pins it.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary

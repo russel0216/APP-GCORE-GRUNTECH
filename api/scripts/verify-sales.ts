@@ -4740,6 +4740,64 @@ async function main() {
     // the paper once sent, are changed by nobody else and by a new revision.
     const colleagueEdit = await http(otherToken, 'PATCH', `/quotations/${forId}`, { subject: `${TAG} not theirs` });
     check('a colleague cannot edit somebody else’s quotation', colleagueEdit.status === 403, `${colleagueEdit.status} ${colleagueEdit.text.slice(0, 100)}`);
+
+    // A follow-on order booked by another salesperson (2026-11-14, the owner's
+    // 4866 and 4866.1): the quotation stays as quoted, the addition is said apart.
+    {
+      const foQuote = await prisma.quotation.create({
+        data: {
+          number: `${TAG}-FOQ`,
+          customerId: customer.id,
+          ownerId: sales.id,
+          subject: `${TAG} follow-on mother`,
+          outcome: 'WON',
+          revisions: {
+            create: [
+              {
+                revision: 0,
+                status: 'APPROVED',
+                subtotal: d(1000),
+                total: d(1000),
+                items: { create: [{ title: 'Pump', description: '', quantity: d(1), unit: 'lot', unitPrice: d(1000), amount: d(1000), sortOrder: 0 }] },
+              },
+            ],
+          },
+        },
+        include: { revisions: { include: { items: true } } },
+      });
+      const foItem = foQuote.revisions[0].items[0];
+      const mainOrder = await prisma.salesOrder.create({
+        data: {
+          number: `${TAG}-FO`, quotationId: foQuote.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'ISSUED', subtotal: d(1000), total: d(1000),
+          lines: { create: [{ title: 'Pump', quantity: d(1), unit: 'lot', unitPrice: d(1000), amount: d(1000), quotationItemId: foItem.id }] },
+        },
+      });
+      const followOn = await prisma.salesOrder.create({
+        data: {
+          number: `${TAG}-FO.1`, quotationId: foQuote.id, customerId: customer.id, ownerId: other.id, orderDate: new Date(), status: 'ISSUED', subtotal: d(300), total: d(300),
+          lines: { create: [{ title: 'Extra service', quantity: d(1), unit: 'lot', unitPrice: d(300), amount: d(300) }] },
+        },
+      });
+      type FoRow = { id: string; number: string; fromQuotation: number; additional: number; followOnOf: { number: string; owner: { id: string } | null } | null };
+      const listOf = async (extra = '') => ((await http(managerToken, 'GET', `/sales-orders?scope=all&quotationId=${foQuote.id}${extra}`)).body.rows ?? []) as FoRow[];
+      const [all, onlyFollow, onlyMain, overOnes] = [await listOf(), await listOf('&followOn=yes'), await listOf('&followOn=no'), await listOf('&overQuotation=yes')];
+      const mainRow = all.find((r) => r.id === mainOrder.id);
+      const foRow = all.find((r) => r.id === followOn.id);
+      const badFollow = await http(managerToken, 'GET', '/sales-orders?scope=all&followOn=maybe');
+      const motherAfter = await prisma.quotation.findUniqueOrThrow({ where: { id: foQuote.id }, include: { revisions: true } });
+      check(
+        'a follow-on order names the main order and who booked it; what books the quotation and what is additional are said apart; the quotation is not changed',
+        !!mainRow && !!foRow && money(mainRow.fromQuotation, 1000) && money(mainRow.additional, 0) && mainRow.followOnOf === null &&
+          money(foRow.fromQuotation, 0) && money(foRow.additional, 300) && foRow.followOnOf?.number === `${TAG}-FO` && foRow.followOnOf.owner?.id === sales.id &&
+          motherAfter.ownerId === sales.id && money(Number(motherAfter.revisions[0].total), 1000),
+        JSON.stringify([mainRow, foRow]).slice(0, 300),
+      );
+      check(
+        'the list filters follow-on orders, main orders, and the orders of a quotation booked for more than it is worth',
+        onlyFollow.length === 1 && onlyFollow[0].id === followOn.id && onlyMain.length === 1 && onlyMain[0].id === mainOrder.id && overOnes.length === 2 && badFollow.status === 400,
+        `${onlyFollow.length} ${onlyMain.length} ${overOnes.length} ${badFollow.status}`,
+      );
+    }
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
     const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };
