@@ -680,6 +680,43 @@ async function httpCases(ctx: {
   const plant = await prisma.customer.create({
     data: { code: `${TAG}-C2`, name: `${TAG} Plant`, subIndustryId: manufacturingSub.id },
   });
+  // A customer filed twice is merged into the one kept (2026-11-14).
+  {
+    const keep = await prisma.customer.create({ data: { code: `${TAG}-C8`, name: `${TAG} Twin Co`, contacts: { create: [{ name: 'Ana Reyes', isPrimary: true }] } }, include: { contacts: true } });
+    const dup = await prisma.customer.create({
+      data: { code: `${TAG}-C9`, name: `${TAG} twin co`, address: `${TAG} street`, contacts: { create: [{ name: ' ana  reyes ', isPrimary: true }, { name: 'Ben Cruz' }] } },
+      include: { contacts: true },
+    });
+    const twinLead = await prisma.lead.create({
+      data: { number: `${TAG}-L-TWIN`, companyName: `${TAG} Twin Co`, customerId: dup.id, assignedToId: ctx.admin.id, createdById: ctx.admin.id },
+    });
+    const act = await prisma.salesActivity.create({
+      data: { subject: `${TAG} twin call`, type: 'CALL', startsAt: new Date(), assignedToId: ctx.admin.id, customerId: dup.id, contactId: dup.contacts[0].id },
+    });
+    const seen = await http(adminT, 'GET', `/customers/${dup.id}/duplicates`);
+    const seenRows = (seen.body.rows ?? []) as { id: string; holds: Record<string, number> }[];
+    const notAdmin = await http(viewerT, 'POST', `/customers/${dup.id}/merge-into`, { targetId: keep.id });
+    const self = await http(adminT, 'POST', `/customers/${dup.id}/merge-into`, { targetId: dup.id });
+    const merged = await http(adminT, 'POST', `/customers/${dup.id}/merge-into`, { targetId: keep.id });
+    const after = await prisma.customer.findUniqueOrThrow({ where: { id: keep.id }, include: { contacts: true } });
+    const gone = await prisma.customer.findUniqueOrThrow({ where: { id: dup.id }, include: { contacts: true } });
+    const leadNow = await prisma.lead.findUniqueOrThrow({ where: { id: twinLead.id } });
+    const actNow = await prisma.salesActivity.findUniqueOrThrow({ where: { id: act.id } });
+    check(
+      'a customer filed twice: the same-named one is offered with what it holds, and only the System Administrator merges — never into itself',
+      seen.status === 200 && seenRows.some((r) => r.id === keep.id) && (seen.body.holds as Record<string, number>).lead === 1 && notAdmin.status === 403 && self.status === 400,
+      `${seen.status} ${JSON.stringify(seen.body.holds)} ${notAdmin.status} ${self.status}`,
+    );
+    check(
+      'merging moves its documents, folds the contact the keeper already has, brings the other contact, fills the keeper’s blank address and switches the duplicate off',
+      merged.status === 200 && leadNow.customerId === keep.id && actNow.customerId === keep.id && actNow.contactId === keep.contacts[0].id &&
+        after.contacts.length === 2 && after.contacts.filter((c) => c.isPrimary).length === 1 && after.address === `${TAG} street` &&
+        gone.isActive === false && gone.contacts.length === 0 && /Merged into/.test(gone.notes ?? ''),
+      `${merged.status} ${JSON.stringify(merged.body).slice(0, 200)} ${after.contacts.length} ${gone.isActive}`,
+    );
+    await prisma.salesActivity.delete({ where: { id: act.id } });
+    await prisma.lead.delete({ where: { id: twinLead.id } });
+  }
   const legacy = await prisma.customer.create({ data: { code: `${TAG}-C3`, name: `${TAG} Legacy` } });
   // The in-use guard on a non-system sub-industry.
   await prisma.customer.update({ where: { id: plant.id }, data: { subIndustryId: extraSubId } });

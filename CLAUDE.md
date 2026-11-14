@@ -2438,6 +2438,22 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `select`, never `include`, and `verify-partners.ts` asserts the response bytes
   contain neither `standardCost` nor `lastCost`. Switching to `include`
   reintroduces the leak.
+- **A customer filed twice is MERGED, by the System Administrator**
+  (2026-11-14, the owner's report: the Sankey drew INTELLIGENT BEAUTY twice —
+  the SCORO import's record and one added by hand). Customer 360 › ⋯ › "Merge
+  into another customer…" opens a panel (never a dialog) fed by `GET
+  /customers/:id/duplicates` — the other customers of the SAME NAME (trimmed,
+  case-blind) with what each holds; "Keep this one" then `POST
+  /customers/:id/merge-into { targetId }` (`requireSuperAdmin`, both above
+  `/:id`): in ONE transaction every lead, costing, quotation, sales order,
+  project, invoice, collection, machine, visit, job order, service report,
+  CAD J.O., commission request and activity moves to the customer kept, with
+  the duplicate's contacts and sites — one of the same name as the keeper's
+  is folded into it, its documents repointed; the keeper's blanks (address,
+  TIN, team, sub-industry …) are filled from the duplicate; the duplicate is
+  switched OFF with a note, never deleted; one audit row on each. The keeper
+  must be active; never into itself. A new table pointing at Customer joins
+  `HOLDS` in routes/customers.ts. verify-partners pins it.
 - **Customer 360 and Supplier 360 are a window, never a way around.** Each
   collection loads only when the caller holds the list permission of the screen
   it comes from, and arrives as `[]` otherwise. Add a collection the same way —

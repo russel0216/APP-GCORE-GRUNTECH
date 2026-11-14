@@ -13,12 +13,12 @@ import {
   badRequest,
   idsFilter,
 } from '../http/kit';
-import { authenticate, require_, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { requireCustomerPicker } from '../shared/pickers';
 import { nextNumber, previewNext, setCounter } from '../shared/numbering';
-import { manilaDayEnd, manilaDayStart } from '../shared/day';
+import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
 import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf, filterDay } from '../shared/listPaper';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
@@ -313,6 +313,127 @@ customerRoutes.get(
 /** A customer code already on file — what the series steps over. */
 const codeTaken = (tx: Prisma.TransactionClient) => async (code: string) =>
   !!(await tx.customer.findUnique({ where: { code }, select: { id: true } }));
+
+/**
+ * A customer filed twice (2026-11-14, the owner's report: the Sankey drew
+ * INTELLIGENT BEAUTY twice — the SCORO import's record and one added by hand).
+ *
+ * `GET /customers/:id/duplicates` lists the other customers of the SAME NAME
+ * (trimmed, case-blind) with what each holds; `POST /customers/:id/merge-into
+ * { targetId }` moves EVERYTHING the duplicate holds onto the customer kept —
+ * leads, costings, quotations, sales orders, projects, invoices, collections,
+ * machines, visits, job orders, service reports, CAD J.O., commissions,
+ * activities — with its contacts and sites (one of the same name as the
+ * keeper's is folded into the keeper's, its documents repointed), fills the
+ * keeper's blanks from it, and switches the duplicate OFF with a note. One
+ * transaction, the System Administrator alone, audited on both. Nothing is
+ * deleted but a folded contact or site row.
+ */
+const HOLDS = ['lead', 'costing', 'quotation', 'salesOrder', 'job', 'invoice', 'payment', 'installedAsset', 'serviceVisit', 'jobOrder', 'serviceReport', 'cadJobOrder', 'commissionRequest', 'salesActivity'] as const;
+const HOLD_WORDS: Record<(typeof HOLDS)[number], string> = {
+  lead: 'lead', costing: 'costing', quotation: 'quotation', salesOrder: 'sales order', job: 'project', invoice: 'invoice', payment: 'collection',
+  installedAsset: 'machine', serviceVisit: 'service visit', jobOrder: 'job order', serviceReport: 'service report', cadJobOrder: 'CAD J.O.',
+  commissionRequest: 'commission request', salesActivity: 'activity',
+};
+const CONTACT_HOLDERS = ['quotation', 'salesOrder', 'salesActivity', 'job', 'jobOrder', 'customerSite'] as const;
+const SITE_HOLDERS = ['lead', 'costing', 'quotation', 'job', 'installedAsset', 'serviceVisit', 'jobOrder', 'serviceReport'] as const;
+const nameKey = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+type Counted = { count: (args: { where: Record<string, unknown> }) => Promise<number> };
+type Moved = { updateMany: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<{ count: number }> };
+
+async function holdings(customerId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
+  const out: Record<string, number> = {};
+  for (const m of HOLDS) out[m] = await (db[m] as unknown as Counted).count({ where: { customerId } });
+  return out;
+}
+
+customerRoutes.get(
+  '/:id/duplicates',
+  requireSuperAdmin,
+  handler(async (req, res) => {
+    const me = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true } });
+    if (!me) throw notFound('Customer not found');
+    const same = await prisma.customer.findMany({
+      where: { id: { not: me.id }, name: { equals: me.name.trim(), mode: 'insensitive' } },
+      select: { id: true, code: true, name: true, isActive: true, address: true, createdAt: true, createdBy: { select: { name: true } }, _count: { select: { contacts: true, sites: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({
+      holds: await holdings(me.id),
+      words: HOLD_WORDS,
+      rows: await Promise.all(same.map(async (c) => ({ ...c, contacts: c._count.contacts, sites: c._count.sites, holds: await holdings(c.id) }))),
+    });
+  }),
+);
+
+customerRoutes.post(
+  '/:id/merge-into',
+  requireSuperAdmin,
+  handler(async (req, res) => {
+    const { targetId } = parseBody(z.object({ targetId: z.string().min(1) }), req.body);
+    if (targetId === req.params.id) throw badRequest('Choose another customer to merge this one into');
+    const [dup, keep] = await Promise.all([
+      prisma.customer.findUnique({ where: { id: req.params.id }, include: { contacts: true, sites: true } }),
+      prisma.customer.findUnique({ where: { id: targetId }, include: { contacts: true, sites: true } }),
+    ]);
+    if (!dup) throw notFound('Customer not found');
+    if (!keep) throw notFound('The customer to keep was not found');
+    if (!keep.isActive) throw badRequest(`${keep.code} is inactive — merge into the customer that stays in use`);
+
+    const moved = await prisma.$transaction(
+      async (tx) => {
+        const counts: Record<string, number> = {};
+        // Contacts and sites first: one the keeper already has by name is folded into it.
+        const fold = async (rows: { id: string; name: string }[], kept: { id: string; name: string }[], holders: readonly string[], key: 'contactId' | 'siteId', table: 'customerContact' | 'customerSite') => {
+          let folded = 0;
+          for (const row of rows) {
+            const twin = kept.find((k) => nameKey(k.name) === nameKey(row.name));
+            if (!twin) continue;
+            for (const m of holders) await (tx[m as 'quotation'] as unknown as Moved).updateMany({ where: { [key]: row.id }, data: { [key]: twin.id } });
+            await (tx[table] as unknown as { delete: (a: { where: { id: string } }) => Promise<unknown> }).delete({ where: { id: row.id } });
+            folded += 1;
+          }
+          return folded;
+        };
+        // Sites before contacts: a site names its contact.
+        const sitesFolded = await fold(dup.sites, keep.sites, SITE_HOLDERS, 'siteId', 'customerSite');
+        const contactsFolded = await fold(dup.contacts, keep.contacts, CONTACT_HOLDERS, 'contactId', 'customerContact');
+        counts.site = (await tx.customerSite.updateMany({ where: { customerId: dup.id }, data: { customerId: keep.id } })).count;
+        // The keeper keeps its own primary contact.
+        counts.contact = (await tx.customerContact.updateMany({ where: { customerId: dup.id }, data: { customerId: keep.id, ...(keep.contacts.length ? { isPrimary: false } : {}) } })).count;
+        for (const m of HOLDS) counts[m] = (await (tx[m] as unknown as Moved).updateMany({ where: { customerId: dup.id }, data: { customerId: keep.id } })).count;
+
+        // The keeper's blanks, from the duplicate.
+        const fill: Prisma.CustomerUncheckedUpdateInput = {};
+        for (const k of ['legalName', 'tin', 'address', 'phone', 'email', 'website', 'paymentTerms'] as const) {
+          const mine = (keep as unknown as Record<string, unknown>)[k];
+          const theirs = (dup as unknown as Record<string, unknown>)[k];
+          if ((mine === null || mine === undefined || mine === '') && theirs) (fill as Record<string, unknown>)[k] = theirs;
+        }
+        if (!keep.industryId && dup.industryId) fill.industryId = dup.industryId;
+        if (!keep.subIndustryId && dup.subIndustryId) fill.subIndustryId = dup.subIndustryId;
+        const day = manilaDayKey(new Date());
+        fill.notes = [keep.notes, `Merged ${dup.code} into this customer on ${day}.`].filter(Boolean).join('\n');
+        await tx.customer.update({ where: { id: keep.id }, data: fill });
+        await tx.customer.update({
+          where: { id: dup.id },
+          data: { isActive: false, notes: [dup.notes, `Merged into ${keep.code} on ${day} — everything it held is there now.`].filter(Boolean).join('\n') },
+        });
+        return { counts, contactsFolded, sitesFolded };
+      },
+      { maxWait: 15_000, timeout: 60_000 },
+    );
+
+    const said = Object.entries(moved.counts)
+      .filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} ${k in HOLD_WORDS ? HOLD_WORDS[k as keyof typeof HOLD_WORDS] : k}${n === 1 ? '' : 's'}`)
+      .join(', ');
+    const summary = `Merged ${dup.code} ${dup.name} into ${keep.code}${said ? ` — moved ${said}` : ' — it held nothing'}`;
+    await audit({ entityType: 'customer', entityId: keep.id, action: 'UPDATED', summary, after: moved }, req);
+    await audit({ entityType: 'customer', entityId: dup.id, action: 'UPDATED', summary: `${summary}; switched off`, after: { mergedInto: keep.id } }, req);
+    res.json({ ok: true, targetId: keep.id, ...moved });
+  }),
+);
 
 customerRoutes.get(
   '/next-code',

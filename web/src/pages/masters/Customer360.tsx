@@ -205,9 +205,10 @@ const REPORT_KIND: Record<string, string> = {
 export function Customer360Page() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
+  const [merging, setMerging] = useState(false);
   // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
   const closeConfirm = confirm.close;
   useEffect(() => closeConfirm(), [id, closeConfirm]);
@@ -300,6 +301,12 @@ export function Customer360Page() {
             hint: 'Open invoices as of today and the last 90 days’ collections',
             onSelect: () => openPdf(`/api/invoices/statement/${customer.id}/pdf`, (e) => setError(e)),
           },
+          // A customer filed twice (2026-11-14): everything it holds moves onto the one kept.
+          me?.user.isSuperAdmin && {
+            label: 'Merge into another customer…',
+            hint: 'For a customer filed twice — its documents move to the one you keep',
+            onSelect: () => setMerging(true),
+          },
           mayEdit &&
             can('gops.customers.delete') && {
               label: 'Delete',
@@ -317,6 +324,18 @@ export function Customer360Page() {
       />
 
       <ErrorBox error={error} />
+
+      {merging && (
+        <MergePanel
+          customer={customer}
+          onCancel={() => setMerging(false)}
+          onMerged={(targetId, said) => {
+            setMerging(false);
+            toast('ok', said);
+            navigate(`/g-ops/customers/${targetId}`);
+          }}
+        />
+      )}
 
       <div className="stack">
         <div className="grid grid-2">
@@ -1049,5 +1068,122 @@ function SiteModal({
         label="Active"
       />
     </Modal>
+  );
+}
+
+/**
+ * "Merge into another customer…" — in the page, no dialog. Lists the other
+ * customers of the same name with what each holds; the one picked is KEPT and
+ * this one's documents, contacts and sites move onto it.
+ */
+interface Twin {
+  id: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+  address: string | null;
+  createdAt: string;
+  createdBy: { name: string } | null;
+  contacts: number;
+  sites: number;
+  holds: Record<string, number>;
+}
+
+function MergePanel({ customer, onCancel, onMerged }: { customer: Customer360; onCancel: () => void; onMerged: (targetId: string, said: string) => void }) {
+  const [data, setData] = useState<{ holds: Record<string, number>; words: Record<string, string>; rows: Twin[] } | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [sure, setSure] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get<{ holds: Record<string, number>; words: Record<string, string>; rows: Twin[] }>(`/customers/${customer.id}/duplicates`).then(setData).catch(setError);
+  }, [customer.id]);
+
+  const said = (holds: Record<string, number>, words: Record<string, string>) =>
+    Object.entries(holds)
+      .filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} ${words[k] ?? k}${n === 1 ? '' : 's'}`)
+      .join(', ') || 'nothing on file';
+
+  async function merge(target: Twin) {
+    setBusy(target.id);
+    setError(null);
+    try {
+      await api.post(`/customers/${customer.id}/merge-into`, { targetId: target.id });
+      onMerged(target.id, `${customer.code} merged into ${target.code}`);
+    } catch (err) {
+      setError(err);
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="merge-title">
+      <div className="card-head">
+        <h3 id="merge-title" className="card-title">
+          Merge {customer.code} into another customer
+        </h3>
+        <button type="button" className="btn btn-sm" onClick={onCancel} disabled={!!busy}>
+          Cancel
+        </button>
+      </div>
+      <p className="faint">
+        For a customer filed twice. Everything {customer.code} holds — {data ? said(data.holds, data.words) : '…'} — moves onto the customer you keep, with its
+        contacts and sites; {customer.code} is then switched off. It cannot be undone from here.
+      </p>
+      <ErrorBox error={error} />
+      {!data ? (
+        <Loading />
+      ) : data.rows.length === 0 ? (
+        <p className="faint">No other customer is filed under exactly this name. Rename one of the two to match first, then merge.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Keep</th>
+                <th>Added</th>
+                <th>It holds</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    <Link to={`/g-ops/customers/${t.id}`} className="mono">
+                      {t.code}
+                    </Link>
+                    <div>{t.name}</div>
+                    {!t.isActive && <div className="faint">Inactive</div>}
+                  </td>
+                  <td>
+                    {formatDate(t.createdAt)}
+                    {t.createdBy && <div className="faint">{t.createdBy.name}</div>}
+                  </td>
+                  <td>
+                    {said(t.holds, data.words)}
+                    <div className="faint">
+                      {t.contacts} contact{t.contacts === 1 ? '' : 's'} · {t.sites} site{t.sites === 1 ? '' : 's'}
+                    </div>
+                  </td>
+                  <td className="right">
+                    {sure === t.id ? (
+                      <button type="button" className="btn btn-sm btn-danger" disabled={!!busy || !t.isActive} onClick={() => void merge(t)}>
+                        {busy === t.id ? 'Merging…' : `Yes, merge into ${t.code}`}
+                      </button>
+                    ) : (
+                      <button type="button" className="btn btn-sm" disabled={!!busy || !t.isActive} onClick={() => setSure(t.id)}>
+                        Keep this one
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
