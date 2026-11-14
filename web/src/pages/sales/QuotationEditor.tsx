@@ -464,8 +464,12 @@ export function QuotationEditor() {
         // Every costing of the lead comes along (2026-11-14): a lead's costing
         // may be split between people, each their part, and the quotation is
         // built from them together.
+        // …added to whatever was already chosen, never in its place.
         costingId: h.costingId || l.costings[0]?.id || '',
-        otherCostingIds: h.costingId ? h.otherCostingIds : l.costings.slice(1).map((c) => c.id),
+        otherCostingIds: (() => {
+          const first = h.costingId || l.costings[0]?.id || '';
+          return [...new Set([...h.otherCostingIds, ...l.costings.map((c) => c.id)])].filter((cid) => cid && cid !== first);
+        })(),
       }));
       setWantContact(l.contactPerson);
       setPinnedCostings((list) => [...l.costings, ...list]);
@@ -1333,7 +1337,7 @@ export function QuotationEditor() {
               </Static>
             )}
             {editing ? (
-              <Static label="Inquiry">
+              <Static label="Lead">
                 {quotation!.lead ? (
                   <Link to={`/g-ops/leads/${quotation!.lead.id}`}>
                     {quotation!.lead.number} — {quotation!.lead.companyName}
@@ -1345,8 +1349,8 @@ export function QuotationEditor() {
             ) : (
               leadOptions.length > 0 && (
                 <Field
-                  label="Inquiry"
-                  hint="Keeps the lead's status in step with this quotation — and fills in the rest"
+                  label="Lead"
+                  hint="Keeps the lead's status in step with this quotation, fills in the rest, and adds every costing made for it"
                 >
                   <select
                     value={header.leadId}

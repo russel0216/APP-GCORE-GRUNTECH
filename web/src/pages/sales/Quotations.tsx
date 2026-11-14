@@ -1346,7 +1346,7 @@ export function QuotationDetail() {
                 <ProjectCell approved={approved} jobs={jobs} outcome={quotation.outcome} can={can} />
               </Detail>
               {quotation.lead && (
-                <Detail label="Inquiry">
+                <Detail label="Lead">
                   <Link to={`/g-ops/leads/${quotation.lead.id}`}>
                     {quotation.lead.number} — {quotation.lead.companyName}
                   </Link>
