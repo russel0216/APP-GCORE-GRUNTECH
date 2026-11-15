@@ -8935,6 +8935,17 @@ or approved).
   already sent (an imported quotation; the API's `sentDraft`). ⋯ "Closing
   date, contact and status…" still opens the details page for what is not
   on the customer's paper.
+- **Only an approved quotation is sent** (2026-11-16, closing the page's
+  hidden "Mark as sent" on the server): `assertOutcomeChange` refuses
+  SUBMITTED and NEGOTIATION (`MSG_APPROVE_BEFORE_SENT`) for a quotation with
+  no approved revision (`standsApproved` — an unchanged SCORO import counts)
+  coming from outside `SENT_OUTCOMES` (Submitted, Negotiation, Won) — from
+  Opportunity, On hold or Lost alike; one already with the customer moves
+  between those stages unasked. `allowedTargets` leaves both off such a
+  card, so the board offers neither; the page's Change status and the list's
+  mass action (`needsApprovalFirst()` in `Quotations.tsx`) say "is approved
+  before it is sent". A lost quotation may go back to Opportunity
+  (`NEXT_OUTCOMES.LOST`). verify-pipeline and verify-sales pin it.
 - **Words and cards**: "Inquiry" (the editor, the page, the lead's "Inquiry
   came via", its paper). A lead's costings ALL prefill the editor's Costing
   rows. The list's cards are whole pesos (`formatWholeMoney`), and every

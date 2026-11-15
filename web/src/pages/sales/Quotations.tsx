@@ -52,8 +52,17 @@ export const NEXT_OUTCOMES: Record<string, string[]> = {
   ON_HOLD: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'LOST'],
   // Reopening is allowed until a project exists (see the WON block).
   WON: ['NEGOTIATION'],
-  LOST: ['NEGOTIATION'],
+  LOST: ['OPEN', 'NEGOTIATION'],
 };
+
+/**
+ * "The customer has it" — entering one of these from outside needs an approved
+ * revision (2026-11-16; the server's `SENT_OUTCOMES` in shared/pipeline.ts).
+ */
+const SENT_OUTCOMES = ['SUBMITTED', 'NEGOTIATION', 'WON'];
+export function needsApprovalFirst(from: string, to: string, approved: boolean): boolean {
+  return !approved && (to === 'SUBMITTED' || to === 'NEGOTIATION') && !SENT_OUTCOMES.includes(from);
+}
 
 interface QuotationRow {
   id: string;
@@ -470,6 +479,7 @@ export function planMove(
     else if (!(NEXT_OUTCOMES[r.outcome] ?? []).includes(target)) {
       stay.push({ row: r, why: `${r.stageLabel ?? stageLabelFor(r.outcome)} cannot go to ${label}` });
     } else if (target === 'WON' && !r.hasApprovedRevision) stay.push({ row: r, why: 'needs an approved revision first' });
+    else if (needsApprovalFirst(r.outcome, target, r.hasApprovedRevision)) stay.push({ row: r, why: 'is approved before it is sent' });
     else go.push(r);
   }
   return { go, stay };
@@ -936,7 +946,9 @@ export function QuotationDetail() {
   // Lost is the ⋯ menu's "Mark lost" (red, asking why in the bar under the
   // header); the Change status select carries only the moves that destroy nothing.
   const canMarkLost = canMove && moves.some((m) => m.value === 'LOST');
-  const statusMoves = moves.filter((m) => m.value !== 'LOST');
+  const statusMoves = moves.filter(
+    (m) => m.value !== 'LOST' && !needsApprovalFirst(quotation!.outcome, m.value, !!approved || !!unchangedImport),
+  );
 
   function changeOutcome(next: string) {
     if (!next) return;

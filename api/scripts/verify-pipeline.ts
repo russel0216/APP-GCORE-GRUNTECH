@@ -727,6 +727,20 @@ async function main() {
       cardLeader?.canMove === true && cardChief?.canMove === true && cardManager?.canMove === false && cardManager?.allowedTargets.length === 0,
     JSON.stringify([cardLeader?.canMove, cardManager?.canMove, cardChief?.canMove]),
   );
+  // Only an approved quotation is sent (2026-11-16): the PATCH, and so the board
+  // and the list's mass action, refuse Submitted and Negotiation before approval.
+  const unsent = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
+  const unsentNeg = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'NEGOTIATION' });
+  const parked = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'ON_HOLD' });
+  const fromHold = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
+  const backOpen = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'OPEN' });
+  check(
+    'a quotation not yet approved is not sent — Submitted and Negotiation are refused, from Opportunity and from On hold alike, and its card offers neither',
+    unsent.status === 400 && /approv/i.test(errorOf(unsent)) && unsentNeg.status === 400 && parked.status === 200 && fromHold.status === 400 && backOpen.status === 200 &&
+      !cardLeader!.allowedTargets.includes('SUBMITTED') && !cardLeader!.allowedTargets.includes('NEGOTIATION') && cardLeader!.allowedTargets.includes('ON_HOLD'),
+    `${unsent.status} ${unsentNeg.status} ${parked.status} ${fromHold.status} ${backOpen.status} ${JSON.stringify(cardLeader?.allowedTargets)}`,
+  );
+  await prisma.quotationRevision.updateMany({ where: { quotationId: sellersOwn.id }, data: { status: 'APPROVED' } });
   const moved = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
   check("the team's leader may move a salesperson's quotation", moved.status === 200, `${moved.status} ${errorOf(moved)}`);
   const told = await prisma.notification.findFirst({

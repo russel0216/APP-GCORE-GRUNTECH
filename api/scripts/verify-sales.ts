@@ -156,6 +156,22 @@ const TAG = 'ZZSALES';
  * then those checks fall back to the author's id and no counter is touched.
  */
 const EDITOR_TOKEN = '9871';
+/**
+ * Runs a move with the quotation's draft revisions standing approved, then
+ * puts them back (2026-11-16: only an approved quotation is sent) — for the
+ * checks that are about the move, not about the approval before it.
+ */
+async function asApproved<T>(quotationId: string, run: () => Promise<T>): Promise<T> {
+  const drafts = await prisma.quotationRevision.findMany({ where: { quotationId, status: 'DRAFT' }, select: { id: true } });
+  const ids = drafts.map((d) => d.id);
+  await prisma.quotationRevision.updateMany({ where: { id: { in: ids } }, data: { status: 'APPROVED' } });
+  try {
+    return await run();
+  } finally {
+    await prisma.quotationRevision.updateMany({ where: { id: { in: ids } }, data: { status: 'DRAFT' } });
+  }
+}
+
 async function editorTokenIsSpare(): Promise<boolean> {
   const [users, employees] = await Promise.all([
     prisma.user.findMany({
@@ -3312,7 +3328,13 @@ async function main() {
         (beforeSend.body.stages as { outcome: string; current: boolean }[])?.[0]?.outcome === 'OPEN',
       JSON.stringify(beforeSend.body.stages),
     );
-    const sendIt = await http(salesToken, 'PATCH', `/quotations/${qid}`, { outcome: 'SUBMITTED' });
+    const sentTooSoon = await http(salesToken, 'PATCH', `/quotations/${qid}`, { outcome: 'SUBMITTED' });
+    check(
+      'a quotation not yet approved cannot be marked as sent — the server says to submit it for approval first',
+      sentTooSoon.status === 400 && /approv/i.test(String(sentTooSoon.body.error ?? '')),
+      `${sentTooSoon.status} ${sentTooSoon.text.slice(0, 120)}`,
+    );
+    const sendIt = await asApproved(qid, () => http(salesToken, 'PATCH', `/quotations/${qid}`, { outcome: 'SUBMITTED' }));
     check('"Mark as sent" moves it to Submitted', sendIt.status === 200, sendIt.text.slice(0, 200));
     const afterSend = await http(otherToken, 'GET', `/quotations/${qid}`);
     const moved = (afterSend.body.statusHistory ?? []) as { from: string; to: string; at: string; by: { name: string } | null }[];
@@ -5589,7 +5611,7 @@ async function main() {
       // A mass move is the PATCH per row: a legal move goes; Won without an
       // approved revision is refused with the reason the bar then shows.
       const openId = picked.find((p) => p.subject.endsWith('open'))!.id;
-      const movedOpen = await http(salesToken, 'PATCH', `/quotations/${openId}`, { outcome: 'SUBMITTED' });
+      const movedOpen = await asApproved(openId, () => http(salesToken, 'PATCH', `/quotations/${openId}`, { outcome: 'SUBMITTED' }));
       const wonRefused = await http(salesToken, 'PATCH', `/quotations/${openId}`, { outcome: 'WON' });
       check(
         'a mass move is the ordinary PATCH per row: a legal move goes, a refused one says why',

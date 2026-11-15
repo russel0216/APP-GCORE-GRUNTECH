@@ -167,6 +167,15 @@ export function columnFor(
 export const MSG_LOST_REASON = 'Say why it was lost — Sales Analytics reports the reasons';
 export const MSG_QUOTATION_FIRST = 'Raise a quotation from this lead first — a lead is won by its quotation';
 export const MSG_APPROVED_REVISION = 'Only an approved revision can be won — submit it for approval first';
+export const MSG_APPROVE_BEFORE_SENT = 'Only an approved quotation is sent to the customer — submit it for approval first';
+/**
+ * The outcomes that say "the customer has it" (2026-11-16, the owner's call:
+ * Mark as sent hidden until approved — and the board and the list's mass
+ * action must refuse alike). Entering one from outside needs an approved
+ * revision; moving between them does not ask again.
+ */
+export const SENT_OUTCOMES = ['SUBMITTED', 'NEGOTIATION', 'WON'];
+const SENT_COLUMNS = ['SUBMITTED', 'NEGOTIATION', 'WON'];
 export const MSG_NOT_A_LEAD = 'A quotation is not a lead; put its lead on hold from the lead';
 export const msgHasJob = (jobNumber: string | null | undefined) =>
   `This quotation became job ${jobNumber ?? ''} — cancel the job before reopening it`.replace('  ', ' ');
@@ -185,7 +194,9 @@ export function allowedTargets(card: {
     return [...LEAD_COLUMN_KEYS, 'LOST'].filter((k) => k !== card.column);
   }
   if (card.column === 'WON' && card.hasJob) return [];
-  const targets = [...QUOTATION_OPEN_KEYS];
+  // Not yet approved and not yet with the customer: it cannot be sent (2026-11-16).
+  const unsent = !card.hasApprovedRevision && !SENT_COLUMNS.includes(card.column);
+  const targets = QUOTATION_OPEN_KEYS.filter((k) => !unsent || !SENT_COLUMNS.includes(k));
   if (card.hasApprovedRevision) targets.push('WON');
   targets.push('LOST');
   // On hold (2026-10-13): an open quotation may be parked; a held one goes
@@ -225,6 +236,9 @@ export function assertOutcomeChange(
   if (before === next) return;
   if (before === 'WON' && ctx.hasJob) throw badRequest(msgHasJob(ctx.jobNumber));
   if (next === 'WON' && !ctx.hasApprovedRevision) throw badRequest(MSG_APPROVED_REVISION);
+  if ((next === 'SUBMITTED' || next === 'NEGOTIATION') && !ctx.hasApprovedRevision && !SENT_OUTCOMES.includes(before)) {
+    throw badRequest(MSG_APPROVE_BEFORE_SENT);
+  }
   if (next === 'LOST' && !(ctx.lostReason ?? '').trim()) throw badRequest(MSG_LOST_REASON);
 }
 

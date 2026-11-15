@@ -331,6 +331,8 @@ function refusalFor(card: Card, key: string): string | null {
   if (card.column === 'WON' && card.job) return `This quotation became ${card.job.number} — it stays won`;
   if (LEAD_KEYS.includes(key)) return 'A quotation is not a lead; put its lead on hold from the lead';
   if (key === 'WON') return 'Needs an approved revision — submit it for approval first';
+  if ((key === 'SUBMITTED' || key === 'NEGOTIATION') && !card.hasApprovedRevision)
+    return 'Only an approved quotation is sent to the customer — submit it for approval first';
   return 'Not a move this card can make';
 }
 
