@@ -1575,10 +1575,6 @@ async function quotationLinks(orderId: string) {
       for (const b of extras(l.bookedItems)) if (typeof b.quotationItemId === 'string' && typeof b.quantity === 'number') add(b.quotationItemId, b.quantity, o.number);
     }
   }
-  // This order's own summarised lines keep what they book.
-  for (const l of order.lines) {
-    for (const b of extras(l.bookedItems)) if (typeof b.quotationItemId === 'string' && typeof b.quantity === 'number') add(b.quotationItemId, b.quantity, order.number);
-  }
   const quotationLines = items.map((i) => ({
     id: i.id,
     title: i.title,
@@ -1594,18 +1590,27 @@ async function quotationLinks(orderId: string) {
   const room = new Map(quotationLines.map((q) => [q.id, q.left]));
   const known = new Set(items.map((i) => i.id));
   const read = order.lines.map((l) => {
-    const summarised = extras(l.bookedItems).length > 0;
     const linked = l.quotationItemId && known.has(l.quotationItemId) ? l.quotationItemId : null;
     if (linked) room.set(linked, (room.get(linked) ?? 0) - num(l.quantity));
-    return { l, summarised, linked };
+    // Several at once (SCORO billed 4776's seven lines as one): each for the quantity it was booked at.
+    const several: string[] = [];
+    if (!linked) {
+      for (const b of extras(l.bookedItems)) {
+        if (typeof b.quotationItemId === 'string' && typeof b.quantity === 'number' && known.has(b.quotationItemId)) {
+          several.push(b.quotationItemId);
+          room.set(b.quotationItemId, (room.get(b.quotationItemId) ?? 0) - b.quantity);
+        }
+      }
+    }
+    return { l, linked, books: linked ? [linked] : several };
   });
   return {
     order,
     known,
     quotationLines,
-    lines: read.map(({ l, summarised, linked }) => {
+    lines: read.map(({ l, linked, books }) => {
       let suggest: string | null = null;
-      if (!linked && !summarised) {
+      if (!books.length) {
         const fits = (q: { id: string }) => (room.get(q.id) ?? 0) + 0.0005 >= num(l.quantity);
         const pick =
           quotationLines.find((q) => fits(q) && tidy(l.title) !== '' && tidy(q.title) === tidy(l.title)) ??
@@ -1624,8 +1629,8 @@ async function quotationLinks(orderId: string) {
         unitPrice: num(l.unitPrice),
         amount: num(l.amount),
         quotationItemId: linked,
-        /** One lot that books the whole quotation — it stays as it is. */
-        summarised,
+        /** Every quotation line it books — one, or several billed as one line. */
+        books,
         suggest,
       };
     }),
@@ -1659,47 +1664,75 @@ salesOrderRoutes.put(
   handler(async (req, res) => {
     const { order } = await orderForEdit(req, req.params.id, false);
     if (order.status === 'CANCELLED') throw badRequest('A cancelled sales order books nothing — it stays as it was');
-    const body = parseBody(z.object({ links: z.record(z.string().min(1), z.string().min(1).nullable()) }), req.body);
+    // A line's answer: null or [] (additional), one quotation line, or SEVERAL —
+    // a line that bills several quotation lines as one books what is left of each.
+    const body = parseBody(
+      z.object({ links: z.record(z.string().min(1), z.union([z.string().min(1), z.array(z.string().min(1)).max(200)]).nullable()) }),
+      req.body,
+    );
     const view = await quotationLinks(order.id);
     if (view.order.quotation.directOrder) throw badRequest('This order has no quotation of its own — its lines already are its quotation');
     const byId = new Map(view.lines.map((l) => [l.id, l]));
-    const next = new Map(view.lines.map((l) => [l.id, l.quotationItemId]));
-    for (const [lineId, itemId] of Object.entries(body.links)) {
-      const line = byId.get(lineId);
-      if (!line) throw badRequest('One of those lines is not a priced line of this sales order');
-      if (line.summarised) throw badRequest(`"${line.title ?? line.description}" books the whole quotation in one lot — it is not linked line by line`);
-      if (itemId && !view.known.has(itemId)) throw badRequest(`That is not a line of quotation ${view.order.quotation.number} as it stands`);
-      next.set(lineId, itemId);
+    const next = new Map(view.lines.map((l) => [l.id, l.books]));
+    for (const [lineId, picked] of Object.entries(body.links)) {
+      if (!byId.has(lineId)) throw badRequest('One of those lines is not a priced line of this sales order');
+      const ids = [...new Set(picked == null ? [] : Array.isArray(picked) ? picked : [picked])];
+      if (ids.some((id) => !view.known.has(id))) throw badRequest(`That is not a line of quotation ${view.order.quotation.number} as it stands`);
+      next.set(lineId, ids);
     }
-    // Never more of a quotation line than the other orders leave.
-    const wanted = new Map<string, number>();
+    // One to one first: never more of a quotation line than the other orders leave.
+    const nameOf = (q: { title: string | null; description: string }) => q.title ?? q.description;
+    const taken = new Map<string, number>();
     for (const l of view.lines) {
-      const itemId = next.get(l.id);
-      if (itemId) wanted.set(itemId, (wanted.get(itemId) ?? 0) + l.quantity);
+      const ids = next.get(l.id) ?? [];
+      if (ids.length === 1) taken.set(ids[0], (taken.get(ids[0]) ?? 0) + l.quantity);
     }
     for (const q of view.quotationLines) {
-      const want = thou(wanted.get(q.id) ?? 0);
+      const want = thou(taken.get(q.id) ?? 0);
       if (want > q.left + 0.0005) {
         const who = q.bookedBy.length ? ` — ${q.bookedBy.join(', ')} ${q.bookedBy.length === 1 ? 'books' : 'book'} the rest` : '';
-        throw badRequest(`Only ${q.left} ${q.unit} of "${q.title ?? q.description}" is left to book, and these lines take ${want}${who}`);
+        throw badRequest(`Only ${q.left} ${q.unit} of "${nameOf(q)}" is left to book, and these lines take ${want}${who}`);
       }
     }
-    const changed = view.lines.filter((l) => (next.get(l.id) ?? null) !== l.quotationItemId);
+    // Then the lines that bill several as one: each takes what is left of every line ticked.
+    const several = new Map<string, { quotationItemId: string; quantity: number }[]>();
+    for (const l of view.lines) {
+      const ids = next.get(l.id) ?? [];
+      if (ids.length < 2) continue;
+      const parts: { quotationItemId: string; quantity: number }[] = [];
+      for (const id of ids) {
+        const q = view.quotationLines.find((x) => x.id === id)!;
+        const rest = thou(q.left - (taken.get(id) ?? 0));
+        if (rest < 0.0005) {
+          const who = q.bookedBy.length ? ` — ${q.bookedBy.join(', ')} ${q.bookedBy.length === 1 ? 'books' : 'book'} it` : ' — another line of this order books it';
+          throw badRequest(`Nothing of "${nameOf(q)}" is left to book${who}`);
+        }
+        parts.push({ quotationItemId: id, quantity: rest });
+        taken.set(id, (taken.get(id) ?? 0) + rest);
+      }
+      several.set(l.id, parts);
+    }
+    const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+    const changed = view.lines.filter((l) => !sameSet(next.get(l.id) ?? [], l.books));
     if (changed.length) {
       await prisma.$transaction(async (tx) => {
         for (const l of changed) {
-          await tx.salesOrderLine.update({ where: { id: l.id }, data: { quotationItemId: next.get(l.id) ?? null } });
+          const ids = next.get(l.id) ?? [];
+          await tx.salesOrderLine.update({
+            where: { id: l.id },
+            data: { quotationItemId: ids.length === 1 ? ids[0] : null, bookedItems: several.get(l.id) ?? Prisma.DbNull },
+          });
         }
       });
-      const linkedNow = view.lines.filter((l) => next.get(l.id)).length;
+      const linkedNow = view.lines.filter((l) => (next.get(l.id) ?? []).length).length;
       await audit(
         {
           entityType: 'sales_order',
           entityId: order.id,
           action: 'UPDATED',
-          summary: `${order.number} — ${linkedNow} of ${view.lines.length} lines book a line of quotation ${view.order.quotation.number} (${changed.length} changed)`,
-          before: { links: Object.fromEntries(changed.map((l) => [l.id, l.quotationItemId])) },
-          after: { links: Object.fromEntries(changed.map((l) => [l.id, next.get(l.id) ?? null])) },
+          summary: `${order.number} — ${linkedNow} of ${view.lines.length} lines book quotation ${view.order.quotation.number} (${changed.length} changed)`,
+          before: { links: Object.fromEntries(changed.map((l) => [l.id, l.books])) },
+          after: { links: Object.fromEntries(changed.map((l) => [l.id, next.get(l.id) ?? []])) },
         },
         req,
       );

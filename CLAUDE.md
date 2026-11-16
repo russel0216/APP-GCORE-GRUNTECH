@@ -6446,10 +6446,17 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   price and unit, with room), and the value revision's lines with what the
   OTHER live orders leave (`left`, `bookedBy`); the PUT takes `{ links: {
   <order line>: <quotation line> | null } }`, refuses more of a quotation
-  line than is left naming the orders that book the rest, a summarised line,
+  line than is left naming the orders that book the rest,
   another order's line and a line the quotation does not have, and writes
-  `quotationItemId` alone — no total, invoice or status moves — with one
-  audit row. The page's **Books of quotation …** card (`QuotationLinksCard`)
+  the link alone — no total, invoice or status moves — with one
+  audit row. **A line may book SEVERAL quotation lines** (the same day: SCORO
+  billed seven lines of 4776's quotation as one "Control valve" line): the
+  answer is then an array, written as the line's `bookedItems` — each
+  quotation line ticked for what is LEFT of it after the other orders and
+  this order's one-to-one links, refused where nothing is left — and
+  `quotationItemId` null; `books` on the GET lists every line an order line
+  books, and an empty array (or null) clears both. The card's cell is a
+  `TickPicker` — one tick or several. The page's **Books of quotation …** card (`QuotationLinksCard`)
   under the Lines says how many lines book and how many are additional;
   "Link lines…" opens the table in the card, suggestions preselected.
   verify-sales pins it.

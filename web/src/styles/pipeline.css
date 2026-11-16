@@ -453,6 +453,15 @@
   margin-bottom: var(--block-gap);
 }
 
+/* The link table's tick-box panel opens over the page, never cut off inside the table (2026-11-16). */
+.table-wrap.so-links-wrap {
+  overflow: visible;
+}
+
+.so-links-wrap .tick-picker {
+  min-width: 18rem;
+}
+
 .sales-col-num {
   width: 2.5rem;
 }

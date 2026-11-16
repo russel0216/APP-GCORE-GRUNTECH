@@ -4860,6 +4860,32 @@ async function main() {
         notALine.status === 400 && notAnItem.status === 400 && stranger.status === 403,
         `${notALine.status} ${notAnItem.status} ${stranger.status}`,
       );
+      // One order line that bills several quotation lines as one (4776's shape).
+      const valve = await prisma.quotationItem.create({
+        data: { revisionId: foQuote.revisions[0].id, title: 'Valve', description: '', quantity: d(2), unit: 'pc', unitPrice: d(100), amount: d(200), sortOrder: 1 },
+      });
+      const bothTaken = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: [foItem.id, valve.id] } });
+      await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: null } });
+      const both = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: [foItem.id, valve.id] } });
+      const bothAgain = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: [valve.id, foItem.id] } });
+      const severalLine = await prisma.salesOrderLine.findUniqueOrThrow({ where: { id: foLine } });
+      const severalParts = (severalLine.bookedItems ?? []) as { quotationItemId: string; quantity: number }[];
+      const severalView = (await linksOf(followOn.id)) as unknown as { lines: { books: string[] }[] };
+      const fromMain = await linksOf(mainOrder.id);
+      const severalRow = (await listOf()).find((r) => r.id === followOn.id);
+      const cleared = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: [] } });
+      const clearedLine = await prisma.salesOrderLine.findUniqueOrThrow({ where: { id: foLine } });
+      await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: foItem.id } });
+      await prisma.quotationItem.delete({ where: { id: valve.id } });
+      check(
+        'one order line books several quotation lines — what is left of each, refused while another order holds one; the quotation reads them booked, and clearing gives them back',
+        bothTaken.status === 400 && String(bothTaken.body.error ?? '').includes(`${TAG}-FO`) && both.status === 200 && both.body.changed === 1 && bothAgain.body.changed === 0 &&
+          severalLine.quotationItemId === null && severalParts.length === 2 &&
+          severalParts.find((p) => p.quotationItemId === foItem.id)?.quantity === 1 && severalParts.find((p) => p.quotationItemId === valve.id)?.quantity === 2 &&
+          severalView.lines[0]?.books.length === 2 && fromMain.quotationLines.every((q) => q.left === 0 && q.bookedBy.includes(`${TAG}-FO.1`)) &&
+          !!severalRow && money(severalRow.fromQuotation, 300) && cleared.status === 200 && clearedLine.bookedItems === null && clearedLine.quotationItemId === null,
+        `${bothTaken.status} ${both.status} ${both.text.slice(0, 80)} ${JSON.stringify(severalParts)} ${JSON.stringify(severalRow)}`.slice(0, 300),
+      );
     }
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);

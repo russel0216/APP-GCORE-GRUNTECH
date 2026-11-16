@@ -13,6 +13,7 @@ import { DataList, type BulkContext, type Column, type FilterDef } from '../../c
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
+import { TickPicker, type TickChoice } from '../../components/TickPicker';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
@@ -1330,7 +1331,8 @@ interface LinkLine {
   unitPrice: number;
   amount: number;
   quotationItemId: string | null;
-  summarised: boolean;
+  /** Every quotation line it books — one, or several billed as one line. */
+  books: string[];
   suggest: string | null;
 }
 interface LinkQuotationLine {
@@ -1362,7 +1364,7 @@ function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow
   const toast = useToast();
   const [view, setView] = useState<LinkView | null>(null);
   const [open, setOpen] = useState(false);
-  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [picks, setPicks] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const currency = order.quotation.currency;
@@ -1380,16 +1382,22 @@ function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow
   }, [load, reloadToken]);
 
   if (!view || view.quotation.standIn || view.lines.length === 0 || view.quotationLines.length === 0) return null;
-  const linkable = view.lines.filter((l) => !l.summarised);
-  if (linkable.length === 0) return null;
-  const linked = linkable.filter((l) => l.quotationItemId).length;
+  const linkable = view.lines;
+  const linked = linkable.filter((l) => l.books.length).length;
   const loose = linkable.length - linked;
   const nameOf = (q: { title: string | null; description: string }) => q.title || q.description;
-  const dirty = linkable.some((l) => (picks[l.id] ?? '') !== (l.quotationItemId ?? ''));
+  const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+  const dirty = linkable.some((l) => !sameSet(picks[l.id] ?? [], l.books));
+  // One tick links a line one to one; several, where one order line bills several quotation lines.
+  const choices: TickChoice[] = view.quotationLines.map((q) => ({
+    value: q.id,
+    label: nameOf(q),
+    hint: `${q.quantity} ${q.unit} × ${formatMoney(q.unitPrice, currency)}${q.bookedBy.length ? ` · ${q.left} left (${q.bookedBy.join(', ')})` : ''}`,
+  }));
 
   function start() {
     // Opens on what is linked, with the likely match offered for the rest.
-    setPicks(Object.fromEntries(linkable.map((l) => [l.id, l.quotationItemId ?? l.suggest ?? ''])));
+    setPicks(Object.fromEntries(linkable.map((l) => [l.id, l.books.length ? l.books : l.suggest ? [l.suggest] : []])));
     setError(null);
     setOpen(true);
   }
@@ -1398,7 +1406,7 @@ function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow
     setBusy(true);
     setError(null);
     try {
-      await api.put(`/sales-orders/${order.id}/quotation-links`, { links: Object.fromEntries(linkable.map((l) => [l.id, picks[l.id] || null])) });
+      await api.put(`/sales-orders/${order.id}/quotation-links`, { links: Object.fromEntries(linkable.map((l) => [l.id, picks[l.id] ?? []])) });
       toast('ok', 'Quotation lines linked');
       setOpen(false);
       await load();
@@ -1428,14 +1436,14 @@ function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow
       {open && (
         <>
           <ErrorBox error={error} />
-          <div className="table-wrap">
+          <div className="table-wrap so-links-wrap">
             <table className="data">
               <thead>
                 <tr>
                   <th>Order line</th>
                   <th className="right">Qty</th>
                   <th className="right">Unit price</th>
-                  <th>Books this quotation line</th>
+                  <th>Books of the quotation</th>
                 </tr>
               </thead>
               <tbody>
@@ -1449,20 +1457,17 @@ function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow
                     </td>
                     <td className="right mono">{formatMoney(l.unitPrice, currency)}</td>
                     <td>
-                      <select
-                        aria-label={`Quotation line booked by ${nameOf(l)}`}
-                        value={picks[l.id] ?? ''}
-                        onChange={(e) => setPicks((p) => ({ ...p, [l.id]: e.target.value }))}
-                      >
-                        <option value="">— additional, not in the quotation —</option>
-                        {view.quotationLines.map((q) => (
-                          <option key={q.id} value={q.id}>
-                            {nameOf(q)} · {q.quantity} {q.unit} × {formatMoney(q.unitPrice, currency)}
-                            {q.bookedBy.length ? ` · ${q.left} left (${q.bookedBy.join(', ')})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      {!l.quotationItemId && l.suggest && picks[l.id] === l.suggest && <div className="faint">Suggested — check it before saving</div>}
+                      <TickPicker
+                        choices={choices}
+                        value={picks[l.id] ?? []}
+                        onChange={(v) => setPicks((p) => ({ ...p, [l.id]: v }))}
+                        none="— additional, not in the quotation —"
+                        noun="quotation lines"
+                        label={`Quotation lines booked by ${nameOf(l)}`}
+                        search={choices.length > 8}
+                      />
+                      {!l.books.length && l.suggest && sameSet(picks[l.id] ?? [], [l.suggest]) && <div className="faint">Suggested — check it before saving</div>}
+                      {(picks[l.id] ?? []).length > 1 && <div className="faint">Billed as one line — it books what is left of each line ticked</div>}
                     </td>
                   </tr>
                 ))}
