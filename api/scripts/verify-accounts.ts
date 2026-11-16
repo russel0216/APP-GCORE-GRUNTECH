@@ -1016,6 +1016,33 @@ async function main() {
     await prisma.auditLog.deleteMany({ where: { entityId: dup.id } });
   }
 
+  // The sign-in email is changed by an administrator (2026-11-16): one login
+  // per address, case-blind, and a link sent to the old address stops working.
+  {
+    const typo = await makeUser(`${TAG} Typo`, `typo${DOMAIN}`, []);
+    const other = await makeUser(`${TAG} Other`, `other${DOMAIN}`, []);
+    await prisma.accountToken.create({
+      data: { userId: typo.id, purpose: 'INVITE', tokenHash: `${TAG}-email-token`, expiresAt: new Date(Date.now() + 86_400_000) },
+    });
+    const notAllowed = await http(nobodyT, 'PATCH', `/users/${typo.id}`, { email: `right${DOMAIN}` });
+    const taken = await http(adminT, 'PATCH', `/users/${typo.id}`, { email: `OTHER${DOMAIN}`.toUpperCase() });
+    const bad = await http(adminT, 'PATCH', `/users/${typo.id}`, { email: 'not-an-address' });
+    const tokenStill = await prisma.accountToken.findFirstOrThrow({ where: { userId: typo.id } });
+    const moved = await http(adminT, 'PATCH', `/users/${typo.id}`, { email: `  Right${DOMAIN} ` });
+    const same = await http(adminT, 'PATCH', `/users/${typo.id}`, { email: `right${DOMAIN}` });
+    const [after, tokenAfter, trail] = await Promise.all([
+      prisma.user.findUniqueOrThrow({ where: { id: typo.id }, select: { email: true } }),
+      prisma.accountToken.findFirstOrThrow({ where: { userId: typo.id } }),
+      prisma.auditLog.count({ where: { entityType: 'user', entityId: typo.id, summary: { contains: 'sign-in email' } } }),
+    ]);
+    check(
+      "An administrator changes a login's sign-in email: refused without the right, for an address another login has (naming whose) and for a bad one; stored lower-case, links sent to the old address stop working, audited once",
+      notAllowed.status === 403 && taken.status === 409 && String(taken.body.error).includes(`${TAG} Other`) && bad.status === 400 && tokenStill.usedAt === null &&
+        moved.status === 200 && same.status === 200 && after.email === `right${DOMAIN}` && tokenAfter.usedAt !== null && trail === 1 && other.id !== typo.id,
+      `${notAllowed.status} ${taken.status} ${taken.body.error ?? ''} ${bad.status} ${moved.status} ${moved.body.error ?? ''} ${same.status} ${after.email} trail ${trail}`,
+    );
+  }
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;

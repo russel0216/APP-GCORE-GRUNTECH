@@ -4893,6 +4893,16 @@ receive the tickets".
   "Reports to" kept), false when it is another employee's (the message
   names their number: open that record instead). `createLogin()` keeps
   its own check for any other caller.
+- **A login's sign-in email is changed by an administrator** (2026-11-16,
+  the owner's report: an address typed wrong at creation could not be put
+  right — the box read "it stays"). `PATCH /users/:id { email }`, Edit All
+  alone (`OWN_ONLY_REFUSED`), stored trimmed and lower-case; an address
+  another login has is a 409 naming whose (case-blind); every live
+  `AccountToken` of the login is spent in the same transaction — an
+  invitation or reset sent to the old mailbox stops working, so an invited
+  person is sent a new one; the password stays. The `user` UPDATED row says
+  "sign-in email old → new". The editor's Email box is open to Edit All and
+  sends the address only when it changed. verify-accounts pins it.
 - **A login is deleted only as a mistake's clean-up** (2026-11-13, the
   owner's call, for a duplicate): `DELETE /users/:id`, the System
   Administrator alone (`requireSuperAdmin`) — a login that is SWITCHED OFF,

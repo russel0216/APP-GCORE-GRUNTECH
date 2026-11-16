@@ -453,6 +453,8 @@ function UserEditor({
         // Written through to the employee record when there is one, as the
         // employee number and the Team are; the login follows the record.
         employeeNo: form.employeeNo || null,
+        // Sent only when changed: links sent to the old address stop working.
+        ...(detail && form.email.trim().toLowerCase() !== detail.email.toLowerCase() ? { email: form.email.trim() } : {}),
         ...details,
         supervisorId: form.supervisorId || null,
         roleIds: form.roleIds,
@@ -567,8 +569,19 @@ function UserEditor({
                 <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
               </Field>
             )}
-            <Field label="Email" hint="The address they sign in with — it stays">
-              <input type="email" value={form.email} disabled />
+            <Field
+              label="Email"
+              hint={
+                !full
+                  ? 'The address they sign in with — an administrator changes it'
+                  : detail && form.email.trim().toLowerCase() !== detail.email.toLowerCase()
+                    ? detail.invitePending
+                      ? 'They will sign in with this address. The invitation sent to the old one stops working — send a new one after saving.'
+                      : 'They will sign in with this address from now on; their password stays. Tell them — a link sent to the old address stops working.'
+                    : 'The address they sign in with'
+              }
+            >
+              <input type="email" value={form.email} disabled={!full} onChange={(e) => setForm({ ...form, email: e.target.value })} />
             </Field>
             <Field
               label="Employee number"

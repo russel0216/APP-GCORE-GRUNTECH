@@ -1,7 +1,7 @@
 # Graph Report - APP-GCORE GRUNTECH  (2026-11-16)
 
 ## Corpus Check
-- 487 files · ~1,684,961 words
+- 487 files · ~1,685,618 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 38 file(s) not represented in the graph (top: .css 30, (none) 2, .pptx 2)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4d39b048`
+- Built from commit: `c8b4c202`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -312,8 +312,8 @@
   web/src/pages/sales/Pipeline.tsx → api/scripts/verify-partners.ts
 - `main()` --indirect_call--> `columnName()`  [INFERRED]
   api/scripts/verify-foundation.ts → web/src/lib/spreadsheet.ts
-- `main()` --calls--> `upperText()`  [EXTRACTED]
-  api/scripts/verify-sales.ts → web/src/lib/caps.ts
+- `main()` --calls--> `preferredFrom()`  [EXTRACTED]
+  api/scripts/verify-foundation.ts → web/src/lib/prLines.ts
 
 ## Import Cycles
 - 2-file cycle: `web/src/pages/sales/Quotations.tsx -> web/src/pages/sales/SalesOrders.tsx -> web/src/pages/sales/Quotations.tsx`
@@ -1319,16 +1319,16 @@ Nodes (3): Employee number list, ROLE sheet people-to-roles, ROLE REV1 role hier
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `prisma` connect `masters.ts` to `verify-hr.ts / main() / liveness.ts`, `seed.ts`, `verify-marketing.ts`, `routes/hr.ts / myEmployee() / checkLeave()`, `sales.ts / pipelineStages.ts / activityTypes.ts`, `scoroQuotes.ts / scoroInvoices.ts / seed-sample-`, `shared/insights.ts`, `numbering.ts`, `verify-partners.ts`, `projectBudget.ts`, `receiptCost.ts`, `routes/aftermarket.ts`, `imports.ts`, `paper.ts`, `salesOrders.ts`, `routes/academy.ts`, `seed-sample-quotation.ts`, `routes/finance.ts`, `idsFilter`, `inventory.ts`, `verify-delivery.ts`, `verify-calendar.ts`, `verify-accounts.ts`, `verify-evaluations.ts / manilaDate() / main()`, `odoo.ts / odooMigration.ts / tidy()`, `routes/peopleFlow.ts / shared/peopleFlow.ts / ad`, `index.ts`, `registry.ts`, `activities.ts`, `verify-foundation.ts`, `shared/marketing.ts`, `verify-chain.ts`, `quotation.ts`, `badRequest`, `verify-academy.ts`, `verify-finance.ts`, `pdfDesign.ts`, `seed-sample-quotation.ts`, `verify-sales.ts`, `finReports.ts`, `progress.ts`, `verify-aftermarket.ts / main() / shared/aftermar`, `pdf.ts`, `warehouse.ts`, `finAccess.ts`, `salesReports.ts`, `manilaDayKey`, `shared/finance.ts`, `verify-cad.ts`, `env.ts`, `clearances.ts`, `pullouts.ts`, `can`, `jobOrders.ts`, `shared/hr.ts`, `daysBetween`, `budgetRequestSources.ts`, `@prisma/client`, `verify-meetings.ts`, `import-settings.ts / ref_node_path / export-sett`, `accounts.ts`, `routes/hiring.ts`, `shared/holidays.ts`, `verify-pipeline.ts`, `verify-costing.ts`, `exhibitionVisitors.ts`, `myRecords.ts / records.ts / HrSettings`, `orgChart.ts`?**
-  _High betweenness centrality (0.063) - this node is a cross-community bridge._
+  _High betweenness centrality (0.055) - this node is a cross-community bridge._
 - **What connects `RFC-4180`, `RFC-6266`, `RFC-2047` to the rest of the system?**
   _121 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `verify-hr.ts / main() / liveness.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.05502392344497608 - nodes in this community are weakly interconnected._
 - **Why does `main()` connect `verify-foundation.ts` to `verify-hr.ts / main() / liveness.ts`, `seed.ts`, `numbering.ts`, `verify-partners.ts`, `routes/aftermarket.ts`, `PdfTemplates.tsx`, `salesOrders.ts`, `routes/finance.ts`, `idsFilter`, `registry.ts`, `printTickets.ts`, `PurchaseRequisitionEditor.tsx`, `badRequest`, `pdfDesign.ts`, `verify-aftermarket.ts / main() / shared/aftermar`, `pdf.ts`, `env.ts`, `masters.ts`, `clearances.ts`, `can`, `jobOrders.ts`, `useAuth`, `Renderer`, `TextSettings() / Inspector() / NumberField()`, `FileViewer.tsx / spreadsheet.ts / spreadsheetRea`, `PurchaseRequisitionEditor.tsx`, `FlowPicture.tsx`, `orgChart.ts`?**
-  _High betweenness centrality (0.039) - this node is a cross-community bridge._
+  _High betweenness centrality (0.040) - this node is a cross-community bridge._
 - **Should `seed.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.04095172729352551 - nodes in this community are weakly interconnected._
 - **Why does `DataList()` connect `DataList` to `InvoiceDetail`, `NumberInput.tsx`, `Partners.tsx`, `Items.tsx`, `Warehouse.tsx`, `ApprovalStepper.tsx`, `Customer360.tsx`, `Loading`, `Leads.tsx`, `Assets.tsx`, `Costings.tsx`, `RecordHeader`, `HelpTickets.tsx`, `verify-foundation.ts`, `Receivables.tsx`, `JobOrders.tsx`, `ProjectWorkspace.tsx`, `Canvass.tsx`, `formatMoney`, `Leave.tsx`, `Empty`, `Commissions.tsx`, `qs`, `DocumentApproval`, `BudgetRequests.tsx`, `AttendanceCorrections.tsx`, `Payables.tsx`, `Hiring.tsx`, `Outgoing.tsx / StockIssueDetail() / IssueRecord`, `react`, `ServiceDocuments.tsx / ServiceDocumentModal() / `, `Checkbox`, `Sessions.tsx`, `DataList.tsx`, `Contracts.tsx`, `NumberInput.tsx`, `Memos.tsx`, `Evaluations.tsx`, `useAuth`, `SalesOrders.tsx`, `Marketing.tsx / BarList() / Marketing()`, `Rfq.tsx`, `api.ts`, `Employees.tsx`, `formatDate`, `ErrorBox`, `PeopleFlow.tsx`, `Meetings.tsx`, `Courses.tsx`, `Quotations.tsx`, `Clock.tsx`, `BorrowSlips.tsx`, `Schedule.tsx`?**
-  _High betweenness centrality (0.037) - this node is a cross-community bridge._
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
 - **Should `sales.ts / pipelineStages.ts / activityTypes.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.03091655266757866 - nodes in this community are weakly interconnected._

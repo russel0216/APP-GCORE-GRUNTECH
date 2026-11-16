@@ -602,8 +602,14 @@ userRoutes.post(
 
 // ── Update ───────────────────────────────────────────────────────────────────
 
-/** What Modify may change. The email is the account's identity and stays; a login is only ever made with its employee. */
+/** What Modify may change; a login is only ever made with its employee. */
 const updateSchema = z.object({
+  /**
+   * The address they sign in with (2026-11-16, the owner's report: a login made
+   * with a mistyped address could not be put right). Edit All only; one login
+   * per address, case-blind; links already sent to the old address stop working.
+   */
+  email: z.string().trim().toLowerCase().email('Enter a valid email address').max(200).optional(),
   name: z.string().min(2, 'Name is required').optional(),
   /**
    * A login linked to an employee: the name as the employee record keeps it
@@ -649,6 +655,7 @@ const OWN_ONLY_REFUSED: Record<string, string> = {
   teamId: 'the team',
   isActive: 'Active',
   employeeNo: 'the employee number',
+  email: 'the sign-in email',
   password: 'the password (use My Account)',
 };
 
@@ -788,6 +795,20 @@ userRoutes.patch(
     }
 
     const data: Prisma.UserUpdateInput = {};
+    // The sign-in address: one login each, case-blind — a 409 naming whose it is.
+    const emailChanged = body.email !== undefined && body.email !== before.email.trim().toLowerCase();
+    if (emailChanged) {
+      const holder = await prisma.user.findFirst({
+        where: { email: { equals: body.email!, mode: 'insensitive' }, id: { not: req.params.id } },
+        select: { name: true, isActive: true },
+      });
+      if (holder) {
+        throw conflict(`${body.email} is already ${holder.name}'s sign-in address${holder.isActive ? '' : ' (that login is switched off)'}`, [
+          { field: 'email', message: 'Already in use' },
+        ]);
+      }
+      data.email = body.email;
+    }
     // A linked login's name, number, position and phone are the
     // employee's (written below, mirrored back by `syncLoginFromEmployee`).
     if (body.name !== undefined && !owner) data.name = body.name;
@@ -810,8 +831,9 @@ userRoutes.patch(
     // transaction's callback and would narrow a plain variable to null.
     const moved: { counter: CounterMove | null } = { counter: null };
     const updated = await prisma.$transaction(async (tx) => {
-      // Any link still out stops working once a password is set by hand.
-      if (body.password) {
+      // Any link still out stops working once a password is set by hand — and
+      // once the address changes: it was sent to a mailbox that is not theirs.
+      if (body.password || emailChanged) {
         await tx.accountToken.updateMany({ where: { userId: req.params.id, usedAt: null }, data: { usedAt: new Date() } });
       }
       if (body.roleIds) {
@@ -900,7 +922,7 @@ userRoutes.patch(
         entityType: 'user',
         entityId: updated.id,
         action: 'UPDATED',
-        summary: `Updated user ${updated.email}`,
+        summary: emailChanged ? `Updated user ${updated.email} — sign-in email ${before.email} → ${updated.email}` : `Updated user ${updated.email}`,
         before: redact(before as Record<string, unknown>),
         after: redact(updated as Record<string, unknown>),
       },
