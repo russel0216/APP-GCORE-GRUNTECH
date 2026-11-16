@@ -6434,6 +6434,25 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   (never the additions), **Additional orders — not in the quotation**, and
   warns when the orders book more than the quotation is worth; its table
   says who booked each and under which team. verify-sales pins it.
+- **An order's lines are linked to their quotation lines by hand**
+  (2026-11-16, the owner's call, after 4866 and 4776: SCORO-imported orders
+  whose lines never matched their quotation's — a price twenty centavos off —
+  read as "additional", the quotation as not booked, and the salesperson
+  booked it a second time). `GET` / `PUT /sales-orders/:id/quotation-links`
+  (`quotationLinks()` in routes/salesOrders.ts; Edit Own + `canEditRecord`,
+  any status but cancelled; never a stand-in's order): the GET sends the
+  order's priced lines with what each books and a `suggest` (the quotation
+  line of the same product, capitals and spaces aside, else of the same unit
+  price and unit, with room), and the value revision's lines with what the
+  OTHER live orders leave (`left`, `bookedBy`); the PUT takes `{ links: {
+  <order line>: <quotation line> | null } }`, refuses more of a quotation
+  line than is left naming the orders that book the rest, a summarised line,
+  another order's line and a line the quotation does not have, and writes
+  `quotationItemId` alone — no total, invoice or status moves — with one
+  audit row. The page's **Books of quotation …** card (`QuotationLinksCard`)
+  under the Lines says how many lines book and how many are additional;
+  "Link lines…" opens the table in the card, suggestions preselected.
+  verify-sales pins it.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary

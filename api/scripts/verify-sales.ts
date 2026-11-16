@@ -4819,6 +4819,47 @@ async function main() {
         onlyFollow.length === 1 && onlyFollow[0].id === followOn.id && onlyMain.length === 1 && onlyMain[0].id === mainOrder.id && overOnes.length === 2 && badFollow.status === 400,
         `${onlyFollow.length} ${onlyMain.length} ${overOnes.length} ${badFollow.status}`,
       );
+
+      // Which quotation line each order line books (2026-11-16): linked by hand
+      // where the lines never matched, no money moved.
+      type LinkView = { quotation: { number: string }; lines: { id: string; quotationItemId: string | null; suggest: string | null }[]; quotationLines: { id: string; left: number; bookedBy: string[] }[] };
+      const linksOf = async (orderId: string) => (await http(managerToken, 'GET', `/sales-orders/${orderId}/quotation-links`)).body as unknown as LinkView;
+      const mainLine = (await prisma.salesOrderLine.findFirstOrThrow({ where: { orderId: mainOrder.id } })).id;
+      const foLine = (await prisma.salesOrderLine.findFirstOrThrow({ where: { orderId: followOn.id } })).id;
+      const linked0 = await linksOf(mainOrder.id);
+      const unlink = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: null } });
+      const loose = await linksOf(mainOrder.id);
+      const looseRow = (await listOf()).find((r) => r.id === mainOrder.id);
+      check(
+        'an order line is unlinked from its quotation line and reads as additional; the line of the same product is then suggested',
+        linked0.lines[0]?.quotationItemId === foItem.id && unlink.status === 200 && unlink.body.changed === 1 &&
+          loose.lines[0]?.quotationItemId === null && loose.lines[0]?.suggest === foItem.id && !!looseRow && money(looseRow.fromQuotation, 0) && money(looseRow.additional, 1000),
+        `${unlink.status} ${JSON.stringify(loose.lines)} ${JSON.stringify(looseRow)}`.slice(0, 300),
+      );
+      const takeIt = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: foItem.id } });
+      const tooMuch = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: foItem.id } });
+      const seenFromMain = await linksOf(mainOrder.id);
+      const giveBack = await http(managerToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: null } });
+      const relink = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: foItem.id } });
+      const again = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: foItem.id } });
+      const notALine = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [foLine]: foItem.id } });
+      const notAnItem = await http(managerToken, 'PUT', `/sales-orders/${mainOrder.id}/quotation-links`, { links: { [mainLine]: 'nope' } });
+      const stranger = await http(salesToken, 'PUT', `/sales-orders/${followOn.id}/quotation-links`, { links: { [foLine]: null } });
+      const backRow = (await listOf()).find((r) => r.id === mainOrder.id);
+      const totalsKept = await prisma.salesOrder.findUniqueOrThrow({ where: { id: mainOrder.id } });
+      check(
+        'a quotation line another order books in full is refused, naming that order; given back, it is linked again — the order total untouched, and a second save changes nothing',
+        takeIt.status === 200 && tooMuch.status === 400 && String(tooMuch.body.error ?? '').includes(`${TAG}-FO.1`) &&
+          seenFromMain.quotationLines[0]?.left === 0 && seenFromMain.quotationLines[0]?.bookedBy.includes(`${TAG}-FO.1`) &&
+          giveBack.status === 200 && relink.status === 200 && relink.body.changed === 1 && again.status === 200 && again.body.changed === 0 &&
+          !!backRow && money(backRow.fromQuotation, 1000) && money(Number(totalsKept.total), 1000),
+        `${takeIt.status} ${tooMuch.status} ${tooMuch.text.slice(0, 120)} ${giveBack.status} ${relink.status} ${again.text.slice(0, 40)}`,
+      );
+      check(
+        "another order's line, a line the quotation does not have, and somebody who may not edit the order are refused",
+        notALine.status === 400 && notAnItem.status === 400 && stranger.status === 403,
+        `${notALine.status} ${notAnItem.status} ${stranger.status}`,
+      );
     }
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);

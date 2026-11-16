@@ -1523,6 +1523,191 @@ salesOrderRoutes.post(
   }),
 );
 
+// ── Which quotation line each order line books ───────────────────────────────
+
+/**
+ * An order's priced lines against the lines of its quotation's value revision
+ * (2026-11-16, the owner's call, after 4866 and 4776: orders whose lines never
+ * matched their quotation's — a price a few centavos off — left the quotation
+ * reading "not booked", and the salesperson booked it a second time). What is
+ * LEFT of each quotation line leaves this order's own links out, so the page
+ * can re-pick freely; `suggest` is the line of the same product (capitals and
+ * spaces aside) with room, else the one of the same unit price.
+ */
+async function quotationLinks(orderId: string) {
+  const order = await prisma.salesOrder.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      ownerId: true,
+      quotationId: true,
+      lines: {
+        where: { isHeading: false },
+        orderBy: { sortOrder: 'asc' },
+        select: { id: true, title: true, description: true, quantity: true, unit: true, unitPrice: true, amount: true, quotationItemId: true, bookedItems: true },
+      },
+      quotation: {
+        select: { id: true, number: true, directOrder: true, revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
+      },
+    },
+  });
+  if (!order) throw notFound('Sales order not found');
+  const revision = valueRevision(order.quotation.revisions);
+  const items = (revision?.items ?? []).filter((i) => !i.isHeading);
+  // What the OTHER live orders book of each quotation line, and which orders.
+  const others = await prisma.salesOrder.findMany({
+    where: { quotationId: order.quotationId, status: { not: 'CANCELLED' }, id: { not: order.id } },
+    select: { number: true, lines: { select: { quotationItemId: true, quantity: true, bookedItems: true } } },
+  });
+  const booked = new Map<string, number>();
+  const bookedBy = new Map<string, Set<string>>();
+  const add = (itemId: string, qty: number, by: string) => {
+    booked.set(itemId, (booked.get(itemId) ?? 0) + qty);
+    bookedBy.set(itemId, (bookedBy.get(itemId) ?? new Set<string>()).add(by));
+  };
+  type Extra = { quotationItemId?: unknown; quantity?: unknown };
+  const extras = (v: unknown) => (Array.isArray(v) ? (v as Extra[]) : []);
+  for (const o of others) {
+    for (const l of o.lines) {
+      if (l.quotationItemId) add(l.quotationItemId, num(l.quantity), o.number);
+      for (const b of extras(l.bookedItems)) if (typeof b.quotationItemId === 'string' && typeof b.quantity === 'number') add(b.quotationItemId, b.quantity, o.number);
+    }
+  }
+  // This order's own summarised lines keep what they book.
+  for (const l of order.lines) {
+    for (const b of extras(l.bookedItems)) if (typeof b.quotationItemId === 'string' && typeof b.quantity === 'number') add(b.quotationItemId, b.quantity, order.number);
+  }
+  const quotationLines = items.map((i) => ({
+    id: i.id,
+    title: i.title,
+    description: i.description,
+    quantity: num(i.quantity),
+    unit: i.unit,
+    unitPrice: num(i.unitPrice),
+    bookedElsewhere: thou(booked.get(i.id) ?? 0),
+    bookedBy: [...(bookedBy.get(i.id) ?? [])].filter((n) => n !== order.number),
+    left: thou(Math.max(0, num(i.quantity) - (booked.get(i.id) ?? 0))),
+  }));
+  const tidy = (v: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const room = new Map(quotationLines.map((q) => [q.id, q.left]));
+  const known = new Set(items.map((i) => i.id));
+  const read = order.lines.map((l) => {
+    const summarised = extras(l.bookedItems).length > 0;
+    const linked = l.quotationItemId && known.has(l.quotationItemId) ? l.quotationItemId : null;
+    if (linked) room.set(linked, (room.get(linked) ?? 0) - num(l.quantity));
+    return { l, summarised, linked };
+  });
+  return {
+    order,
+    known,
+    quotationLines,
+    lines: read.map(({ l, summarised, linked }) => {
+      let suggest: string | null = null;
+      if (!linked && !summarised) {
+        const fits = (q: { id: string }) => (room.get(q.id) ?? 0) + 0.0005 >= num(l.quantity);
+        const pick =
+          quotationLines.find((q) => fits(q) && tidy(l.title) !== '' && tidy(q.title) === tidy(l.title)) ??
+          quotationLines.find((q) => fits(q) && Math.abs(q.unitPrice - num(l.unitPrice)) < 0.005 && q.unit === l.unit);
+        if (pick) {
+          suggest = pick.id;
+          room.set(pick.id, (room.get(pick.id) ?? 0) - num(l.quantity));
+        }
+      }
+      return {
+        id: l.id,
+        title: l.title,
+        description: l.description,
+        quantity: num(l.quantity),
+        unit: l.unit,
+        unitPrice: num(l.unitPrice),
+        amount: num(l.amount),
+        quotationItemId: linked,
+        /** One lot that books the whole quotation — it stays as it is. */
+        summarised,
+        suggest,
+      };
+    }),
+  };
+}
+
+salesOrderRoutes.get(
+  '/:id/quotation-links',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id, false);
+    const view = await quotationLinks(order.id);
+    res.json({
+      quotation: { id: view.order.quotation.id, number: view.order.quotation.number, standIn: view.order.quotation.directOrder },
+      lines: view.lines,
+      quotationLines: view.quotationLines,
+    });
+  }),
+);
+
+/**
+ * Says which quotation line each order line books — null for a line that is
+ * additional to the quotation. No money moves: the order, its invoices and its
+ * totals are untouched; only what the quotation reads as booked. Whoever may
+ * edit the order, at any stage but cancelled; never more of a quotation line
+ * than the other orders leave.
+ */
+salesOrderRoutes.put(
+  '/:id/quotation-links',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id, false);
+    if (order.status === 'CANCELLED') throw badRequest('A cancelled sales order books nothing — it stays as it was');
+    const body = parseBody(z.object({ links: z.record(z.string().min(1), z.string().min(1).nullable()) }), req.body);
+    const view = await quotationLinks(order.id);
+    if (view.order.quotation.directOrder) throw badRequest('This order has no quotation of its own — its lines already are its quotation');
+    const byId = new Map(view.lines.map((l) => [l.id, l]));
+    const next = new Map(view.lines.map((l) => [l.id, l.quotationItemId]));
+    for (const [lineId, itemId] of Object.entries(body.links)) {
+      const line = byId.get(lineId);
+      if (!line) throw badRequest('One of those lines is not a priced line of this sales order');
+      if (line.summarised) throw badRequest(`"${line.title ?? line.description}" books the whole quotation in one lot — it is not linked line by line`);
+      if (itemId && !view.known.has(itemId)) throw badRequest(`That is not a line of quotation ${view.order.quotation.number} as it stands`);
+      next.set(lineId, itemId);
+    }
+    // Never more of a quotation line than the other orders leave.
+    const wanted = new Map<string, number>();
+    for (const l of view.lines) {
+      const itemId = next.get(l.id);
+      if (itemId) wanted.set(itemId, (wanted.get(itemId) ?? 0) + l.quantity);
+    }
+    for (const q of view.quotationLines) {
+      const want = thou(wanted.get(q.id) ?? 0);
+      if (want > q.left + 0.0005) {
+        const who = q.bookedBy.length ? ` — ${q.bookedBy.join(', ')} ${q.bookedBy.length === 1 ? 'books' : 'book'} the rest` : '';
+        throw badRequest(`Only ${q.left} ${q.unit} of "${q.title ?? q.description}" is left to book, and these lines take ${want}${who}`);
+      }
+    }
+    const changed = view.lines.filter((l) => (next.get(l.id) ?? null) !== l.quotationItemId);
+    if (changed.length) {
+      await prisma.$transaction(async (tx) => {
+        for (const l of changed) {
+          await tx.salesOrderLine.update({ where: { id: l.id }, data: { quotationItemId: next.get(l.id) ?? null } });
+        }
+      });
+      const linkedNow = view.lines.filter((l) => next.get(l.id)).length;
+      await audit(
+        {
+          entityType: 'sales_order',
+          entityId: order.id,
+          action: 'UPDATED',
+          summary: `${order.number} — ${linkedNow} of ${view.lines.length} lines book a line of quotation ${view.order.quotation.number} (${changed.length} changed)`,
+          before: { links: Object.fromEntries(changed.map((l) => [l.id, l.quotationItemId])) },
+          after: { links: Object.fromEntries(changed.map((l) => [l.id, next.get(l.id) ?? null])) },
+        },
+        req,
+      );
+    }
+    res.json({ ok: true, changed: changed.length });
+  }),
+);
+
 // ── Status: issue, reopen, cancel ────────────────────────────────────────────
 
 salesOrderRoutes.post(

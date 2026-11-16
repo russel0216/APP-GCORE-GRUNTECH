@@ -1058,6 +1058,8 @@ export function SalesOrderDetail() {
         </div>
       </div>
 
+      {order.canEdit && order.status !== 'CANCELLED' && <QuotationLinksCard order={order} reloadToken={reload} />}
+
       {order.status === 'ISSUED' && order.invoicing && <InvoicingCard order={order} invoicing={order.invoicing} />}
 
       {order.purchasing && (order.status === 'ISSUED' || order.purchasing.requests.length > 0) && (
@@ -1314,6 +1316,169 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
             {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+interface LinkLine {
+  id: string;
+  title: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  amount: number;
+  quotationItemId: string | null;
+  summarised: boolean;
+  suggest: string | null;
+}
+interface LinkQuotationLine {
+  id: string;
+  title: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  bookedBy: string[];
+  left: number;
+}
+interface LinkView {
+  quotation: { id: string; number: string; standIn: boolean };
+  lines: LinkLine[];
+  quotationLines: LinkQuotationLine[];
+}
+
+/**
+ * Which quotation line each order line books (2026-11-16, the owner's call,
+ * after 4866 and 4776: an order whose lines never matched its quotation's left
+ * the quotation reading "not booked", and it was booked a second time). The
+ * card says how many lines book the quotation and how many are additional to
+ * it; "Link lines…" opens the table in the card — a select per line, the
+ * likely match offered — and Save sends `PUT /sales-orders/:id/quotation-links`.
+ * No money moves. Not drawn for an order with no quotation of its own.
+ */
+function QuotationLinksCard({ order, reloadToken }: { order: SalesOrderDetailRow; reloadToken: number }) {
+  const toast = useToast();
+  const [view, setView] = useState<LinkView | null>(null);
+  const [open, setOpen] = useState(false);
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const currency = order.quotation.currency;
+
+  const load = useCallback(async () => {
+    try {
+      setView(await api.get<LinkView>(`/sales-orders/${order.id}/quotation-links`));
+    } catch {
+      // A reader who may not edit it gets no card.
+      setView(null);
+    }
+  }, [order.id]);
+  useEffect(() => {
+    void load();
+  }, [load, reloadToken]);
+
+  if (!view || view.quotation.standIn || view.lines.length === 0 || view.quotationLines.length === 0) return null;
+  const linkable = view.lines.filter((l) => !l.summarised);
+  if (linkable.length === 0) return null;
+  const linked = linkable.filter((l) => l.quotationItemId).length;
+  const loose = linkable.length - linked;
+  const nameOf = (q: { title: string | null; description: string }) => q.title || q.description;
+  const dirty = linkable.some((l) => (picks[l.id] ?? '') !== (l.quotationItemId ?? ''));
+
+  function start() {
+    // Opens on what is linked, with the likely match offered for the rest.
+    setPicks(Object.fromEntries(linkable.map((l) => [l.id, l.quotationItemId ?? l.suggest ?? ''])));
+    setError(null);
+    setOpen(true);
+  }
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put(`/sales-orders/${order.id}/quotation-links`, { links: Object.fromEntries(linkable.map((l) => [l.id, picks[l.id] || null])) });
+      toast('ok', 'Quotation lines linked');
+      setOpen(false);
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card sales-card-gap">
+      <div className="card-head">
+        <h3 className="card-title">Books of quotation {view.quotation.number}</h3>
+        {!open && (
+          <button className="btn btn-sm" onClick={start}>
+            Link lines…
+          </button>
+        )}
+      </div>
+      <p className={loose ? '' : 'faint'}>
+        {linked} of {linkable.length} {linkable.length === 1 ? 'line books' : 'lines book'} a line of the quotation
+        {loose > 0
+          ? ` — ${loose} ${loose === 1 ? 'is' : 'are'} counted as additional to it. If ${loose === 1 ? 'it is' : 'they are'} the quotation's own, link ${loose === 1 ? 'it' : 'them'}, so the quotation stops reading as not booked.`
+          : '.'}
+      </p>
+      {open && (
+        <>
+          <ErrorBox error={error} />
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Order line</th>
+                  <th className="right">Qty</th>
+                  <th className="right">Unit price</th>
+                  <th>Books this quotation line</th>
+                </tr>
+              </thead>
+              <tbody>
+                {linkable.map((l) => (
+                  <tr key={l.id}>
+                    <td>
+                      <div className="qe-title">{nameOf(l)}</div>
+                    </td>
+                    <td className="right mono">
+                      {l.quantity} {l.unit}
+                    </td>
+                    <td className="right mono">{formatMoney(l.unitPrice, currency)}</td>
+                    <td>
+                      <select
+                        aria-label={`Quotation line booked by ${nameOf(l)}`}
+                        value={picks[l.id] ?? ''}
+                        onChange={(e) => setPicks((p) => ({ ...p, [l.id]: e.target.value }))}
+                      >
+                        <option value="">— additional, not in the quotation —</option>
+                        {view.quotationLines.map((q) => (
+                          <option key={q.id} value={q.id}>
+                            {nameOf(q)} · {q.quantity} {q.unit} × {formatMoney(q.unitPrice, currency)}
+                            {q.bookedBy.length ? ` · ${q.left} left (${q.bookedBy.join(', ')})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {!l.quotationItemId && l.suggest && picks[l.id] === l.suggest && <div className="faint">Suggested — check it before saving</div>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="faint">Nothing on the order, its invoices or its totals changes — only what the quotation reads as booked.</p>
+          <div className="row card-foot">
+            <button className="btn btn-sm" disabled={busy} onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+            <button className="btn btn-sm btn-primary" disabled={busy || !dirty} onClick={save}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
