@@ -894,6 +894,41 @@ every "its raiser or edit_all" wording on a document's DELETE above.
   suppliers, items, employees, categories), leads, calendar activities,
   meetings, training sessions, payments, and the two "sample" purges.
 
+## The working screens' dress (2026-11-17)
+
+The owner's call: "improve the user interface" — Tabler as the first guide,
+the logo's colours `#A020EF` and `#13BA12`; he compared five styles on
+localhost and kept the fifth (a mix of two), then "all the table uniform".
+
+- **Two files, imported LAST in `main.tsx`, every rule scoped to
+  `[data-theme='day']`** — the working screens; the launcher and sign-in keep
+  their look. `styles/tabler.css` holds the colours and the type system,
+  `styles/dress.css` the shapes. Neither sets spacing, heights or layout:
+  those stay the tokens' (rules 11 and 19). A module's stylesheet still holds
+  only what its screens add.
+- **Colours**: `--brand-purple` #A020EF (also `--magenta`) is what you ACT on
+  — the primary button, the open tab, links, focus; `--brand-green` #13BA12
+  is for FILLS only (2.6:1 on white), and `--neon` / `--ok` are #0C8A0B, the
+  same green where it is TEXT (4.6:1).
+- **One type system** — Inter everywhere (`.mono` is Inter with tabular
+  figures on these screens; Orbitron only on the wordmark): a LABEL beside or
+  over a value is 13px, 500, `--muted`, sentence case (`.field > label`,
+  `.field-label-text`, `.section-label`, a `.kv` dt); a HEADER over a group
+  (table head, `.kpi-label`, `.nav-group`) is 11px, 600, capitals, 0.04em; a
+  CAPTION is 12px `--faint`. Never write a label in literal capitals.
+- **The dress**: a deep purple sidebar (`--side-bg`) with a green edge on the
+  open section, a lavender page, round borderless cards whose title sits on a
+  ruled bar, pill tabs and buttons, a gradient primary button, big stat
+  figures coloured by their tone, a solid green `.badge.ok`.
+- **One table look**: every table's THEAD is the dark purple band (#3a1560)
+  with light capitals and rounded top corners; rows are ruled, faintly
+  striped, tinted on hover. The rule names `thead`, so a row's own `th` (a
+  matrix's first column, a foot's total) stays ordinary text. Tables that are
+  not `table.data` (the Gantt, the permission matrix, the discount
+  calculator) are named in that rule — add a new one there, never give a
+  module's table a head of its own.
+- My Account's Details card is a `<dl className="kv">` (rule 20).
+
 ## Verification
 
 ```bash

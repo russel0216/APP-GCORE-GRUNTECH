@@ -1,0 +1,244 @@
+/*
+  The working screens' dress, second half (2026-11-17). The owner compared
+  five styles on localhost and kept the fifth, a mix of two: a deep purple
+  sidebar, a soft lavender page, rounded cards with no border, pill tabs and
+  buttons and a gradient primary button — with a green edge on the open
+  section, a ruled title bar on every panel, a dark purple table head, big
+  stat figures coloured by their tone and a solid green "Active".
+  tabler.css before it holds the colours and the one type system; this file
+  holds the shapes. Spacing is still the tokens' (rules 11 and 19).
+*/
+
+[data-theme='day'] {
+  --bg: #f4f1f9;
+  --surface-2: #f7f5fb;
+  --surface-3: #efeaf6;
+  --line: #e6e0ef;
+  --line-soft: #efeaf6;
+
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 14px;
+
+  --shadow-sm: 0 1px 2px rgb(54 20 90 / 0.05), 0 4px 16px rgb(54 20 90 / 0.05);
+  --shadow-md: 0 8px 24px rgb(54 20 90 / 0.1);
+
+  --side-bg: #2b0a47;
+  --side-text: #d9c9ec;
+  --side-faint: #a58cc4;
+}
+
+/* ── Sidebar: B's purple, C's marker ────────────────────────────────────── */
+
+[data-theme='day'] .sidebar {
+  background: var(--side-bg);
+  border-right: 0;
+}
+
+[data-theme='day'] .sidebar-head {
+  border-bottom-color: rgb(255 255 255 / 0.08);
+}
+
+[data-theme='day'] :is(.sidebar .sidebar-title, .sidebar .nav-group) {
+  color: var(--side-faint);
+}
+
+[data-theme='day'] .sidebar .nav-item {
+  color: var(--side-text);
+  border-radius: 10px 0 0 10px;
+  margin-right: calc(var(--s-2) * -1);
+}
+
+[data-theme='day'] .sidebar .nav-item:hover {
+  background: rgb(255 255 255 / 0.07);
+  color: #fff;
+}
+
+[data-theme='day'] .sidebar .nav-item.active {
+  background: rgb(255 255 255 / 0.12);
+  color: #fff;
+  box-shadow: inset -5px 0 0 var(--brand-green);
+}
+
+[data-theme='day'] .sidebar .tag {
+  border-color: rgb(255 255 255 / 0.18);
+  color: var(--side-faint);
+  margin-right: var(--s-3);
+}
+
+[data-theme='day'] .sidebar.railed .nav-item {
+  margin-right: 0;
+  border-radius: 10px;
+}
+
+[data-theme='day'] .sidebar .rail-toggle {
+  background: transparent;
+  border-color: rgb(255 255 255 / 0.18);
+  color: var(--side-text);
+}
+
+/* ── Top bar and tabs: B's pills ────────────────────────────────────────── */
+
+[data-theme='day'] .topbar {
+  box-shadow: none;
+}
+
+[data-theme='day'] .sub-nav {
+  background: var(--bg);
+  border-bottom: 0;
+  padding-top: var(--s-2);
+  padding-bottom: var(--s-1);
+}
+
+[data-theme='day'] .sub-nav-item {
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 0;
+  border-radius: 999px;
+}
+
+[data-theme='day'] .sub-nav-item:hover {
+  background: var(--surface-3);
+}
+
+[data-theme='day'] .sub-nav-item.active {
+  background: var(--brand-purple);
+  color: #fff;
+}
+
+/* ── Panels: B's round card, C's ruled title ────────────────────────────── */
+
+[data-theme='day'] .page-head h1 {
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+}
+
+[data-theme='day'] :is(.card, .table-wrap) {
+  border-color: transparent;
+}
+
+[data-theme='day'] .card > .card-title,
+[data-theme='day'] .card > .card-head {
+  padding-bottom: var(--s-2);
+  border-bottom: 2px solid var(--line);
+}
+
+[data-theme='day'] .card-title {
+  font-size: var(--fs-lg);
+  font-weight: 500;
+}
+
+/* Stat tiles: a round white tile (B) holding C's big figure in its tone. */
+[data-theme='day'] .kpi-card {
+  border-color: transparent;
+}
+
+[data-theme='day'] .kpi-card::before {
+  display: none;
+}
+
+[data-theme='day'] .kpi-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+[data-theme='day'] .kpi-card:is(.neon, .ok) .kpi-value {
+  color: var(--neon);
+}
+
+[data-theme='day'] .kpi-card.magenta .kpi-value {
+  color: var(--brand-purple);
+}
+
+[data-theme='day'] .kpi-card.danger .kpi-value {
+  color: var(--danger);
+}
+
+/* ── Buttons, fields, pills: B's ────────────────────────────────────────── */
+
+[data-theme='day'] .btn {
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+[data-theme='day'] .btn-primary {
+  background: linear-gradient(135deg, #a020ef, #7a12c4);
+  border-color: transparent;
+  box-shadow: 0 4px 12px rgb(160 32 239 / 0.28);
+}
+
+[data-theme='day'] .btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #8c14d6, #6a0fb0);
+}
+
+[data-theme='day'] .scope-switch {
+  border-radius: 999px;
+}
+
+[data-theme='day'] .badge {
+  border-radius: 999px;
+}
+
+/* C's solid green for what is good. */
+[data-theme='day'] .badge.ok {
+  background: var(--brand-green);
+  color: #fff;
+}
+
+/* ── Tables: ONE look (the owner's call: "I want all the table uniform
+   style like this") ─────────────────────────────────────────────────────
+   Every table's head is the dark purple band with light capitals and
+   rounded top corners; rows are ruled, striped faintly and tinted on hover.
+   The head rule names THEAD, so a row's own heading cell (a matrix's first
+   column, a total in a foot) stays ordinary text. The few tables that are
+   not table.data (the Gantt, the permission matrix, the discount
+   calculator) are named so they cannot drift. */
+
+[data-theme='day'] :is(table.data, table.gantt, .pm-table, .qe-discount-calc table) thead th {
+  background: #3a1560;
+  color: #f1e9fb;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 0;
+}
+
+[data-theme='day'] :is(table.data, table.gantt, .pm-table) thead tr:first-child th:first-child {
+  border-top-left-radius: var(--radius-sm);
+}
+
+[data-theme='day'] :is(table.data, table.gantt, .pm-table) thead tr:first-child th:last-child {
+  border-top-right-radius: var(--radius-sm);
+}
+
+/* A wrapper already rounds and clips its table. */
+[data-theme='day'] .table-wrap > table.data thead th {
+  border-radius: 0;
+}
+
+[data-theme='day'] table.data thead :is(th.sortable:hover, th .sort-mark, th a, th button) {
+  color: #fff;
+}
+
+[data-theme='day'] table.data :is(tbody, tfoot) th {
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+[data-theme='day'] table.data tbody tr:nth-child(even) {
+  background: #faf8fd;
+}
+
+[data-theme='day'] table.data tbody tr:hover {
+  background: rgb(var(--magenta-rgb) / 0.05);
+}
+
+/* The tick box in a list's head sits on the dark band. */
+[data-theme='day'] table.data thead th input[type='checkbox'] {
+  accent-color: var(--brand-green);
+}

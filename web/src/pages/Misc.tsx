@@ -299,49 +299,29 @@ export function Account() {
 
         <div className="card">
           <h3 className="card-title">Details</h3>
-          <div className="stack">
-            <div>
-              <div className="section-label">
-                NAME
-              </div>
-              <div>{me?.user.name}</div>
-            </div>
-            <div>
-              <div className="section-label">
-                EMAIL
-              </div>
-              <div className="mono">{me?.user.email}</div>
-            </div>
-            <div>
-              <div className="section-label">
-                POSITION
-              </div>
-              <div>{me?.user.position ?? '—'}</div>
-            </div>
-            <div>
-              <div className="section-label">
-                ROLES
-              </div>
-              <div className="row" style={{ gap: 'var(--s-1)' }}>
-                {me?.user.isSuperAdmin && <span className="badge info">Super Admin</span>}
-                {me?.user.roles.length ? (
-                  me.user.roles.map((r) => (
-                    <span key={r} className="badge">
-                      {r}
-                    </span>
-                  ))
-                ) : (
-                  <span className="faint">none</span>
-                )}
-              </div>
-            </div>
-            <div>
-              <div className="section-label">
-                EFFECTIVE PERMISSIONS
-              </div>
-              <div className="mono">{me?.permissions.length ?? 0}</div>
-            </div>
-          </div>
+          <dl className="kv">
+            <dt>Name</dt>
+            <dd>{me?.user.name}</dd>
+            <dt>Email</dt>
+            <dd>{me?.user.email}</dd>
+            <dt>Position</dt>
+            <dd>{me?.user.position ?? '—'}</dd>
+            <dt>Roles</dt>
+            <dd className="row" style={{ gap: 'var(--s-1)' }}>
+              {me?.user.isSuperAdmin && <span className="badge info">Super Admin</span>}
+              {me?.user.roles.length ? (
+                me.user.roles.map((r) => (
+                  <span key={r} className="badge">
+                    {r}
+                  </span>
+                ))
+              ) : me?.user.isSuperAdmin ? null : (
+                <span className="faint">None</span>
+              )}
+            </dd>
+            <dt>Permissions</dt>
+            <dd>{me?.permissions.length ?? 0}</dd>
+          </dl>
         </div>
 
         <ContactDetails />

@@ -37,6 +37,9 @@ import './styles/help.css';
 import './styles/face.css';
 import './styles/marketing.css';
 import './styles/exam.css';
+// Last: the working screens' dress (Tabler's look, the logo's two colours).
+import './styles/tabler.css';
+import './styles/dress.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

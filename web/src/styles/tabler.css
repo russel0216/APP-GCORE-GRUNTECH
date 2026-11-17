@@ -1,0 +1,360 @@
+/*
+  The working screens' dress (2026-11-17, the owner's call: "improve the user
+  interface — use Tabler's admin template as the guide; the colours are
+  #A020EF and #13BA12, the logo's").
+
+  One file, imported last, and every rule is scoped to the daylight theme —
+  the theme of every screen behind the launcher — so the launcher and the
+  sign-in keep their own look. It changes COLOUR, TYPE and SURFACE only:
+  spacing, heights and layout still come from the tokens in styles.css
+  (rules 11 and 19), so nothing moves.
+
+  The two brand colours:
+    --brand-purple #A020EF   5.1:1 on white — buttons, links, the active item
+    --brand-green  #13BA12   2.6:1 on white — FILLS only (bars, dots, edges)
+    --neon         #0C8A0B   4.6:1 on white — the same green where it is TEXT
+*/
+
+[data-theme='day'] {
+  --brand-purple: #a020ef;
+  --brand-green: #13ba12;
+
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --surface-3: #eef1f6;
+  --line: #e2e6ee;
+  --line-soft: #edf0f5;
+
+  --text: #1f2937;
+  --muted: #5b6678;
+  --faint: #6f7a8c;
+
+  --magenta: #a020ef;
+  --magenta-rgb: 160 32 239;
+  --magenta-soft: rgb(160 32 239 / 0.2);
+
+  --neon: #0c8a0b;
+  --neon-dim: #0c8a0b;
+  --neon-rgb: 19 186 18;
+  --ok: #0c8a0b;
+
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 8px;
+
+  --shadow-sm: 0 1px 2px rgb(31 41 55 / 0.04);
+  --shadow-md: 0 4px 12px rgb(31 41 55 / 0.08);
+  --shadow-lg: 0 16px 48px rgb(31 41 55 / 0.16);
+
+  --focus-ring: 0 0 0 2px #fff, 0 0 0 4px rgb(160 32 239 / 0.55);
+  --topbar-bg: #ffffff;
+}
+
+/* ── Type: Inter everywhere; Orbitron stays on the wordmark alone ───────── */
+
+[data-theme='day'] .page-head h1 {
+  font-family: var(--body);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+[data-theme='day'] .card-title {
+  font-family: var(--body);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+}
+
+[data-theme='day'] .sidebar-title {
+  font-family: var(--body);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+[data-theme='day'] .topbar-link {
+  font-family: var(--body);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+[data-theme='day'] .topbar-link:hover {
+  color: var(--brand-purple);
+  background: var(--surface-2);
+  border-color: transparent;
+}
+
+[data-theme='day'] .topbar-link.active {
+  color: var(--brand-purple);
+  background: rgb(var(--magenta-rgb) / 0.08);
+  border-color: transparent;
+}
+
+/* ── Chrome ─────────────────────────────────────────────────────────────── */
+
+[data-theme='day'] .topbar {
+  backdrop-filter: none;
+  box-shadow: var(--shadow-sm);
+}
+
+/* The wordmark in the logo's two colours. */
+[data-theme='day'] .topbar-brand {
+  background: linear-gradient(90deg, var(--brand-purple) 0 55%, var(--brand-green) 55% 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+[data-theme='day'] .nav-item {
+  font-weight: 500;
+}
+
+[data-theme='day'] .nav-item:hover {
+  background: var(--surface-2);
+}
+
+[data-theme='day'] .nav-item.active {
+  background: rgb(var(--magenta-rgb) / 0.08);
+  color: var(--brand-purple);
+  box-shadow: inset 3px 0 0 var(--brand-purple);
+  font-weight: 600;
+}
+
+[data-theme='day'] .sub-nav-item {
+  font-weight: 500;
+}
+
+[data-theme='day'] .sub-nav-item.active {
+  color: var(--brand-purple);
+  border-bottom-color: var(--brand-purple);
+}
+
+/* ── Surfaces ───────────────────────────────────────────────────────────── */
+
+[data-theme='day'] .card {
+  box-shadow: var(--shadow-sm);
+}
+
+/* A stat tile: Tabler's — a quiet label over a big figure, no coloured rail
+   down the side; the tone is a short bar along the top instead. */
+[data-theme='day'] .kpi-card {
+  box-shadow: var(--shadow-sm);
+}
+
+[data-theme='day'] .kpi-card::before {
+  width: 100%;
+  height: 3px;
+  background: transparent;
+}
+
+[data-theme='day'] .kpi-card.neon::before,
+[data-theme='day'] .kpi-card.ok::before {
+  background: var(--brand-green);
+}
+
+[data-theme='day'] .kpi-card.magenta::before {
+  background: var(--brand-purple);
+}
+
+[data-theme='day'] .kpi-card.quiet::before {
+  background: transparent;
+}
+
+[data-theme='day'] .kpi-card:hover {
+  border-color: rgb(var(--magenta-rgb) / 0.35);
+}
+
+[data-theme='day'] .kpi-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+
+[data-theme='day'] .btn {
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-theme='day'] .btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: #c9d0dc;
+}
+
+[data-theme='day'] .btn-primary {
+  background: var(--brand-purple);
+  border-color: var(--brand-purple);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+[data-theme='day'] .btn-primary:hover:not(:disabled) {
+  background: #8c14d6;
+  border-color: #8c14d6;
+}
+
+[data-theme='day'] .btn-ghost {
+  background: transparent;
+  box-shadow: none;
+}
+
+[data-theme='day'] .btn-danger {
+  background: var(--surface);
+}
+
+/* ── Fields ─────────────────────────────────────────────────────────────── */
+
+[data-theme='day'] :is(input, select, textarea):focus {
+  border-color: rgb(var(--magenta-rgb) / 0.6);
+  box-shadow: 0 0 0 3px rgb(var(--magenta-rgb) / 0.14);
+  outline: none;
+}
+
+[data-theme='day'] :is(input[type='checkbox'], input[type='radio'], input[type='range']) {
+  accent-color: var(--brand-purple);
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+
+[data-theme='day'] table.data th {
+  background: var(--surface-2);
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+[data-theme='day'] table.data th.sortable:hover,
+[data-theme='day'] table.data th .sort-mark {
+  color: var(--brand-purple);
+}
+
+[data-theme='day'] table.data tbody tr:nth-child(even) {
+  background: transparent;
+}
+
+[data-theme='day'] table.data tbody tr:hover {
+  background: rgb(var(--magenta-rgb) / 0.035);
+}
+
+[data-theme='day'] table.data tr.selected td {
+  background: rgb(var(--magenta-rgb) / 0.07);
+}
+
+/* ── Pills: Tabler's light tints, no outline ────────────────────────────── */
+
+[data-theme='day'] .badge {
+  border-color: transparent;
+  background: var(--surface-3);
+  font-weight: 600;
+  letter-spacing: 0;
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+[data-theme='day'] .badge.ok {
+  border-color: transparent;
+  background: rgb(19 186 18 / 0.12);
+}
+
+[data-theme='day'] .badge.warn {
+  border-color: transparent;
+  background: rgb(var(--warn-rgb) / 0.12);
+}
+
+[data-theme='day'] .badge.danger {
+  border-color: transparent;
+  background: rgb(var(--danger-rgb) / 0.1);
+}
+
+[data-theme='day'] .badge.info {
+  border-color: transparent;
+  background: rgb(var(--info-rgb) / 0.1);
+}
+
+[data-theme='day'] .scope-switch button.active {
+  background: var(--brand-purple);
+  border-color: var(--brand-purple);
+  color: #fff;
+}
+
+/* Links in running text and the Shell's Back line take the brand purple. */
+[data-theme='day'] .back-link:hover,
+[data-theme='day'] .content a:not(.btn):not(.nav-item):not(.kpi-card):hover {
+  color: var(--brand-purple);
+}
+
+/* ── One type system (2026-11-17, the owner's call: "improve also the font
+   style — there's a lot of style that makes it look messy") ──────────────
+
+   Three kinds of small text, and no fourth:
+     a LABEL beside or over a value      13px, 500, --muted, sentence case
+     a HEADER over a group (table head,  11px, 600, --muted, capitals,
+       stat card, menu group)            0.04em tracking
+     a CAPTION under something           12px, 400, --faint
+   One face: Inter. The typewriter face (.mono) set emails, counts and
+   document numbers apart from the words around them; on these screens a
+   number is told apart by tabular figures, not by a second typeface. */
+
+[data-theme='day'] .mono {
+  font-family: var(--body);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme='day'] :is(.field > label, .field-label-text, .section-label, .svc-subhead, .m-section-head) {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+[data-theme='day'] :is(.svc-subhead, .m-section-head) {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Detail lists: the label quiet, the value the thing you read. */
+[data-theme='day'] :is(.kv dt, .act-rows dt, .m-details dt, .qd-row dt, .cs-fact dt, .sales-row-label) {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+[data-theme='day'] :is(table.data th, .kpi-label, .nav-group, .sidebar-title, .record-head-kind, .palette-group) {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+[data-theme='day'] :is(.hint, .kpi-subtext, .field .hint) {
+  font-size: var(--fs-sm);
+}
+
+/* "Show" on a password box is a quiet link, not a green shout. */
+[data-theme='day'] .password-toggle {
+  color: var(--brand-purple);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* A fact HR keeps reads as text, not as a greyed-out text box. */
+[data-theme='day'] .hr-fact {
+  background: transparent;
+  padding: 0;
+  min-height: 0;
+}
+
+[data-theme='day'] .home-work-head h2 {
+  font-family: var(--body);
+  letter-spacing: 0.04em;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
