@@ -136,10 +136,28 @@
   display: none;
 }
 
-[data-theme='day'] .kpi-value {
+/* Big only for a COUNT (12, 465). Money and long figures (.figure) keep the
+   size the card gives them — on a list's summary row that size shrinks with
+   the card, and a fixed 28px cut "₱114,693,870.03" off at the card's edge
+   (the owner's report, the day this went live). */
+[data-theme='day'] .kpi-value:not(.figure) {
   font-size: 28px;
   font-weight: 700;
   line-height: 1.2;
+}
+
+/* Nine cards across (Accounts Receivable): "₱103,957,383.77" at the row's
+   14px ran 17px past its card. The rule of 2026-11-14 that shrinks a figure
+   with its card named `.kpi`, a class no card carries (they are
+   `.kpi-card`), so it never applied. The card is the size container here,
+   and a long figure takes 8% of its width — fifteen characters inside the
+   padding. */
+[data-theme='day'] .list-summary .kpi-card {
+  container-type: inline-size;
+}
+
+[data-theme='day'] .list-summary .kpi-value.figure {
+  font-size: clamp(var(--fs-xs), 8cqi, var(--fs-base));
 }
 
 [data-theme='day'] .kpi-card:is(.neon, .ok) .kpi-value {
