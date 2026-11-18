@@ -53,6 +53,7 @@ import { applyHrAccess } from '../src/shared/hrAccess';
 import { applyFinAccess, applyMoneyInAccess } from '../src/shared/finAccess';
 import { applyChainAccess } from '../src/shared/chainAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
+import { importBuilkTpsc } from '../src/shared/builkTpsc';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1921,6 +1922,15 @@ async function main() {
       if (numbered.notFound.length) console.log(`    not on file: ${numbered.notFound.join(', ')}`);
       if (numbered.clashes.length) console.log(`    left (number in use): ${numbered.clashes.join('; ')}`);
     }
+  }
+
+  // ── Builk's purchases for RA '26 TPSC - TOSHIBA LTI (2026-11-19) ─────────
+  // Once, onto the project built from quotation 1052607084.1; waits, unmarked,
+  // until that project exists (shared/builkTpsc.ts).
+  {
+    const builk = await importBuilkTpsc();
+    if (builk?.done) console.log(`  ✓ Builk TPSC: ${builk.orders.length} orders on ${builk.job} (${builk.orders.map((o) => `${o.builk} → ${o.po}`).join(', ')})`);
+    else if (builk) console.log(`  · Builk TPSC import waits: ${builk.reason}`);
   }
 
   // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
