@@ -17,6 +17,7 @@ import { KINDS, KIND_LABEL, NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { AcknowledgeModal, BasisBadge, InvoiceModal } from './JobOrders';
 import { useTeams } from '../finance/Receivables';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Service JOs — the SERVICE CALL on a registered machine (2026-10-20, the
@@ -207,13 +208,12 @@ export function ServiceJobOrders() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Service JO</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Service JO</h1>
 
       <DataList<ServiceJoRow>
+        printButton
+        exportable={false}
         listKey="service-job-orders"
         endpoint="/service-job-orders"
         columns={columns()}
@@ -466,7 +466,7 @@ export function ServiceJoModal({
           </Field>
         ) : (
           <Field label="Customer">
-            <select
+            <SearchSelect
               value={form.customerId}
               disabled={customerLocked}
               onChange={(e) => setForm({ ...form, customerId: e.target.value, assetId: '', contractId: '', siteId: '', contactId: '', contactNumber: '' })}
@@ -478,11 +478,11 @@ export function ServiceJoModal({
                   {c.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         )}
         <Field label="Equipment" hint={asset ? [asset.code, asset.address].filter(Boolean).join(' · ') || undefined : 'From the Installation Base — leave empty for a call on no registered machine'}>
-          <select value={form.assetId} onChange={(e) => pickAsset(e.target.value)}>
+          <SearchSelect value={form.assetId} onChange={(e) => pickAsset(e.target.value)}>
             <option value="">— none registered —</option>
             {existing?.asset && !options.assets.some((a) => a.id === existing.asset!.id) && (
               <option value={existing.asset.id}>{machineLine(existing.asset)}</option>
@@ -492,10 +492,10 @@ export function ServiceJoModal({
                 {[a.name, a.model, a.serialNo].filter(Boolean).join(' · ')}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Site">
-          <select value={form.siteId} onChange={(e) => set('siteId', e.target.value)}>
+          <SearchSelect value={form.siteId} onChange={(e) => set('siteId', e.target.value)}>
             <option value="">— none —</option>
             {options.sites.map((s) => (
               <option key={s.id} value={s.id}>
@@ -503,17 +503,17 @@ export function ServiceJoModal({
                 {s.city ? ` · ${s.city}` : ''}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Contact person">
-          <select value={form.contactId} onChange={(e) => pickContact(e.target.value)}>
+          <SearchSelect createKind="contact" createCustomerId={form.customerId || undefined} value={form.contactId} onChange={(e) => pickContact(e.target.value)}>
             <option value="">— none —</option>
             {options.contacts.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Contact number">
           <input value={form.contactNumber} placeholder="0917 000 0000" onChange={(e) => set('contactNumber', e.target.value)} />
@@ -564,7 +564,7 @@ export function ServiceJoModal({
           </select>
         </Field>
         <Field label="Service contract" hint="The contract covering the work, if any">
-          <select value={form.contractId} onChange={(e) => set('contractId', e.target.value)}>
+          <SearchSelect value={form.contractId} onChange={(e) => set('contractId', e.target.value)}>
             <option value="">— none —</option>
             {existing?.contract && !options.contracts.some((c) => c.id === existing.contract!.id) && <option value={existing.contract.id}>{existing.contract.number}</option>}
             {options.contracts.map((c) => (
@@ -572,7 +572,7 @@ export function ServiceJoModal({
                 {c.number} · to {formatDate(c.endsAt)}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
       <Field label="Task / short title">

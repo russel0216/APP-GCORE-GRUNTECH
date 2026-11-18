@@ -27,6 +27,7 @@ import { RequestItemsCard, type RequestItem } from '../../components/RequestLine
 import { Attachments } from '../../components/Attachments';
 import { BudgetCard, type RequestBudget } from '../../components/BudgetCard';
 import type { CurrentOfficeLine } from '../../components/OfficeLine';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -268,13 +269,12 @@ export function CashAdvances() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Cash Advances</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Cash Advances</h1>
 
       <DataList<Advance>
+        printButton
+        exportable={false}
         listKey="cash-advances"
         endpoint="/cash-advances"
         printPath="/api/cash-advances/pdf"
@@ -382,14 +382,14 @@ function PaymentEntryModal({ onClose, onSaved }: { onClose: () => void; onSaved:
         <p className="muted">No cash advance is being repaid — nothing is out on loan.</p>
       ) : (
         <Field label="Select active CA no." hint="A cash advance released and not yet repaid in full">
-          <select value={picked} onChange={(e) => setPicked(e.target.value)}>
+          <SearchSelect value={picked} onChange={(e) => setPicked(e.target.value)}>
             <option value="">— choose —</option>
             {active.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.number} ({a.requestedBy.name} — {formatMoney(a.balance)} left of {formatMoney(a.amountReleased)})
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       )}
     </Modal>

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ApiError, api, downloadBlob, qs } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
 import { Menu } from '../../components/Menu';
+import { ToolsMenu } from '../../components/ToolsMenu';
 import { PersonSelect } from '../../components/People';
 import { NumberInput } from '../../components/NumberInput';
 import { useConfirm } from '../../components/Confirm';
@@ -23,6 +24,7 @@ import {
   marginTone,
 } from '../../components/ui';
 import { LeadForm, loadPeople, type Person } from './Leads';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /*
   The sales board.
@@ -818,14 +820,6 @@ export function Pipeline() {
     });
   }
 
-  async function exportCsv() {
-    try {
-      await downloadBlob(`/pipeline/board.csv${qs(query)}`, 'sales-pipeline.csv');
-    } catch (err) {
-      setError(err);
-    }
-  }
-
   async function openCreate(kind: 'lead' | 'quotation' | 'forecast') {
     setNewMenu(false);
     // A quotation is written on its own full page (the SCORO editor), not a dialog.
@@ -864,7 +858,7 @@ export function Pipeline() {
   const newMenuButton = (canCreateLead || canCreateQuote) && (
     <div className="pipe-menu-wrap">
       <button
-        className="btn btn-primary"
+        className="btn btn-primary btn-sm"
         aria-haspopup="menu"
         aria-expanded={newMenu}
         onClick={() => setNewMenu((o) => !o)}
@@ -969,22 +963,15 @@ export function Pipeline() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Sales Pipeline</h1>
-          <p>
-            Every open lead and quotation, by stage. Drag a card to move it, or press Enter on it for the Move
-            menu; a move sets the deal’s odds the way the stage says. A column shows its first {COLUMN_LIMIT} cards.
-          </p>
-        </div>
-        {newMenuButton}
-      </div>
+      {/* The open tab names the screen; "+ New" leads the toolbar, as on every list (2026-11-17, the owner's call). */}
+      <h1 className="visually-hidden">Sales Pipeline</h1>
 
       {confirm.bar}
 
       <ErrorBox error={error} />
 
       <div className="pipe-toolbar">
+        {newMenuButton}
         <label className="visually-hidden" htmlFor="pipe-view">
           Saved view
         </label>
@@ -1012,7 +999,7 @@ export function Pipeline() {
         <label className="visually-hidden" htmlFor="pipe-owner">
           Salesperson
         </label>
-        <select
+        <SearchSelect
           id="pipe-owner"
           className="pipe-select"
           value={view.ownerId}
@@ -1024,7 +1011,7 @@ export function Pipeline() {
               {p.name}
             </option>
           ))}
-        </select>
+        </SearchSelect>
 
         <label className="visually-hidden" htmlFor="pipe-search">
           Search the board
@@ -1083,14 +1070,17 @@ export function Pipeline() {
           </button>
         </div>
 
-        <button
-          className={`btn btn-sm${customising ? ' btn-active' : ''}`}
-          aria-expanded={customising}
-          aria-controls="pipe-customise"
-          onClick={() => setCustomising((o) => !o)}
-        >
-          Customise ▾
-        </button>
+        {/* The one ⋯ menu at the right end, as on every Sales screen (2026-11-17, the owner's call). */}
+        <ToolsMenu
+          items={[
+            {
+              label: customising ? 'Close Customise' : 'Customise…',
+              hint: 'Columns, card fields, tiles, grouping and saved views',
+              onSelect: () => setCustomising((o) => !o),
+            },
+            { label: 'Refresh', onSelect: () => void load() },
+          ]}
+        />
       </div>
 
       {customising && (
@@ -1103,8 +1093,6 @@ export function Pipeline() {
           onSaveView={() => setSavingView(true)}
           onUpdateView={() => void updateView()}
           onDeleteView={deleteView}
-          canExport={can('gops.pipeline.export')}
-          onExport={() => void exportCsv()}
         />
       )}
 
@@ -1274,10 +1262,11 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
     overdue: (
       <Stat
         key="overdue"
-        label="Overdue"
+        // "Overdue what?" (2026-11-17, the owner's question): it counts DEALS, and the strip says why.
+        label="Overdue deals"
         value={kpis.overdue}
         accent={kpis.overdue > 0 ? 'danger' : undefined}
-        sub="past expected close, next action or validity"
+        sub="past closing date, next action or validity"
       />
     ),
     won: (
@@ -1601,8 +1590,6 @@ function Customise({
   onSaveView,
   onUpdateView,
   onDeleteView,
-  canExport,
-  onExport,
 }: {
   view: PipelineView;
   setView: (fn: (v: PipelineView) => PipelineView) => void;
@@ -1612,8 +1599,6 @@ function Customise({
   onSaveView: () => void;
   onUpdateView: () => void;
   onDeleteView: () => void;
-  canExport: boolean;
-  onExport: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
 
@@ -1664,11 +1649,6 @@ function Customise({
                   Delete view
                 </button>
               </>
-            )}
-            {canExport && (
-              <button className="btn btn-sm" onClick={onExport}>
-                Export CSV
-              </button>
             )}
             <button className="btn btn-sm" onClick={() => setView(() => DEFAULT_VIEW)}>
               Standard board

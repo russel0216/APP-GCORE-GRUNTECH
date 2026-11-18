@@ -7,6 +7,7 @@ import { ImportModal, loadImportSpec } from '../../../components/ImportModal';
 import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatSpan, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 import { Stat } from '../../../components/charts';
+import { SearchSelect } from '../../../components/SearchSelect';
 
 /**
  * Courses — the Academy's master (item 13), in the owner's Academy UI
@@ -344,19 +345,11 @@ export function Courses() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Courses</h1>
-        <div className="scope-switch" role="group" aria-label="View">
-          <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => chooseView('list')}>
-            List
-          </button>
-          <button type="button" className={view === 'cards' ? 'active' : ''} aria-pressed={view === 'cards'} onClick={() => chooseView('cards')}>
-            Cards
-          </button>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Courses</h1>
 
       <DataList<CourseRow>
+        printButton
+        exportable={false}
         listKey="hr-courses"
         endpoint="/courses"
         printPath="/api/courses/pdf"
@@ -410,7 +403,19 @@ export function Courses() {
             ],
           },
         ]}
-        actions={newButton}
+        actions={
+          <>
+            {newButton}
+              <div className="scope-switch" role="group" aria-label="View">      
+                <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => chooseView('list')}>      
+                  List      
+                </button>      
+                <button type="button" className={view === 'cards' ? 'active' : ''} aria-pressed={view === 'cards'} onClick={() => chooseView('cards')}>      
+                  Cards      
+                </button>      
+              </div>      
+                </>
+        }
         menuItems={
           can('ghr.courses.create')
             ? [
@@ -986,7 +991,7 @@ function RequirementsEditor({
               return (
                 <tr key={i}>
                   <td>
-                    <select
+                    <SearchSelect
                       aria-label={`Position for row ${i + 1}`}
                       value={r.positionId ?? ''}
                       disabled={!editable}
@@ -999,7 +1004,7 @@ function RequirementsEditor({
                           {p.level != null ? ` — Level ${p.level}` : ''}
                         </option>
                       ))}
-                    </select>
+                    </SearchSelect>
                   </td>
                   {editable && (
                     <td>

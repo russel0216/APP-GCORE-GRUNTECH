@@ -529,13 +529,11 @@ export function AttendanceRegister() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Attendance</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Attendance</h1>
 
       <DataList<AttendanceRow>
+        printButton
+        exportable={false}
         listKey="attendance"
         endpoint="/attendance"
         printPath="/api/attendance/pdf"

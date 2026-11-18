@@ -222,11 +222,8 @@ export function ServiceContracts() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Service Contract</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Service Contract</h1>
 
       {queue && queue.length > 0 && (
         <div className="card">
@@ -275,6 +272,8 @@ export function ServiceContracts() {
       )}
 
       <DataList<Contract>
+        printButton
+        exportable={false}
         listKey="service-contracts"
         endpoint="/service-contracts"
         columns={columns}

@@ -70,6 +70,7 @@ const STATUSES = [
 ];
 
 import { todayLocal } from '../../lib/day';
+import { SearchSelect } from '../../components/SearchSelect';
 
 export interface TemplateField {
   key: string;
@@ -520,7 +521,7 @@ export function NewReportModal({
           label="Against a visit on the schedule"
           hint={locked ? 'Opened from the visit' : 'Leave empty for a call-out nobody scheduled'}
         >
-          <select
+          <SearchSelect
             value={form.visitId}
             disabled={locked}
             onChange={(e) => takeVisit(visits.find((x) => x.id === e.target.value), e.target.value)}
@@ -532,7 +533,7 @@ export function NewReportModal({
                 {v.status === 'MISSED' ? ' (missed)' : ''}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       )}
 
@@ -569,14 +570,14 @@ export function NewReportModal({
         label="Which machine"
         hint="Whether the work was under warranty is decided from this machine's dates, not from a tick box"
       >
-        <select value={form.assetId} onChange={(e) => setForm({ ...form, assetId: e.target.value })}>
+        <SearchSelect value={form.assetId} onChange={(e) => setForm({ ...form, assetId: e.target.value })}>
           <option value="">— none —</option>
           {assets.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name} {a.serialNo ? `(${a.serialNo})` : ''}
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
 
       {form.contractId && (

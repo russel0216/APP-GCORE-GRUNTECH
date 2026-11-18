@@ -12,6 +12,7 @@ import { MemoryInput } from '../../components/MemoryInput';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { BarList, Panel, Stat } from '../../components/charts';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatDateTime, useToast } from '../../components/ui';
+import { ToolsMenu } from '../../components/ToolsMenu';
 
 /**
  * Marketing — exhibition visitors (2026-10-27, the owner's call during PSECE
@@ -176,35 +177,8 @@ export function Marketing() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Marketing</h1>
-          {exhibition && (
-            <p className="mk-event-line">
-              {exhibition.name}
-              {exhibition.venue ? ` · ${exhibition.venue}` : ''} · {formatDate(exhibition.startDate)} – {formatDate(exhibition.endDate)} · {whenLine(exhibition)}
-            </p>
-          )}
-        </div>
-        <div className="row">
-          {exhibitions.length > 1 && (
-            <select aria-label="Exhibition" value={exhibition?.id ?? ''} onChange={(e) => go({ exhibitionId: e.target.value })}>
-              {exhibitions.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name}
-                  {e.isActive ? '' : ' (closed)'}
-                </option>
-              ))}
-            </select>
-          )}
-          {canAdd && exhibition && tab !== 'scan' && (
-            <button type="button" className="btn btn-primary" onClick={() => go({ tab: 'scan' })}>
-              Scan a badge
-            </button>
-          )}
-        </div>
-      </div>
-
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Marketing</h1>
       <ErrorBox error={error} />
 
       {!exhibition ? (
@@ -218,19 +192,47 @@ export function Marketing() {
         </section>
       ) : (
         <>
-          <div className="scope-switch mk-tabs" role="group" aria-label="View">
-            {(
-              [
-                ['dashboard', 'Bar graphs'],
-                ['scan', 'Scan'],
-                ['visitors', 'Visitors'],
-                ['exhibitions', 'Exhibitions'],
-              ] as [Tab, string][]
-            ).map(([key, label]) => (
-              <button key={key} type="button" className={tab === key ? 'active' : ''} aria-pressed={tab === key} onClick={() => go({ tab: key })}>
-                {label}
+          {/* One toolbar line, as on every Sales screen (2026-11-17, the owner's call): the main action first. */}
+          <div className="mk-bar">
+            {canAdd && tab !== 'scan' && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => go({ tab: 'scan' })}>
+                Scan a badge
               </button>
-            ))}
+            )}
+            <div className="scope-switch" role="group" aria-label="View">
+              {(
+                [
+                  ['dashboard', 'Bar graphs'],
+                  ['scan', 'Scan'],
+                  ['visitors', 'Visitors'],
+                  ['exhibitions', 'Exhibitions'],
+                ] as [Tab, string][]
+              ).map(([key, label]) => (
+                <button key={key} type="button" className={tab === key ? 'active' : ''} aria-pressed={tab === key} onClick={() => go({ tab: key })}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {exhibitions.length > 1 && (
+              <select aria-label="Exhibition" value={exhibition.id} onChange={(e) => go({ exhibitionId: e.target.value })}>
+                {exhibitions.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.name}
+                    {e.isActive ? '' : ' (closed)'}
+                  </option>
+                ))}
+              </select>
+            )}
+            <p className="mk-event-line">
+              {exhibition.name}
+              {exhibition.venue ? ` · ${exhibition.venue}` : ''} · {formatDate(exhibition.startDate)} – {formatDate(exhibition.endDate)} · {whenLine(exhibition)}
+            </p>
+            <ToolsMenu
+              items={[
+                ...(canSetUp ? [{ label: '+ New exhibition…', onSelect: () => setSetting('new') }] : []),
+                { label: 'Refresh', onSelect: () => setReload((r) => r + 1) },
+              ]}
+            />
           </div>
 
           {tab === 'dashboard' && <MarketingDashboard exhibition={exhibition} reload={reload} />}
@@ -812,6 +814,8 @@ function VisitorList({ exhibition, reload, onImport }: { exhibition: Exhibition;
       emptyTitle="No visitors yet"
       emptyHint="Scan a badge, or import the spreadsheet of a day already past."
       printPath="/api/marketing/visitors/pdf"
+      printButton
+      exportable={false}
       selectable
       rowLabel={(r) => r.name}
       menuItems={onImport ? [{ label: 'Import from a spreadsheet…', hint: 'Day 1 kept on a spreadsheet: Name, Company, Position, Email, Mobile, Brands, Products, Day — checked before anything is saved', onSelect: onImport }] : []}

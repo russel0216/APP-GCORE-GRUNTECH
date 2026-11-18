@@ -25,6 +25,7 @@ import {
 } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 import { toLocalInput } from '../../../lib/day';
+import { SearchSelect } from '../../../components/SearchSelect';
 
 /**
  * Training sessions — G-HR › Academy (item 13).
@@ -309,11 +310,11 @@ export function Sessions() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Training Sessions</h1>
-      </div>
+      <h1 className="visually-hidden">Training Sessions</h1>
 
       <DataList<SessionRow>
+        printButton
+        exportable={false}
         listKey="hr-training-sessions"
         endpoint="/training-sessions"
         printPath="/api/training-sessions/pdf"
@@ -502,14 +503,14 @@ export function SessionModal({
       <ErrorBox error={error} />
       <div className="grid grid-2">
         <Field label="Course" required hint={course ? courseHint(course) : undefined}>
-          <select value={form.courseId} onChange={(e) => setForm({ ...form, courseId: e.target.value })}>
+          <SearchSelect value={form.courseId} onChange={(e) => setForm({ ...form, courseId: e.target.value })}>
             <option value="">Choose a course…</option>
             {courses.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.code} — {c.title}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field
           label="Trainer"

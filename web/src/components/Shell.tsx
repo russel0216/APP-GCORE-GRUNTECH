@@ -583,7 +583,7 @@ export function Shell() {
                     >
                       <Icon name={sectionIcon(group.name)} size={17} />
                       <span className="nav-label">{group.name}</span>
-                      <span className="tag">{screens}</span>
+                      {/* No count of screens beside the name (2026-11-18, the owner's call). */}
                     </Link>
                   );
                 })

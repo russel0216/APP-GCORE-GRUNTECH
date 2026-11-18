@@ -146,9 +146,7 @@ export function Passports() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Training Passports</h1>
-      </div>
+      <h1 className="visually-hidden">Training Passports</h1>
 
       {summary && (
         <div className="kpi-grid">
@@ -234,6 +232,8 @@ export function Passports() {
       )}
 
       <DataList<PassportRow>
+        printButton
+        exportable={false}
         listKey="hr-training-passports"
         endpoint="/passports"
         printPath="/api/passports/pdf"

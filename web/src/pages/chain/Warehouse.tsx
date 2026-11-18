@@ -27,6 +27,7 @@ import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
 import { PhotoCard } from '../../components/PhotoCard';
 import { label } from './PurchaseRequests';
+import { SearchSelect } from '../../components/SearchSelect';
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
@@ -84,13 +85,12 @@ export function Receivings() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Incoming Reports</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Incoming Reports</h1>
 
       <DataList<ReceivingRow>
+        printButton
+        exportable={false}
         listKey="receivings"
         endpoint="/receivings"
         printPath="/api/receivings/pdf"
@@ -1069,22 +1069,12 @@ export function Inventory() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Inventory</h1>
-        </div>
-        {/* List or Kanban (2026-10-14, the owner's call) — one query behind both. */}
-        <div className="scope-switch" role="group" aria-label="View">
-          <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => chooseView('list')}>
-            List
-          </button>
-          <button type="button" className={view === 'kanban' ? 'active' : ''} aria-pressed={view === 'kanban'} onClick={() => chooseView('kanban')}>
-            Kanban
-          </button>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Inventory</h1>
 
       <DataList<StockRow>
+          printButton
+          exportable={false}
           listKey="inventory"
           endpoint="/inventory"
           printPath="/api/inventory/pdf"
@@ -1104,17 +1094,28 @@ export function Inventory() {
               : 'Stock appears once an incoming report into a warehouse is approved. Goods bought for a project show under Stock › Project stock.'
           }
           actions={
-            projectStock ? (
-              can('gchain.pullout_slips.create') ? (
-                <Link className="btn btn-primary btn-sm" to="/g-chain/pullout-slips/new?kind=project">
-                  + New pull-out slip
+            <>
+              {projectStock ? (
+                can('gchain.pullout_slips.create') ? (
+                  <Link className="btn btn-primary btn-sm" to="/g-chain/pullout-slips/new?kind=project">
+                    + New pull-out slip
+                  </Link>
+                ) : null
+              ) : can('gchain.receiving.create') ? (
+                <Link className="btn btn-primary btn-sm" to="/g-chain/incoming/new">
+                  + New incoming
                 </Link>
-              ) : undefined
-            ) : can('gchain.receiving.create') ? (
-              <Link className="btn btn-primary btn-sm" to="/g-chain/incoming/new">
-                + New incoming
-              </Link>
-            ) : undefined
+              ) : null}
+              {/* List or Kanban (2026-10-14, the owner's call) — one query behind both; after "+ New" on the toolbar. */}
+              <div className="scope-switch" role="group" aria-label="View">
+                <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => chooseView('list')}>
+                  List
+                </button>
+                <button type="button" className={view === 'kanban' ? 'active' : ''} aria-pressed={view === 'kanban'} onClick={() => chooseView('kanban')}>
+                  Kanban
+                </button>
+              </div>
+            </>
           }
           reloadToken={reload}
           menuItems={
@@ -1486,7 +1487,7 @@ export function StockCard() {
                 <span className="inv-bin">
                   Bin / Rack:{' '}
                   {mayPlace && b.warehouse.locations.length ? (
-                    <select aria-label={`Bin at ${b.warehouse.name}`} value={b.location?.id ?? ''} onChange={(e) => void placeIn(b.id, e.target.value)}>
+                    <SearchSelect aria-label={`Bin at ${b.warehouse.name}`} value={b.location?.id ?? ''} onChange={(e) => void placeIn(b.id, e.target.value)}>
                       <option value="">— none —</option>
                       {b.warehouse.locations.map((l) => (
                         <option key={l.id} value={l.id}>
@@ -1494,7 +1495,7 @@ export function StockCard() {
                           {l.name ? ` — ${l.name}` : ''}
                         </option>
                       ))}
-                    </select>
+                    </SearchSelect>
                   ) : (
                     <span className="mono">{b.location?.code ?? '—'}</span>
                   )}
@@ -1644,14 +1645,9 @@ export function ChainDashboard() {
 
   return (
     <div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
       <div className="page-head">
-        <div>
-          <h1>G-CHAIN</h1>
-          <p>
-            Request → canvass → order → receive → stock → issue. Every step links to the next, and
-            the cost reaches a project exactly once.
-          </p>
-        </div>
+        <h1>G-CHAIN Overview</h1>
       </div>
 
       <div className="kpi-grid">

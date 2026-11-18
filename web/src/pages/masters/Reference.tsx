@@ -5,6 +5,7 @@ import { ActiveBadge, Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoo
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
 import { TeamPostsCard } from './TeamPosts';
+import { ToolsMenu } from '../../components/ToolsMenu';
 
 // ════════════════════════════════════════════════════════════════════
 //  CATEGORIES — cost categories, item categories, teams, sub-industries,
@@ -1010,19 +1011,7 @@ export function Categories() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Categories</h1>
-          <p>
-            Cost categories are the six buckets every costing, budget and cost-ledger row is
-            grouped by. Item categories are how you organise the item master for browsing — they
-            have no effect on money. Teams — KAT, HIT, UIT, GIB, SIT — are the sales teams people
-            are on; sub-industries are where a customer sits in the market, so sales can be
-            counted by it. Quotation groups are what a quotation line is filed under, and how
-            Sales Analytics counts what was quoted and won.
-          </p>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Categories</h1>
 
       <ErrorBox error={error} />
 
@@ -1121,19 +1110,16 @@ export function Warehouses() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Warehouses</h1>
-          <p>
-            Where stock physically sits. Locations are the bin, rack or shelf inside a warehouse —
-            worth setting up only if you need to find things by position.
-          </p>
-        </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone;
+          "+ New" leads the toolbar and ⋯ closes it, as on every list. */}
+      <h1 className="visually-hidden">Warehouses</h1>
+      <div className="list-toolbar">
         {can('gchain.warehouses.create') && (
-          <button className="btn btn-primary" onClick={() => setEditing('new')}>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
             + New warehouse
           </button>
         )}
+        <ToolsMenu items={[{ label: 'Refresh', onSelect: () => void load() }]} />
       </div>
       {confirm.bar}
 
@@ -1234,21 +1220,24 @@ export function Warehouses() {
   );
 }
 
-function WarehouseModal({
+export function WarehouseModal({
   warehouse,
+  presetName,
   onClose,
   onSaved,
 }: {
   warehouse: Warehouse | null;
+  /** A new warehouse's name to start with — what was typed in a picker. */
+  presetName?: string;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (saved?: { id: string; code: string; name: string }) => void;
 }) {
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
     code: warehouse?.code ?? '',
-    name: warehouse?.name ?? '',
+    name: warehouse?.name ?? presetName ?? '',
     address: warehouse?.address ?? '',
     city: warehouse?.city ?? '',
     isActive: warehouse?.isActive ?? true,
@@ -1265,9 +1254,10 @@ function WarehouseModal({
         city: form.city || null,
         isActive: form.isActive,
       };
-      if (warehouse) await api.patch(`/warehouses/${warehouse.id}`, payload);
-      else await api.post('/warehouses', payload);
-      onSaved();
+      const saved = warehouse
+        ? await api.patch<{ id: string; code: string; name: string }>(`/warehouses/${warehouse.id}`, payload)
+        : await api.post<{ id: string; code: string; name: string }>('/warehouses', payload);
+      onSaved(saved);
     } catch (err) {
       setError(err);
       setBusy(false);

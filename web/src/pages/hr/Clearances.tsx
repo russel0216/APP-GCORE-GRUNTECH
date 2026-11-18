@@ -23,6 +23,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Turnover & Clearance.
@@ -188,15 +189,13 @@ export function Clearances() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Turnover &amp; Clearance</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Turnover &amp; Clearance</h1>
 
       {seesAll && summary && <TurnoverStrip summary={summary} />}
 
       <DataList<ClearanceRow>
+        printButton
+        exportable={false}
         listKey="clearances"
         endpoint="/clearances"
         printPath="/api/clearances/pdf"
@@ -424,7 +423,7 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
             <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search…" />
           </Field>
           <Field label="Employee" required>
-            <select value={form.employeeId} onChange={(e) => setForm({ ...form, employeeId: e.target.value })}>
+            <SearchSelect value={form.employeeId} onChange={(e) => setForm({ ...form, employeeId: e.target.value })}>
               <option value="">— pick —</option>
               {found.map((e) => (
                 <option key={e.id} value={e.id}>
@@ -432,7 +431,7 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
                   {e.industry ? ` · ${e.industry.code}` : ''}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         </div>
       )}

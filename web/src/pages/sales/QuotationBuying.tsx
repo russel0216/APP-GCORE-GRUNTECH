@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { ErrorBox, StatusBadge, formatMoney, useToast } from '../../components/ui';
 import { OfficeLineSelect, useOfficeLines } from '../../components/OfficeLine';
 import { OrderSpendPanel, type OrderSpend } from '../chain/PurchaseRequisitionEditor';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Bought ahead for a quotation (2026-11-10, the owner's call: "may request on
@@ -153,14 +154,14 @@ function Reallocate({
           <>
             <label className="field">
               <span>Project</span>
-              <select value={jobId} onChange={(e) => setJobId(e.target.value)}>
+              <SearchSelect value={jobId} onChange={(e) => setJobId(e.target.value)}>
                 <option value="">— choose —</option>
                 {jobs.map((j) => (
                   <option key={j.id} value={j.id}>
                     {j.number} — {j.name}
                   </option>
                 ))}
-              </select>
+              </SearchSelect>
             </label>
             <label className="field">
               <span>Budget line</span>

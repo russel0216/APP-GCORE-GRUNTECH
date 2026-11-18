@@ -21,6 +21,7 @@ import { VisitBadge } from './Schedule';
 import { BasisBadge } from './JobOrders';
 import { Stat } from '../../components/charts';
 import { useTeams } from '../finance/Receivables';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The installed base — what Gruntech put in, where it stands, and when its
@@ -185,13 +186,12 @@ export function InstalledBase() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Installation Base</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Installation Base</h1>
 
       <DataList<Asset>
+        printButton
+        exportable={false}
         listKey="installed-base"
         endpoint="/installed-assets"
         columns={columns}
@@ -495,14 +495,14 @@ function AssetModal({
           />
         </Field>
         <Field label="Installed by project">
-          <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
+          <SearchSelect value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
             <option value="">— not recorded —</option>
             {jobs.map((j) => (
               <option key={j.id} value={j.id}>
                 {j.number} — {j.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
 

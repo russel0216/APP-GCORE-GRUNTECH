@@ -250,13 +250,12 @@ export function Expenses() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Reimbursements</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Reimbursements</h1>
 
       <DataList<Claim>
+        printButton
+        exportable={false}
         listKey="expense-claims"
         endpoint="/expense-claims"
         printPath="/api/expense-claims/pdf"

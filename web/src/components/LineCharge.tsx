@@ -1,4 +1,5 @@
 import type { OfficeBudgetOption } from './OfficeLine';
+import { SearchSelect } from './SearchSelect';
 
 /**
  * WHERE ONE LINE IS CHARGED (2026-11-11, the owner's call: a credit card's
@@ -82,7 +83,7 @@ export function ChargeCell({
   );
   return (
     <div className="fin-line-stack line-charge">
-      <select
+      <SearchSelect
         aria-label={`${label} charged to`}
         aria-invalid={invalid || undefined}
         value={where}
@@ -117,7 +118,7 @@ export function ChargeCell({
             ))}
           </optgroup>
         ))}
-      </select>
+      </SearchSelect>
       {value.jobId && (
         <select
           aria-label={`${label} budget line`}

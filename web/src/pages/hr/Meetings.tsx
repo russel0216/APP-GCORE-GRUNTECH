@@ -34,6 +34,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Meetings — G-HR › My day (item 11).
@@ -290,9 +291,10 @@ export function Meetings() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Meetings</h1>
-        <div className="meetings-head-actions">
+      <h1 className="visually-hidden">Meetings</h1>
+      {month && (
+        <div className="list-toolbar">
+          {newButton}
           <div className="scope-switch" role="group" aria-label="How to show meetings">
             <button
               type="button"
@@ -311,9 +313,8 @@ export function Meetings() {
               Month
             </button>
           </div>
-          {month && newButton}
         </div>
-      </div>
+      )}
 
       {month ? (
         <MeetingsMonth
@@ -322,6 +323,8 @@ export function Meetings() {
         />
       ) : (
         <DataList<MeetingRow>
+          printButton
+          exportable={false}
           listKey="hr-meetings"
           endpoint="/meetings"
           printPath="/api/meetings/pdf"
@@ -362,7 +365,29 @@ export function Meetings() {
               ],
             },
           ]}
-          actions={newButton}
+          actions={
+            <>
+              {newButton}
+              <div className="scope-switch" role="group" aria-label="How to show meetings">
+                <button
+                  type="button"
+                  className={month ? '' : 'active'}
+                  aria-pressed={!month}
+                  onClick={() => showMonth(false)}
+                >
+                  List
+                </button>
+                <button
+                  type="button"
+                  className={month ? 'active' : ''}
+                  aria-pressed={month}
+                  onClick={() => showMonth(true)}
+                >
+                  Month
+                </button>
+              </div>
+              </>
+          }
         />
       )}
 
@@ -617,7 +642,7 @@ function MeetingModal({
 
       {seesProjects ? (
         <Field label="For project" hint="A kick-off, a site meeting, a turnover — it then shows on that project's Meetings & Records tab.">
-          <select value={jobId} onChange={(e) => setJobId(e.target.value)}>
+          <SearchSelect value={jobId} onChange={(e) => setJobId(e.target.value)}>
             <option value="">— none —</option>
             {jobId && !jobs.some((j) => j.id === jobId) && knownJob && (
               <option value={jobId}>
@@ -629,7 +654,7 @@ function MeetingModal({
                 {j.number} — {j.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       ) : (
         knownJob && (
@@ -1244,7 +1269,7 @@ function MinutesCard({ meeting: m, onSaved }: { meeting: Meeting; onSaved: () =>
                       Ask for a change
                     </button>
                   </div>
-                </>
+              </>
               ) : (
                 <div className="stack minutes-ask">
                   <label htmlFor="minutes-ask">What should change?</label>

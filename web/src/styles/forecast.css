@@ -1,43 +1,11 @@
 /* The Forecast (2026-10-08): open quotations by expected closing date, by period. Tokens only. */
 
-/* The controls take the whole line in even columns (2026-11-13, the owner's
-   call: "maximize the width"): no ragged gap at the right, and each picker is
-   as wide as its column. */
-.forecast .fc-controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(calc(var(--s-8) * 4), 1fr));
-  align-items: end;
-  gap: var(--s-3);
-  margin-bottom: var(--block-gap);
-}
-
-.forecast .fc-control > input,
-.forecast .fc-control > select,
-.forecast .fc-control .tick-picker,
-.forecast .fc-control .tick-picker > button {
-  width: 100%;
-}
-
 .forecast .fc-periods tfoot tr.fc-pastdue td {
   color: var(--warn);
 }
 
 .forecast .fc-group-head .btn {
   margin-left: auto;
-}
-
-.forecast .fc-control {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-}
-
-.forecast .fc-control > input,
-.forecast .fc-control > select,
-.forecast .fc-control .tick-picker {
-  min-width: calc(var(--s-8) * 4);
 }
 
 .forecast .fc-stats {
@@ -196,4 +164,10 @@
 .forecast .fc-compare-note {
   margin: 0 0 var(--block-gap);
   font-size: var(--fs-sm);
+}
+
+/* A picker in the Filters panel takes its column's width, as a select does. */
+.forecast .list-filter-panel .tick-picker,
+.forecast .list-filter-panel .tick-picker > button {
+  width: 100%;
 }

@@ -11,6 +11,7 @@ import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps,
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Borrow slips (2026-10-14, the owner's call: "anyone can request to borrow;
@@ -140,13 +141,12 @@ export function BorrowSlips() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Borrow Slips</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Borrow Slips</h1>
 
       <DataList<BorrowRow>
+        printButton
+        exportable={false}
         listKey="borrow-slips"
         endpoint="/borrow-slips"
         printPath="/api/borrow-slips/pdf"
@@ -451,7 +451,7 @@ export function BorrowRequestEditor() {
         </h2>
         <div className="qe-header qe-rows prq-rows">
           <Field label="Warehouse" required error={attempted && !form.warehouseId ? 'Choose the warehouse' : null}>
-            <select
+            <SearchSelect createKind="warehouse"
               value={form.warehouseId}
               required
               onChange={(e) => {
@@ -465,28 +465,28 @@ export function BorrowRequestEditor() {
                   {w.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
           <Field label="For project" hint="Optional — recorded, never charged">
-            <select value={form.jobId} onChange={(e) => set({ jobId: e.target.value })}>
+            <SearchSelect value={form.jobId} onChange={(e) => set({ jobId: e.target.value })}>
               <option value="">— none —</option>
               {options.jobs.map((j) => (
                 <option key={j.id} value={j.id}>
                   {j.number} — {j.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
           {!form.jobId && salesOrders.length > 0 && (
             <Field label="For a sales order" hint="Optional — recorded, never charged">
-              <select value={form.salesOrderId} onChange={(e) => set({ salesOrderId: e.target.value })}>
+              <SearchSelect value={form.salesOrderId} onChange={(e) => set({ salesOrderId: e.target.value })}>
                 <option value="">— none —</option>
                 {salesOrders.map((o) => (
                   <option key={o.id} value={o.id}>
                     {o.number} — {o.customer}
                   </option>
                 ))}
-              </select>
+              </SearchSelect>
             </Field>
           )}
           {options.mayNameBorrower ? (
@@ -580,14 +580,14 @@ export function BorrowRequestEditor() {
                   return (
                     <tr key={i}>
                       <td>
-                        <select aria-label={`Item ${i + 1}`} value={l.itemId} onChange={(e) => setLine(i, { itemId: e.target.value })}>
+                        <SearchSelect aria-label={`Item ${i + 1}`} value={l.itemId} onChange={(e) => setLine(i, { itemId: e.target.value })}>
                           <option value="">— choose —</option>
                           {items.map((s) => (
                             <option key={s.id} value={s.id}>
                               {s.code} — {s.name}
                             </option>
                           ))}
-                        </select>
+                        </SearchSelect>
                       </td>
                       <td className="right mono">{it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}</td>
                       <td>

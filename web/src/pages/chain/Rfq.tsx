@@ -97,13 +97,12 @@ export function Rfqs() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Requests for Quotation</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Requests for Quotation</h1>
 
       <DataList<RfqRow>
+        printButton
+        exportable={false}
         listKey="rfqs"
         endpoint="/rfqs"
         printPath="/api/rfqs/pdf"

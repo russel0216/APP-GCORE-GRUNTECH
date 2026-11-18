@@ -9,6 +9,7 @@ import { useBackLink } from '../../components/Navigation';
 import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the Approved
@@ -285,14 +286,14 @@ export function PlanRequestModal({
       <ErrorBox error={error} />
       {!existing && cads.length > 0 && (
         <Field label="From a CAD J.O." hint="An accepted drawing of this project: its number becomes the drawing reference and its files are copied on.">
-          <select value={cadId} onChange={(e) => setCadId(e.target.value)}>
+          <SearchSelect value={cadId} onChange={(e) => setCadId(e.target.value)}>
             <option value="">— none, type the reference —</option>
             {cads.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.number} {c.revision ?? ''} — {c.title}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       )}
       <Field label="What is to be approved" required={!cad}>

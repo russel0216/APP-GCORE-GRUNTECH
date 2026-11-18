@@ -171,6 +171,8 @@ export function PeopleFlow() {
 
   const list = (props: { reports?: boolean }) => (
     <DataList<FlowRow>
+      printButton
+      exportable={false}
       listKey={props.reports ? 'people-flow-reports' : 'people-flow'}
       endpoint="/people-flow"
       printPath="/api/people-flow/pdf"
@@ -213,9 +215,7 @@ export function PeopleFlow() {
   if (all) {
     return (
       <div>
-        <div className="page-head">
-          <h1>People Flow</h1>
-        </div>
+        <h1 className="visually-hidden">People Flow</h1>
         {list({})}
       </div>
     );
@@ -223,9 +223,7 @@ export function PeopleFlow() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>People Flow</h1>
-      </div>
+      <h1 className="visually-hidden">People Flow</h1>
       <MyPath />
       {supervises && (
         <>

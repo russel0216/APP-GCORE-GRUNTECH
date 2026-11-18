@@ -85,7 +85,17 @@ function canSee(user: ResolvedUser, submodule: string): boolean {
 }
 
 export interface GopsOverview {
-  sales: { leads: Tally | null; quotations: Tally | null; costings: Tally | null } | null;
+  sales: {
+    leads: Tally | null;
+    quotations: Tally | null;
+    costings: Tally | null;
+    /**
+     * Quotations LOST to somebody else in the window — never one the customer
+     * cancelled (a sample, a project that did not push through). The Lost card,
+     * which opens the quotation list on `lostKind=lost` (2026-11-18).
+     */
+    lost: number | null;
+  } | null;
   delivery: { jobs: Tally | null; reportsAwaitingApproval: number | null } | null;
   aftermarket: {
     contracts: Tally | null;
@@ -130,7 +140,7 @@ export async function gopsOverview(
   const mineOnly = (submodule: string) =>
     !me.isSuperAdmin && !me.permissions.has(`gops.${submodule}.view_all`);
 
-  const [leads, quotations, costings, jobs, reportsPending, contracts, activeContracts, pmAccomplished] =
+  const [leads, quotations, costings, jobs, reportsPending, contracts, activeContracts, pmAccomplished, lost] =
     await Promise.all([
       sees.leads
         ? prisma.lead.groupBy({
@@ -172,6 +182,16 @@ export async function gopsOverview(
             where: { kind: 'PREVENTIVE_MAINTENANCE', status: 'COMPLETED', ...performed },
           })
         : null,
+      sees.quotations
+        ? prisma.quotation.count({
+            where: {
+              ...period,
+              ...(mineOnly('quotations') ? { ownerId: me.id } : {}),
+              outcome: 'LOST',
+              OR: [{ lostKind: null }, { lostKind: 'LOST' }],
+            },
+          })
+        : null,
     ]);
 
   return {
@@ -185,6 +205,7 @@ export async function gopsOverview(
               ? tally(quotations.map((q) => ({ status: q.outcome, _count: q._count })))
               : null,
             costings: costings ? tally(costings) : null,
+            lost,
           }
         : null,
     delivery:

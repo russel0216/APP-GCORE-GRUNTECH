@@ -21,6 +21,7 @@ import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { BudgetLine, Route } from '../chain/PurchaseRequisitionEditor';
 import type { BudgetRequest, RequestSource } from './BudgetRequests';
 import { NO_CHARGE, chargeKey, type LineCharge } from '../../components/LineCharge';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The budget request as a PAGE (2026-10-19, the owner's call: "budget request
@@ -499,7 +500,7 @@ export function BudgetRequestEditor() {
                       {header.kind !== 'project' && (
                         <input type="search" value={search} placeholder="Search…" aria-label="Search" onChange={(e) => setSearch(e.target.value)} />
                       )}
-                      <select value={header.sourceId} onChange={(e) => setHeader((h) => ({ ...h, sourceId: e.target.value, costCategoryId: '' }))}>
+                      <SearchSelect value={header.sourceId} onChange={(e) => setHeader((h) => ({ ...h, sourceId: e.target.value, costCategoryId: '' }))}>
                         <option value="">— choose —</option>
                         {choices.map((p) => (
                           <option key={p.id} value={p.id}>
@@ -507,7 +508,7 @@ export function BudgetRequestEditor() {
                             {p.sub ? ` · ${p.sub}` : ''}
                           </option>
                         ))}
-                      </select>
+                      </SearchSelect>
                     </div>
                   </Field>
                 </>

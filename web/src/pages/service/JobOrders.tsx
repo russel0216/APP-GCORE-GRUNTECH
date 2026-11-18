@@ -29,6 +29,7 @@ import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
 import { Stat } from '../../components/charts';
 import { ListReportModal } from '../../components/ListReport';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -284,13 +285,12 @@ export function JobOrders() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Job Orders</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Job Orders</h1>
 
       <DataList<JobOrderRow>
+        printButton
+        exportable={false}
         listKey="job-orders"
         endpoint="/job-orders"
         columns={columns}
@@ -321,14 +321,14 @@ export function JobOrders() {
         ]}
         actions={
           <>
-            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
-              Report
-            </button>
             {canCreate ? (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
                 + New job order request
               </button>
             ) : null}
+            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
+              Report
+            </button>
           </>
         }
       />
@@ -686,7 +686,7 @@ export function JobOrderModal({
           </Field>
         ) : (
           <Field label="Customer">
-            <select
+            <SearchSelect
               value={form.customerId}
               disabled={customerLocked}
               onChange={(e) =>
@@ -702,7 +702,7 @@ export function JobOrderModal({
                   {c.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         )}
         <Field
@@ -715,7 +715,7 @@ export function JobOrderModal({
               : 'Any quotation still on, one under negotiation included'
           }
         >
-          <select value={form.quotationId} onChange={(e) => pickQuotation(options.quotations.find((q) => q.id === e.target.value))}>
+          <SearchSelect value={form.quotationId} onChange={(e) => pickQuotation(options.quotations.find((q) => q.id === e.target.value))}>
             <option value="">— none —</option>
             {existing?.quotation && !options.quotations.some((q) => q.id === existing.quotation!.id) && (
               <option value={existing.quotation.id}>{existing.quotation.number}</option>
@@ -725,20 +725,20 @@ export function JobOrderModal({
                 {q.number} — {q.subject} ({OUTCOME_LABEL[q.outcome] ?? q.outcome.toLowerCase()})
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Sales order" hint="Optional — the order the work was booked on">
-          <select value={form.salesOrderId} onChange={(e) => pickSalesOrder(options.salesOrders.find((o) => o.id === e.target.value))}>
+          <SearchSelect value={form.salesOrderId} onChange={(e) => pickSalesOrder(options.salesOrders.find((o) => o.id === e.target.value))}>
             <option value="">— none —</option>
             {salesOrdersOffered.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.number} · {formatMoney(o.amount)} · {o.status.toLowerCase().replace(/_/g, ' ')}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Project" hint="Only when the project already exists — otherwise approval builds it">
-          <select
+          <SearchSelect
             value={form.jobId}
             onChange={(e) => {
               const j = options.jobs.find((x) => x.id === e.target.value);
@@ -751,7 +751,7 @@ export function JobOrderModal({
                 {j.number} — {j.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
 
@@ -761,7 +761,7 @@ export function JobOrderModal({
           <input value={form.projectName} placeholder="Oxygen plant, Building B" onChange={(e) => set('projectName', e.target.value)} />
         </Field>
         <Field label="Site">
-          <select value={form.siteId} onChange={(e) => set('siteId', e.target.value)}>
+          <SearchSelect value={form.siteId} onChange={(e) => set('siteId', e.target.value)}>
             <option value="">— none —</option>
             {options.sites.map((s) => (
               <option key={s.id} value={s.id}>
@@ -769,17 +769,17 @@ export function JobOrderModal({
                 {s.city ? ` · ${s.city}` : ''}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Contact person">
-          <select value={form.contactId} onChange={(e) => pickContact(e.target.value)}>
+          <SearchSelect createKind="contact" createCustomerId={form.customerId || undefined} value={form.contactId} onChange={(e) => pickContact(e.target.value)}>
             <option value="">— none —</option>
             {options.contacts.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Contact number">
           <input value={form.contactNumber} placeholder="0917 000 0000" onChange={(e) => set('contactNumber', e.target.value)} />

@@ -29,6 +29,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call).
@@ -430,13 +431,12 @@ export function CadJobOrders() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>CAD J.O.</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">CAD J.O.</h1>
 
       <DataList<CadRow>
+        printButton
+        exportable={false}
         listKey="cad-job-orders"
         endpoint="/cad-job-orders"
         columns={columns}
@@ -470,14 +470,14 @@ export function CadJobOrders() {
         bulkActions={lead ? (ctx) => <CadBulkActions ctx={ctx} designers={designers} /> : undefined}
         actions={
           <>
-            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
-              Report
-            </button>
             {canCreate ? (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
                 + New CAD J.O.
               </button>
             ) : null}
+            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
+              Report
+            </button>
           </>
         }
       />
@@ -802,7 +802,7 @@ export function CadRequestModal({
           </Field>
         ) : (
           <Field label="Customer">
-            <select
+            <SearchSelect
               value={form.customerId}
               disabled={customerLocked}
               onChange={(e) => setForm({ ...form, customerId: e.target.value, jobId: '', quotationId: '', jobOrderId: '' })}
@@ -814,11 +814,11 @@ export function CadRequestModal({
                   {c.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         )}
         <Field label="Project" hint="When the drawing is for a project already built">
-          <select value={form.jobId} onChange={(e) => set('jobId', e.target.value)}>
+          <SearchSelect value={form.jobId} onChange={(e) => set('jobId', e.target.value)}>
             <option value="">— none —</option>
             {existing?.job && !options.jobs.some((j) => j.id === existing.job!.id) && <option value={existing.job.id}>{existing.job.number}</option>}
             {options.jobs.map((j) => (
@@ -826,10 +826,10 @@ export function CadRequestModal({
                 {j.number} — {j.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Quotation" hint="The quote the drawing supports, if any">
-          <select value={form.quotationId} onChange={(e) => set('quotationId', e.target.value)}>
+          <SearchSelect value={form.quotationId} onChange={(e) => set('quotationId', e.target.value)}>
             <option value="">— none —</option>
             {existing?.quotation && !options.quotations.some((q) => q.id === existing.quotation!.id) && (
               <option value={existing.quotation.id}>{existing.quotation.number}</option>
@@ -839,10 +839,10 @@ export function CadRequestModal({
                 {q.number} — {q.subject}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Job order" hint="The project work order, if one was raised">
-          <select value={form.jobOrderId} onChange={(e) => pickJobOrder(e.target.value)}>
+          <SearchSelect value={form.jobOrderId} onChange={(e) => pickJobOrder(e.target.value)}>
             <option value="">— none —</option>
             {existing?.jobOrder && !options.jobOrders.some((o) => o.id === existing.jobOrder!.id) && (
               <option value={existing.jobOrder.id}>{existing.jobOrder.number}</option>
@@ -852,7 +852,7 @@ export function CadRequestModal({
                 {o.number} — {o.projectName ?? o.title}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
 

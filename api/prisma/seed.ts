@@ -1,4 +1,6 @@
 import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
+import { clearListLayoutNudges } from '../src/shared/listLayoutNudges';
+import { markScoroCancelledQuotations } from '../src/shared/scoroCancelled';
 import { syncCatalogue } from '../src/shared/catalogue';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
 import { backfillProjectStock } from '../src/shared/projectStock';
@@ -1468,6 +1470,11 @@ async function main() {
   // Gruntech's one warehouse is at the main office (2026-10-25), once.
   const placedAtOffice = await placeMainWarehouseAtOffice();
   console.log(`  ✓ Warehouse${placedAtOffice ? ` (${placedAtOffice})` : ''}`);
+  // The Sales and Project Management screens' uniform toolbar and cards (2026-11-17): layout nudges made for the old layout go, once.
+  const scoroCancelled = await markScoroCancelledQuotations();
+  if (scoroCancelled) console.log(`  ${scoroCancelled}`);
+  const nudgesCleared = await clearListLayoutNudges();
+  if (nudgesCleared) console.log(`  ✓ Layout (${nudgesCleared})`);
   // Every item on the Inventory list, stocked or not (2026-10-25): a
   // placeholder line in the main warehouse for an item with none anywhere.
   const catalogue = await syncCatalogue();

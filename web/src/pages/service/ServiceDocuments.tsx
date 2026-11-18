@@ -142,13 +142,12 @@ export function ServiceDocuments() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Service Documents</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Service Documents</h1>
 
       <DataList<ServiceDocumentRow>
+        printButton
+        exportable={false}
         listKey="service-documents"
         endpoint="/service-documents"
         columns={columns()}

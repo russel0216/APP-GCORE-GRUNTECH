@@ -9,6 +9,8 @@ import { ApprovalStepper, allHeld, previewSteps } from '../../components/Approva
 import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { parseDelimited, preferredFrom, prLineAmount, rowsToPrLines, type PrLineDraft } from '../../lib/prLines';
+import { SearchSelect } from '../../components/SearchSelect';
+import { CREATE_RIGHT, CreatePopup } from '../../components/CreatePopup';
 
 /**
  * The purchase requisition as a PAGE (2026-10-13, the owner's call: "Purchase
@@ -683,7 +685,7 @@ export function PurchaseRequisitionEditor() {
                   error={attempted && !header.quotationId ? 'Choose the quotation' : null}
                   hint="Open, or won with no sales order yet. Nothing is charged until it has a sales order or a project."
                 >
-                  <select value={header.quotationId} required onChange={(e) => setHeader((h) => ({ ...h, quotationId: e.target.value }))}>
+                  <SearchSelect value={header.quotationId} required onChange={(e) => setHeader((h) => ({ ...h, quotationId: e.target.value }))}>
                     <option value="">— choose a quotation —</option>
                     {existing?.quotation && !quotes.some((o) => o.id === existing.quotation!.id) && (
                       <option value={existing.quotation.id}>
@@ -696,12 +698,12 @@ export function PurchaseRequisitionEditor() {
                         {o.subject ? ` · ${o.subject}` : ''}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               )}
               {forOrder && !orderFixed && (
                 <Field label="Sales order" required error={attempted && !header.salesOrderId ? 'Choose the sales order' : null}>
-                  <select
+                  <SearchSelect
                     value={header.salesOrderId}
                     required
                     onChange={(e) => setHeader((h) => ({ ...h, salesOrderId: e.target.value }))}
@@ -718,19 +720,19 @@ export function PurchaseRequisitionEditor() {
                         {o.subject ? ` · ${o.subject}` : ''}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               )}
               {direct && !jobFixed && (
                 <Field label="Project" required error={attempted && !header.jobId ? 'Choose the project' : null}>
-                  <select value={header.jobId} required onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value }))}>
+                  <SearchSelect value={header.jobId} required onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value }))}>
                     <option value="">— choose —</option>
                     {jobs.map((j) => (
                       <option key={j.id} value={j.id}>
                         {j.number} — {j.name}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               )}
               <Field
@@ -738,14 +740,14 @@ export function PurchaseRequisitionEditor() {
                 required={header.kind === 'STOCK_REPLENISHMENT'}
                 error={attempted && header.kind === 'STOCK_REPLENISHMENT' && !header.warehouseId ? 'Choose the warehouse' : null}
               >
-                <select value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
+                <SearchSelect createKind="warehouse" value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
                   <option value="">{direct ? '— straight to site —' : forOrder ? '— straight to the customer —' : '— choose —'}</option>
                   {warehouses.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               <Field label="Needed by">
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
@@ -1151,6 +1153,11 @@ export function ItemCell({
   onPick: (sg: Suggestion) => void;
   onPasteRows: (text: string) => void;
 }) {
+  const { can } = useAuth();
+  // "+ New item" (2026-11-18): the item master's own form in a popup, the name
+  // typed filled in; saving puts the new item on this line.
+  const mayMakeItem = can(CREATE_RIGHT.item);
+  const [creating, setCreating] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [matches, setMatches] = useState<(Suggestion & { source: 'costing' | 'order' | 'item' })[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1225,7 +1232,7 @@ export function ItemCell({
           }
         }}
       />
-      {open && matches.length > 0 && (
+      {open && (matches.length > 0 || (mayMakeItem && term.length >= 2)) && (
         <ul className="lookup-menu qe-suggest" ref={menuRef}>
           {matches.map((sg) => (
             <li key={`${sg.source}-${sg.id}`}>
@@ -1260,7 +1267,41 @@ export function ItemCell({
               </button>
             </li>
           ))}
+          {mayMakeItem && term.length >= 2 && (
+            <li className="lookup-new">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  setCreating(term);
+                }}
+              >
+                {matches.length ? 'Not one of these — ' : ''}+ New item “{term}”
+              </button>
+            </li>
+          )}
         </ul>
+      )}
+      {creating !== null && (
+        <CreatePopup
+          kind="item"
+          typed={creating}
+          onClose={() => setCreating(null)}
+          onCreated={() => setCreating(null)}
+          onItem={(it) =>
+            onPick({
+              id: it.id,
+              itemId: it.id,
+              code: it.code,
+              partNumber: it.partNumber,
+              name: it.name,
+              description: '',
+              unit: it.unit,
+              unitCost: it.standardCost == null ? null : Number(it.standardCost),
+              costCategory: null,
+            })
+          }
+        />
       )}
       {/* The quotation's description box (2026-10-26): it grows with its lines,
           drags taller at its corner and remembers what was written before. */}

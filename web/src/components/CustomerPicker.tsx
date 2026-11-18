@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { api, qs } from '../lib/api';
-import { useToast } from './ui';
 import { useAuth } from '../lib/auth';
+
+// The full New customer form, loaded when first asked for (the page that owns
+// it imports half the app; a picker must not).
+const CustomerForm = lazy(() => import('../pages/masters/Customers').then((m) => ({ default: m.CustomerForm })));
 
 export interface CustomerRef {
   id: string;
@@ -33,7 +37,7 @@ export interface CustomerRef {
 export function CustomerPicker({
   value,
   onChange,
-  onError,
+
   inputId,
   invalid,
   describedBy,
@@ -61,7 +65,6 @@ export function CustomerPicker({
   /** Set by `Field`. */
   'aria-invalid'?: boolean;
 }) {
-  const toast = useToast();
   const { can } = useAuth();
   const mayCreate = allowCreate && can('gops.customers.create');
   const [text, setText] = useState(value?.name ?? '');
@@ -72,7 +75,9 @@ export function CustomerPicker({
   // matches" is not what a refused or dropped lookup means.
   const [answered, setAnswered] = useState('');
   const [failed, setFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The New customer form, open in a popup over the page (2026-11-18): the
+  // name typed starts it, and saving picks the customer.
+  const [creating, setCreating] = useState<string | null>(null);
   const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -123,19 +128,11 @@ export function CustomerPicker({
     inputRef.current?.focus();
   }
 
-  async function createCustomer() {
+  function createCustomer() {
     const name = text.trim();
     if (name.length < 2) return;
-    setBusy(true);
-    try {
-      const created = await api.post<CustomerRef>('/customers', { name });
-      toast('ok', `${name} added as a customer`);
-      pick({ id: created.id, name: created.name });
-    } catch (err) {
-      onError?.(err);
-    } finally {
-      setBusy(false);
-    }
+    setPicking(false);
+    setCreating(name);
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -218,14 +215,29 @@ export function CustomerPicker({
           {offerCreate && (
             <li className="lookup-new">
               <div className="lookup-new-row">
-                <button type="button" onClick={createCustomer} disabled={busy}>
-                  {matches.length ? 'Not one of these — ' : ''}add “{term}” as a new customer
+                <button type="button" onClick={createCustomer}>
+                  {matches.length ? 'Not one of these — ' : ''}+ New customer “{term}”
                 </button>
               </div>
             </li>
           )}
         </ul>
       )}
+
+      {creating !== null &&
+        createPortal(
+          <Suspense fallback={null}>
+            <CustomerForm
+              presetName={creating}
+              onClose={() => setCreating(null)}
+              onSaved={(newId, name) => {
+                setCreating(null);
+                pick({ id: newId, name });
+              }}
+            />
+          </Suspense>,
+          document.body,
+        )}
     </div>
   );
 }

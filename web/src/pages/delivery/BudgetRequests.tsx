@@ -304,13 +304,12 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>{travel ? 'Travel Requests' : 'Budget Requests'}</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">{travel ? 'Travel Requests' : 'Budget Requests'}</h1>
 
       <DataList<BudgetRequest>
+        printButton
+        exportable={false}
         listKey={`${finance ? 'fin-' : ''}${travel ? 'travel-requests' : 'budget-requests'}`}
         endpoint="/budget-requests"
         // The two registers are one list (rule 15): a travel request has its own menu entry.
@@ -585,12 +584,11 @@ export function FinanceLiquidations() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Budget Liquidations</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Budget Liquidations</h1>
       <DataList<BudgetRequest>
+        printButton
+        exportable={false}
         listKey="fin-budget-liquidations"
         endpoint="/budget-requests"
         printPath="/api/budget-requests/pdf"

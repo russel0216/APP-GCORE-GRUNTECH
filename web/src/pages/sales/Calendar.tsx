@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { dayKeyOf, parseDay, todayLocal, weekDays } from '../../lib/day';
 import { blockSpan, minutesLabel, placeInLanes } from '../../lib/timeGrid';
 import { Checkbox, ErrorBox, formatTime, statusTone, useToast } from '../../components/ui';
+import { ToolsMenu } from '../../components/ToolsMenu';
 import { KIND_LABEL } from '../service/Reports';
 import {
   CalendarToolbar,
@@ -15,6 +16,7 @@ import {
 import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
 import { ACTIVITY_TONES, BUILTIN_TYPES, type Activity, type ActivityTypeDef, type Rsvp } from './activityShared';
+import { SearchSelect } from '../../components/SearchSelect';
 
 // ════════════════════════════════════════════════════════════════════
 //  SALES CALENDAR
@@ -317,24 +319,21 @@ export function SalesCalendar() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Sales Calendar</h1>
-          <p>
-            What everyone in sales is doing this week or this month — site visits, follow-ups,
-            submissions. Scheduling something for someone else, or inviting them, notifies them;
-            a reminder goes to everyone on it.
-          </p>
-        </div>
-        {can('gops.calendar.create') && (
-          <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
-            + New activity
-          </button>
-        )}
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Sales Calendar</h1>
 
-      <CalendarToolbar nav={nav}>
-        <select
+      <CalendarToolbar
+        nav={nav}
+        tools={<ToolsMenu items={[{ label: 'Refresh', onSelect: () => setTick((t) => t + 1) }]} />}
+        lead={
+          can('gops.calendar.create') && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+              + New activity
+            </button>
+          )
+        }
+      >
+        <SearchSelect
           className="cal-person"
           aria-label="Whose activities (booked for them or invited)"
           value={who}
@@ -346,7 +345,7 @@ export function SalesCalendar() {
               {p.name}
             </option>
           ))}
-        </select>
+        </SearchSelect>
         {canVisits && (
           <Checkbox checked={showVisits} onChange={toggleVisits} label="Show service visits" />
         )}

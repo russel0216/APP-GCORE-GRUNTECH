@@ -391,13 +391,12 @@ export function Partners() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Partners</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Partners</h1>
 
       <DataList<PartnerRow>
+        printButton
+        exportable={false}
         listKey="partners"
         endpoint="/partners"
         columns={columns}

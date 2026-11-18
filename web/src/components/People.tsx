@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { api, qs } from '../lib/api';
 import type { Person } from './PeoplePicker';
+import { SearchSelect } from './SearchSelect';
 
 /*
   One way to list people, and one way to pick ONE of them (2026-10-09, the
@@ -86,8 +87,8 @@ export function toPerson(row: PersonRow): Person {
 }
 
 /**
- * One person, from a list: a native select (the keyboard and the phone know
- * it), grouped by team when the people carry one, with "— none —"
+ * One person, from a list: a box you type in (`SearchSelect`, 2026-11-18 —
+ * a native select before), grouped by team when the people carry one, with "— none —"
  * unless the choice is required. A person already chosen who is no longer in
  * the list (left the role, deactivated) stays as an option, so opening an old
  * record never silently clears it — named through `current`, or, when the
@@ -155,16 +156,17 @@ export function PersonSelect({
   );
   const described = [describedBy, fieldDescribedBy].filter(Boolean).join(' ') || undefined;
   return (
-    <select
+    <SearchSelect
       id={id ?? autoId}
       value={value}
       required={required}
       disabled={disabled}
+      placeholder={placeholder}
       aria-invalid={invalid || fieldInvalid || undefined}
       aria-describedby={described}
       onChange={(e) => onChange(e.target.value)}
     >
-      {(!required || !value) && <option value="">{placeholder}</option>}
+      {!required && <option value="">{placeholder}</option>}
       {missing && (
         <option value={missing.id}>
           {missing.name}
@@ -179,7 +181,7 @@ export function PersonSelect({
             </optgroup>
           ))
         : people.map(option)}
-    </select>
+    </SearchSelect>
   );
 }
 // Field wires its label, hint and error to it as it does to a native select.

@@ -369,11 +369,8 @@ export function SalesOrders() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Sales Orders</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Sales Orders</h1>
 
       {picking && (
         <PickQuotationPanel
@@ -384,6 +381,8 @@ export function SalesOrders() {
       )}
 
       <DataList<SalesOrderListRow>
+        printButton
+        exportable={false}
         listKey="sales-orders"
         // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
         defaultFilters={{ dateFrom: yearStartKey(new Date()) }}

@@ -7,6 +7,7 @@ import { PersonSelect, usePeople } from '../../components/People';
 import { useHolidayKeys } from '../../lib/holidays';
 import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DecisionNote, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The Scope of Work as a Gantt chart (2026-10-06) — the old gasiontech
@@ -713,14 +714,14 @@ function TaskEditor({
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Site survey, piping, testing…" />
         </Field>
         <Field label="Scope line">
-          <select value={form.scopeItemId} onChange={(e) => setForm({ ...form, scopeItemId: e.target.value })}>
+          <SearchSelect value={form.scopeItemId} onChange={(e) => setForm({ ...form, scopeItemId: e.target.value })}>
             <option value="">— not under a scope line —</option>
             {scopeItems.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Start">
           <input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />

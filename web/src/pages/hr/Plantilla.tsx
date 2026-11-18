@@ -6,6 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { BarList, Meter, Panel, Stat } from '../../components/charts';
 import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The plantilla — the authorised staffing pattern.
@@ -180,11 +181,7 @@ export function Plantilla() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Plantilla</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Plantilla</h1>
 
       <ErrorBox error={error} />
 
@@ -250,6 +247,8 @@ export function Plantilla() {
       )}
 
       <DataList<PositionRow>
+        printButton
+        exportable={false}
         listKey="plantilla"
         endpoint="/positions"
         printPath="/api/positions/pdf"
@@ -431,7 +430,7 @@ function PositionModal({
           />
         </Field>
         <Field label="Counts the role" hint="Filled is the active people holding this role on Admin › Users">
-          <select
+          <SearchSelect
             value={form.roleId}
             disabled={!mayEdit}
             onChange={(e) => {
@@ -445,7 +444,7 @@ function PositionModal({
                 {r.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field
           label="Authorised headcount"

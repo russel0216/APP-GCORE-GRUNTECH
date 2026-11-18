@@ -16,6 +16,7 @@ import { PersonSelect, usePeople, type PersonRow } from '../../components/People
 import { FaceSamplesPanel } from '../hr/FaceSamples';
 import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /** The BIR tax status codes — the API's `TAX_STATUSES` (shared/records.ts). */
 export const TAX_STATUSES: { code: string; label: string }[] = [
@@ -280,13 +281,11 @@ export function Employees() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Employees</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Employees</h1>
 
       <DataList<EmployeeRow>
+        printButton
+        exportable={false}
         listKey="employees"
         endpoint="/employees"
         printPath="/api/employees/pdf"
@@ -1237,7 +1236,7 @@ function EmployeeForm({
                           : 'Their record gives the login its name, position and mobile'
                     }
                   >
-                    <select value={existingId} onChange={(e) => setExistingId(e.target.value)}>
+                    <SearchSelect value={existingId} onChange={(e) => setExistingId(e.target.value)}>
                       <option value="">— choose —</option>
                       {register !== 'failed' &&
                         register?.map((e) => (
@@ -1246,7 +1245,7 @@ function EmployeeForm({
                             {e.position ? ` · ${e.position}` : ''}
                           </option>
                         ))}
-                    </select>
+                    </SearchSelect>
                   </Field>
                 </div>
               ) : (

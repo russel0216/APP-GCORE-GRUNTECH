@@ -6,6 +6,7 @@ import { NumberInput } from '../../components/NumberInput';
 import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import { useUnsavedChanges } from '../../components/Navigation';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * G-FIN › Analysis › OFFICE BUDGET (2026-11-10, the owner's call, his two
@@ -247,11 +248,14 @@ export function OfficeBudgets() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Office Budget</h1>
-        </div>
-        <div className="row">
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Office Budget</h1>
+      <div className="list-toolbar">
+          {list.canEdit && !editing && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
+              + New budget
+            </button>
+          )}
           <select aria-label="Year" value={String(list.year)} disabled={editing} onChange={(e) => setParam({ year: e.target.value, budget: '', line: '' })}>
             {list.years.map((y) => (
               <option key={y} value={y}>
@@ -259,12 +263,6 @@ export function OfficeBudgets() {
               </option>
             ))}
           </select>
-          {list.canEdit && !editing && (
-            <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>
-              + New budget
-            </button>
-          )}
-        </div>
       </div>
 
       <ErrorBox error={error} />
@@ -648,14 +646,14 @@ function NewBudgetModal({ year, years, onClose, onCreated }: { year: number; yea
           </select>
         </Field>
         <Field label="Start from" hint="Copying takes the lines and their amounts; the actuals start at zero.">
-          <select value={copyFrom} onChange={(e) => setCopyFrom(e.target.value)}>
+          <SearchSelect value={copyFrom} onChange={(e) => setCopyFrom(e.target.value)}>
             <option value="">A blank budget</option>
             {sources.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.year} — {b.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
     </Modal>

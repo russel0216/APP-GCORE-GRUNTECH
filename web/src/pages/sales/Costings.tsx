@@ -113,11 +113,8 @@ export function Costings() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Costing</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Costing</h1>
 
       <div className="row org-switch">
         <div className="scope-switch">
@@ -136,6 +133,8 @@ export function Costings() {
         <>
           <CostingTiles scope={params.get('scope') === 'mine' ? 'mine' : 'all'} />
           <DataList<CostingRow>
+            printButton
+            exportable={false}
             listKey="costings"
             endpoint="/costings"
             columns={columns}

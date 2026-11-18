@@ -5,6 +5,7 @@ import { ActiveBadge, ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, u
 import { NumberInput } from '../../components/NumberInput';
 import { TickPicker } from '../../components/TickPicker';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
+import { SearchSelect } from '../../components/SearchSelect';
 
 interface Step {
   id?: string;
@@ -100,21 +101,14 @@ export function Workflows() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Approval Workflows</h1>
-          <p>
-            One engine routes every document type. Bands by amount are how thresholds work — a
-            request under ₱50,000 can take a short route while a larger one collects more signatures.
-            A requester can never approve their own document, whatever the routing says.
-          </p>
-        </div>
-        {can('admin.workflows.create') && (
-          <button className="btn btn-primary" onClick={() => setEditing('new')}>
+      <h1 className="visually-hidden">Approval Workflows</h1>
+      {can('admin.workflows.create') && (
+        <div className="list-toolbar">
+          <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
             + New workflow
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <ErrorBox error={error} />
 
@@ -382,14 +376,14 @@ function WorkflowEditor({
           label="Prepared by"
           hint="Blank = everyone not covered by a role's own route. A role makes this the route for documents its holders prepare; with no steps, they are approved on submit."
         >
-          <select value={requesterRoleId} onChange={(e) => setRequesterRoleId(e.target.value)}>
+          <SearchSelect value={requesterRoleId} onChange={(e) => setRequesterRoleId(e.target.value)}>
             <option value="">— anyone —</option>
             {roles.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
 
@@ -451,13 +445,13 @@ function WorkflowEditor({
           </select>
 
           {step.approverType === 'ROLE' ? (
-            <select value={step.roleId ?? ''} onChange={(e) => update(i, { roleId: e.target.value })}>
+            <SearchSelect value={step.roleId ?? ''} onChange={(e) => update(i, { roleId: e.target.value })}>
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           ) : step.approverType === 'USER' ? (
             <PersonSelect
               value={step.userId ?? ''}
@@ -468,7 +462,7 @@ function WorkflowEditor({
           ) : step.approverType === 'SUPERVISOR' ? (
             <div className="step-supervisor">
               {/* Who decides when the requester has no "Reports to" — HR unless a role is named. */}
-              <select
+              <SearchSelect
                 value={step.roleId ?? ''}
                 aria-label="When no supervisor is set"
                 onChange={(e) => update(i, { roleId: e.target.value || null })}
@@ -479,7 +473,7 @@ function WorkflowEditor({
                     No supervisor set: {r.name}
                   </option>
                 ))}
-              </select>
+              </SearchSelect>
               {/* Beside the "Reports to", holders of these roles on the requester's own team may decide it too. */}
               <TickPicker
                 choices={roles.map((r) => ({ value: r.id, label: r.name }))}
@@ -492,7 +486,7 @@ function WorkflowEditor({
             </div>
           ) : step.approverType === 'PROJECT_MANAGER' || step.approverType === 'PROJECT_MANAGERS' ? (
             /* The project's manager decides; when the project has none, or the manager raised it, this role does. */
-            <select
+            <SearchSelect
               value={step.roleId ?? ''}
               aria-label="When no Technical Manager is named, or they raised it"
               onChange={(e) => update(i, { roleId: e.target.value || null })}
@@ -503,7 +497,7 @@ function WorkflowEditor({
                   No Technical Manager named, or their own request: {r.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           ) : (
             <span className="faint" style={{ fontSize: 'var(--fs-sm)' }}>
               Everyone holding the HR role

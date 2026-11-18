@@ -4,6 +4,7 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { CalendarToolbar, MonthCalendar, useCalendarNav, type CalendarEvent } from '../../components/MonthCalendar';
+import { ToolsMenu } from '../../components/ToolsMenu';
 import {
   Checkbox,
   ErrorBox,
@@ -21,6 +22,7 @@ import { monthGrid, monthOf, todayLocal } from '../../lib/day';
 import { PersonSelect, loadPeople, usePeople, type PersonRow } from '../../components/People';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { KINDS, KIND_LABEL, reportPermission } from './Reports';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The Service Schedule — every visit, of every kind, on one calendar.
@@ -281,11 +283,15 @@ export function ServiceSchedule() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Service Schedule</h1>
-        </div>
-        <div className="row">
+      {/* The open tab names the screen; "+ New call-out" leads the toolbar, as on every list (2026-11-17, the owner's call). */}
+      <h1 className="visually-hidden">Service Schedule</h1>
+
+      <div className="list-toolbar svc-filters">
+          {can('gops.visits.create') && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+              + New call-out
+            </button>
+          )}
           <div className="scope-switch" role="tablist" aria-label="Schedule view">
             <button
               type="button"
@@ -306,15 +312,6 @@ export function ServiceSchedule() {
               Month
             </button>
           </div>
-          {can('gops.visits.create') && (
-            <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
-              + New call-out
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="list-toolbar svc-filters">
         <select
           aria-label="Engineer"
           value={filters.scope === 'mine' ? 'mine' : (filters.assignedToId ?? '')}
@@ -333,7 +330,7 @@ export function ServiceSchedule() {
           ))}
         </select>
         {canContracts && (
-          <select
+          <SearchSelect
             aria-label="Contract"
             value={filters.contractId ?? ''}
             onChange={(e) => patch({ contractId: e.target.value || null, page: null })}
@@ -344,10 +341,10 @@ export function ServiceSchedule() {
                 {c.number} — {c.job.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         )}
         {canCustomers && (
-          <select
+          <SearchSelect
             aria-label="Customer"
             value={filters.customerId ?? ''}
             onChange={(e) => patch({ customerId: e.target.value || null, page: null })}
@@ -358,7 +355,7 @@ export function ServiceSchedule() {
                 {c.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         )}
         {mode === 'month' && (
           <>
@@ -424,7 +421,7 @@ export function ServiceSchedule() {
 
       {mode === 'month' ? (
         <>
-          <CalendarToolbar nav={nav} />
+          <CalendarToolbar nav={nav} tools={<ToolsMenu items={[{ label: 'Refresh', onSelect: () => setReload((r) => r + 1) }]} />} />
           <ul className="cal-legend svc-legend" aria-label="What the chips mean">
             <li>
               <span className="svc-swatch info" aria-hidden="true" />
@@ -657,6 +654,8 @@ function VisitList({
       onRowClick={(r) => onOpen(r.id)}
       // The filter bar's preset rides along in the list's own query, so the paper is what is listed.
       printPath="/api/service-visits/pdf"
+      printButton
+      exportable={false}
       filters={[
         { key: 'status', label: 'Status', options: STATUS_OPTIONS },
         { key: 'due', label: 'Due', options: [{ value: 'true', label: 'Due or overdue' }] },
@@ -1138,17 +1137,17 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       </Field>
       <div className="grid grid-2">
         <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+          <SearchSelect value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
             <option value="">— none —</option>
             {sites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Machine">
-          <select
+          <SearchSelect
             value={form.assetId}
             onChange={(e) => {
               const a = assets.find((x) => x.id === e.target.value);
@@ -1162,19 +1161,19 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
                 {a.serialNo ? ` (${a.serialNo})` : ''}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       </div>
       {contracts.length > 0 && (
         <Field label="Under contract" hint="A call-out under a contract is covered work, and is kept when the schedule is regenerated">
-          <select value={form.contractId} onChange={(e) => setForm({ ...form, contractId: e.target.value })}>
+          <SearchSelect value={form.contractId} onChange={(e) => setForm({ ...form, contractId: e.target.value })}>
             <option value="">— not under a contract —</option>
             {contracts.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.number} — {c.job.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       )}
       <Field label="Engineer" htmlFor={`${ids}-engineer`}>

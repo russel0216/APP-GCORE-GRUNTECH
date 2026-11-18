@@ -110,12 +110,10 @@ export function Memos() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Memos</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Memos</h1>
       <DataList<MemoRow>
+        printButton
+        exportable={false}
         listKey="memos"
         endpoint="/memos"
         printPath="/api/memos/pdf"

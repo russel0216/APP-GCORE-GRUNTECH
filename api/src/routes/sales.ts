@@ -1168,6 +1168,11 @@ export function quotationListWhere(
   if (f.salesOrder === 'yes') and.push({ salesOrders: { some: { status: { not: 'CANCELLED' } } } });
   else if (f.salesOrder === 'no') and.push({ salesOrders: { none: { status: { not: 'CANCELLED' } } } });
   else if (f.salesOrder) throw badRequest('Sales order is one of Booked in a sales order, No sales order yet');
+  // Lost to somebody else, or cancelled by the customer (2026-11-18: the
+  // G-OPS dashboard's Lost card opens the first and leaves the second out).
+  if (f.lostKind === 'lost') and.push({ outcome: 'LOST', OR: [{ lostKind: null }, { lostKind: 'LOST' }] });
+  else if (f.lostKind === 'cancelled') and.push({ outcome: 'LOST', lostKind: 'CANCELLED' });
+  else if (f.lostKind) throw badRequest('Lost or cancelled is one of Lost, Cancelled');
 
   const base: Prisma.QuotationWhereInput = and.length ? { AND: and } : {};
   if (!f.stage) return { base, where: base };

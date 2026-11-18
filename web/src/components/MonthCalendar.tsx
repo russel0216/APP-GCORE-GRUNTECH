@@ -276,7 +276,17 @@ const TODAY_LABEL: Record<CalendarView, string> = { day: 'Today', week: 'This we
  * ‹ Previous · This week|This month · Next › · label · spacer · children ·
  * Week/Month scope-switch (hidden when the page offers one view).
  */
-export function CalendarToolbar({ nav, children }: { nav: CalendarNav; children?: ReactNode }) {
+export function CalendarToolbar({
+  nav,
+  children,
+  lead,
+  tools,
+}: {
+  nav: CalendarNav;
+  children?: ReactNode;
+  lead?: ReactNode;
+  tools?: ReactNode;
+}) {
   function onTabKey(e: KeyboardEvent<HTMLButtonElement>) {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
@@ -288,6 +298,8 @@ export function CalendarToolbar({ nav, children }: { nav: CalendarNav; children?
 
   return (
     <div className="cal-toolbar">
+      {/* The screen's "+ New …", first on the line as on every list (2026-11-17, the owner's call). */}
+      {lead}
       <button type="button" className="btn btn-sm" onClick={nav.prev}>
         ‹ Previous
       </button>
@@ -320,6 +332,8 @@ export function CalendarToolbar({ nav, children }: { nav: CalendarNav; children?
           ))}
         </div>
       )}
+      {/* The screen's ⋯ menu, last on the line as on every list. */}
+      {tools}
     </div>
   );
 }

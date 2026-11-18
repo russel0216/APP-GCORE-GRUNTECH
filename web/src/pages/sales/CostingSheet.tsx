@@ -11,6 +11,7 @@ import { Checkbox, ErrorBox, Field, Loading, formatDate, formatMoney, useToast }
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { CostingDetail } from './CostingDetail';
 import { NumberInput } from '../../components/NumberInput';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /*
   The costing sheet — a page, never a dialog. `/g-ops/costing/new` writes a new
@@ -994,7 +995,7 @@ export function CostingSheet() {
         {templates.length > 0 && (
           <div className="cs-template row">
             <label htmlFor="cs-template">{editing ? 'Add from a template' : 'Start from a template'}</label>
-            <select id="cs-template" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+            <SearchSelect id="cs-template" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
               <option value="">— choose a template —</option>
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -1002,7 +1003,7 @@ export function CostingSheet() {
                   {t.withPrices ? '' : ' · no prices'}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
             <button type="button" className="btn btn-sm" onClick={() => void loadTemplate()} disabled={!templateId}>
               Add to sheet
             </button>
@@ -1031,14 +1032,14 @@ export function CostingSheet() {
               />
             </Field>
             <Field label="Location / site">
-              <select value={header.siteId} onChange={(e) => setH('siteId', e.target.value)} disabled={!sites.length}>
+              <SearchSelect value={header.siteId} onChange={(e) => setH('siteId', e.target.value)} disabled={!sites.length}>
                 <option value="">{header.customer ? (sites.length ? '— none —' : 'No sites on file') : 'Choose the customer first'}</option>
                 {sites.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
                   </option>
                 ))}
-              </select>
+              </SearchSelect>
             </Field>
           </div>
           <div>

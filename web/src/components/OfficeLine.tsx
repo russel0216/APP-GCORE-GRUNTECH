@@ -1,6 +1,7 @@
 import { useEffect, useState, type SelectHTMLAttributes } from 'react';
 import { api } from '../lib/api';
 import { formatMoney } from './ui';
+import { SearchSelect } from './SearchSelect';
 
 /**
  * Charging the OFFICE BUDGET (2026-11-10): the one picker of an office
@@ -83,7 +84,7 @@ export function OfficeLineSelect({
 } & Omit<SelectHTMLAttributes<HTMLSelectElement>, 'value' | 'onChange'>) {
   const listed = budgets.some((b) => b.lines.some((l) => l.id === value));
   return (
-    <select {...rest} value={value} onChange={(e) => onChange(e.target.value)}>
+    <SearchSelect {...rest} value={value} onChange={(e) => onChange(e.target.value)}>
       {none !== null && <option value="">{none}</option>}
       {current && value === current.id && !listed && (
         <option value={current.id}>
@@ -99,7 +100,7 @@ export function OfficeLineSelect({
           ))}
         </optgroup>
       ))}
-    </select>
+    </SearchSelect>
   );
 }
 (OfficeLineSelect as unknown as { fieldControl: boolean }).fieldControl = true;

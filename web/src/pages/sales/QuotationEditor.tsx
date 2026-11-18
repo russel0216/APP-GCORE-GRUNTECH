@@ -54,6 +54,7 @@ import {
   type QuotationListRow,
   type TaxOption,
 } from './editorParts';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /*
   SCORO's "Modify quote details", as a page rather than a dialog.
@@ -1168,14 +1169,14 @@ export function QuotationEditor() {
                     (header.siteId ? 'This site has no address' : 'No address on the customer yet — add one on the customer')
                   }
                 >
-                  <select value={header.siteId} onChange={(e) => set('siteId', e.target.value)}>
+                  <SearchSelect value={header.siteId} onChange={(e) => set('siteId', e.target.value)}>
                     <option value="">The customer’s address</option>
                     {sites.map((st) => (
                       <option key={st.id} value={st.id}>
                         Site: {st.name}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               ) : (
                 <Static label="Address">
@@ -1375,7 +1376,7 @@ export function QuotationEditor() {
                   label="Lead"
                   hint="Keeps the lead's status in step with this quotation, fills in the rest, and adds every costing made for it"
                 >
-                  <select
+                  <SearchSelect
                     value={header.leadId}
                     onChange={(e) => {
                       const leadId = e.target.value;
@@ -1389,12 +1390,12 @@ export function QuotationEditor() {
                         {l.companyName}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               )
             )}
             <Field label="Costing" hint="Links the pricing to what you estimated; its scope of work can fill the lines">
-              <select
+              <SearchSelect
                 value={header.costingId}
                 onChange={(e) => {
                   const first = e.target.value;
@@ -1409,7 +1410,7 @@ export function QuotationEditor() {
                     {c.number} — {c.title}
                   </option>
                 ))}
-              </select>
+              </SearchSelect>
             </Field>
             {header.costingId && (
               <Field
@@ -2274,14 +2275,14 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
             </Field>
             {sites.length > 0 && (
               <Field label="Address" hint="The customer’s address prints unless a site is chosen.">
-                <select value={form.siteId} onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}>
+                <SearchSelect value={form.siteId} onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}>
                   <option value="">The customer’s address</option>
                   {sites.map((st) => (
                     <option key={st.id} value={st.id}>
                       {st.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
             )}
             <Field label="Quote name" required>

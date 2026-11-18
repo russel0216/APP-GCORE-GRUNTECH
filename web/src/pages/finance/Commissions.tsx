@@ -13,6 +13,7 @@ import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { ErrorBox, Field, Loading, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * COMMISSIONS (2026-10-16, the owner's "Commission Request System"): a sales
@@ -113,10 +114,11 @@ export function Commissions() {
   ];
   return (
     <div>
-      <div className="page-head">
-        <h1>Commissions</h1>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Commissions</h1>
       <DataList<Row>
+        printButton
+        exportable={false}
         listKey="commissions"
         endpoint="/commissions"
         printPath="/api/commissions/pdf"
@@ -611,13 +613,13 @@ export function CommissionEditor() {
                               aria-label={`${l.name} cash advance deduction`}
                             />
                             {advances.length > 1 ? (
-                              <select value={chosen?.id ?? ''} onChange={(e) => setLine(i, { cashAdvanceId: e.target.value })} aria-label={`${l.name} cash advance`}>
+                              <SearchSelect value={chosen?.id ?? ''} onChange={(e) => setLine(i, { cashAdvanceId: e.target.value })} aria-label={`${l.name} cash advance`}>
                                 {advances.map((a) => (
                                   <option key={a.id} value={a.id}>
                                     {a.number} — {formatMoney(a.free)} open
                                   </option>
                                 ))}
-                              </select>
+                              </SearchSelect>
                             ) : (
                               <div className="faint">
                                 {chosen!.number}: {formatMoney(chosen!.free)} open

@@ -13,6 +13,7 @@ import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { todayLocal } from '../../lib/day';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * OUTGOING — the internal receive proof (2026-10-15, the owner's call:
@@ -97,13 +98,12 @@ export function StockIssues() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Outgoing</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Outgoing</h1>
 
       <DataList<IssueRow>
+        printButton
+        exportable={false}
         listKey="stock-issues"
         endpoint="/stock-issues"
         printPath="/api/stock-issues/pdf"
@@ -528,14 +528,14 @@ export function OutgoingEditor() {
                 hint={existing && sent.length && header.warehouseId !== existing.warehouseId ? 'The lines are re-priced at this warehouse’s average cost' : undefined}
                 error={attempted && !header.warehouseId ? 'Choose the warehouse' : null}
               >
-                <select value={header.warehouseId} onChange={set('warehouseId')}>
+                <SearchSelect createKind="warehouse" value={header.warehouseId} onChange={set('warehouseId')}>
                   <option value="">— choose —</option>
                   {warehouses.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               <Field label="Ref / request no." hint="The request it answers — a job order, a memo, a ticket">
                 <input value={header.referenceNo} maxLength={120} onChange={set('referenceNo')} />
@@ -568,25 +568,25 @@ export function OutgoingEditor() {
                 </div>
               </Field>
               <Field label="For project" hint={job ? 'Charged to this project at the average cost' : 'Leave blank for general use — no project is charged'}>
-                <select value={header.jobId} onChange={set('jobId')}>
+                <SearchSelect value={header.jobId} onChange={set('jobId')}>
                   <option value="">— none —</option>
                   {jobOptions.map((j) => (
                     <option key={j.id} value={j.id}>
                       {j.number} — {j.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               {!header.jobId && (salesOrders.length > 0 || header.salesOrderId) && (
                 <Field label="For a sales order" hint="Releases what was bought for the order and held at the warehouse — nothing is charged again">
-                  <select value={header.salesOrderId} onChange={set('salesOrderId')}>
+                  <SearchSelect value={header.salesOrderId} onChange={set('salesOrderId')}>
                     <option value="">— none —</option>
                     {salesOrders.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.number} — {o.customer}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               )}
               <Field label="Deliver to" hint={job ? 'Leave blank to print the project' : 'Site, office, room'}>

@@ -110,15 +110,14 @@ export function PurchaseOrders() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Purchase Orders</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Purchase Orders</h1>
 
       {batching && <BatchRequestsPanel onClose={() => setBatching(false)} />}
 
       <DataList<PoRow>
+        printButton
+        exportable={false}
         listKey="purchase-orders"
         endpoint="/purchase-orders"
         printPath="/api/purchase-orders/pdf"

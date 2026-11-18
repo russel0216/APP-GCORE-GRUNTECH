@@ -574,14 +574,9 @@ export function AftermarketDashboard() {
         <button onClick={() => setTab('rules')}>Rules</button>
       </div>
 
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
       <div className="page-head">
-        <div>
-          <h1>Aftermarket</h1>
-          <p>
-            What Gruntech has in the field, what covers it, and what is due. Equipment nothing
-            covers and warranties about to lapse are the renewal pipeline.
-          </p>
-        </div>
+        <h1>Aftermarket Overview</h1>
       </div>
 
       <div className="kpi-grid svc-kpis">

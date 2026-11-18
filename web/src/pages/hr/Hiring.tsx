@@ -12,6 +12,7 @@ import { ActiveBadge, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusB
 import { MiniBar, Stat } from '../../components/charts';
 import { OnlineExamCard } from './ExamQuestions';
 import { NewPersonModal } from '../masters/Employees';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * G-HR › HIRING (2026-10-21, the owner's Hiring module): the Man Power
@@ -226,12 +227,10 @@ export function ManpowerRequests() {
   }, []);
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Man Power Request</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Man Power Request</h1>
       <DataList<MprRow>
+        printButton
+        exportable={false}
         listKey="manpower-requests"
         endpoint="/hiring/mprs"
         printPath="/api/hiring/mprs/pdf"
@@ -354,14 +353,14 @@ function MprModal({ existing, onClose, onSaved }: { existing?: MprDetail; onClos
           <input id={`${idBase}-title`} value={form.title} placeholder="Sr. Mechanical Field Engineer (Pumps & Hydraulics)" onChange={(e) => set('title', e.target.value)} autoFocus />
         </Field>
         <Field label="Plantilla position" hint="The slot it fills, where there is one">
-          <select value={form.positionId} onChange={(e) => set('positionId', e.target.value)}>
+          <SearchSelect value={form.positionId} onChange={(e) => set('positionId', e.target.value)}>
             <option value="">— a new position —</option>
             {positions.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.title}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Proposed salary — from" hint="Per month">
           <NumberInput kind="money" value={form.salaryMin} onChange={(e) => set('salaryMin', e.target.value)} />
@@ -714,12 +713,10 @@ export function Candidates() {
   const [adding, setAdding] = useState(false);
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Candidates</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Candidates</h1>
       <DataList<CandidateRow>
+        printButton
+        exportable={false}
         listKey="candidates"
         endpoint="/hiring/candidates"
         printPath="/api/hiring/candidates/pdf"
@@ -861,7 +858,7 @@ function CandidateModal({ mprId, existing, onClose, onSaved }: { mprId?: string;
         </div>
       )}
       <Field label="Position applied" htmlFor={`${idBase}-mpr`} hint="An approved man power request">
-        <select id={`${idBase}-mpr`} value={form.mprId} onChange={(e) => set('mprId', e.target.value)}>
+        <SearchSelect id={`${idBase}-mpr`} value={form.mprId} onChange={(e) => set('mprId', e.target.value)}>
           {existing && !mprs.some((m) => m.id === existing.mpr.id) && <option value={existing.mpr.id}>{`${existing.mpr.number} — ${existing.mpr.title}`}</option>}
           {!mprs.length && !existing && <option value="">— no approved request —</option>}
           {mprs.map((m) => (
@@ -870,7 +867,7 @@ function CandidateModal({ mprId, existing, onClose, onSaved }: { mprId?: string;
               {m.team ? ` (${m.team})` : ''} · {m.openings} open
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
       <div className="grid grid-2">
         <Field label="First name">
@@ -1332,18 +1329,14 @@ export function EntranceExams() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Employment Examination</h1>
+      <h1 className="visually-hidden">Employment Examination</h1>
+      {data?.canEdit && (
+        <div className="list-toolbar">
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+            + New exam
+          </button>
         </div>
-        {data?.canEdit && (
-          <div className="page-actions">
-            <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
-              + New exam
-            </button>
-          </div>
-        )}
-      </div>
+      )}
       <ErrorBox error={error} />
       <div className="stack">
         <section className="card">
@@ -1354,7 +1347,7 @@ export function EntranceExams() {
           {analytics && analytics.candidates.length > 0 ? (
             <>
               <Field label="Applicant">
-                <select
+                <SearchSelect
                   value={analytics.candidate?.id ?? ''}
                   onChange={(e) => {
                     const next = new URLSearchParams(params);
@@ -1367,7 +1360,7 @@ export function EntranceExams() {
                       {c.name} — {c.position} ({pct(c.examScore)})
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               {analytics.candidate && <ScoreComparison name={analytics.candidate.name} rows={analytics.rows} />}
             </>
@@ -1570,12 +1563,10 @@ export function Contracts() {
   }, [params, setParams]);
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Contracts & Approvals</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Contracts & Approvals</h1>
       <DataList<ContractRow>
+        printButton
+        exportable={false}
         listKey="employment-contracts"
         endpoint="/hiring/contracts"
         printPath="/api/hiring/contracts/pdf"
@@ -1717,7 +1708,7 @@ function ContractModal({ candidateId, existing, onClose, onSaved }: { candidateI
       <ErrorBox error={error} />
       {!existing && (
         <Field label="Employee name (hired)" hint="A candidate who passed the interview">
-          <select
+          <SearchSelect
             value={form.candidateId}
             onChange={(e) => {
               const pick = candidates.find((c) => c.id === e.target.value);
@@ -1730,7 +1721,7 @@ function ContractModal({ candidateId, existing, onClose, onSaved }: { candidateI
                 {c.name} — {c.mpr.title} ({c.mpr.number})
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
       )}
       <div className="grid grid-2">
@@ -1738,14 +1729,14 @@ function ContractModal({ candidateId, existing, onClose, onSaved }: { candidateI
           <input value={form.title} onChange={(e) => set('title', e.target.value)} />
         </Field>
         <Field label="Plantilla position">
-          <select value={form.positionId} onChange={(e) => set('positionId', e.target.value)}>
+          <SearchSelect value={form.positionId} onChange={(e) => set('positionId', e.target.value)}>
             <option value="">— none —</option>
             {positions.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.title}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Agreed monthly salary">
           <NumberInput kind="money" value={form.monthlySalary} onChange={(e) => set('monthlySalary', e.target.value)} />

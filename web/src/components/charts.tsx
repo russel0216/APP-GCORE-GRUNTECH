@@ -116,11 +116,16 @@ export function Stat({
     <>
       {icon && <IconBadge name={icon} accent={accent ?? 'neon'} />}
       <div className="kpi-label">{label}</div>
-      <div
-        className={`kpi-value${figure ? ' figure' : ''}`}
-        style={colour ? { color: colour } : undefined}
-      >
-        {value === null || value === undefined ? '—' : value}
+      {/* The figure's own box: on a list's summary row it is the size container the
+          figure shrinks to, so the card itself stays free to line its name up with
+          the rest of its row (2026-11-18). */}
+      <div className="kpi-figure">
+        <div
+          className={`kpi-value${figure ? ' figure' : ''}`}
+          style={colour ? { color: colour } : undefined}
+        >
+          {value === null || value === undefined ? '—' : value}
+        </div>
       </div>
       {context !== undefined && context !== null && <div className="kpi-subtext">{context}</div>}
       {to && more && (

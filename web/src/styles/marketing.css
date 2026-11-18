@@ -6,8 +6,18 @@
   font-size: var(--fs-sm);
 }
 
-.mk-tabs {
+/* The screen's one toolbar line: Scan a badge, the views, the exhibition and what it is. */
+.mk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
   margin-bottom: var(--block-gap);
+}
+
+.mk-bar select {
+  width: auto;
+  max-width: 100%;
 }
 
 /* The scanner: the camera fills the card's width on a phone, a square marks

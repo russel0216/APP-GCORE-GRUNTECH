@@ -30,6 +30,7 @@ import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 import { Attachments } from '../../components/Attachments';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Accounts Payable — supplier bills and expense claims.
@@ -358,11 +359,8 @@ export function Payables() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Accounts Payable</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Accounts Payable</h1>
 
       {queue && queue.length > 0 && (
         <div className="card">
@@ -420,6 +418,8 @@ export function Payables() {
       )}
 
       <DataList<Bill>
+        printButton
+        exportable={false}
         listKey="supplier-bills"
         endpoint="/supplier-bills"
         printPath="/api/supplier-bills/pdf"
@@ -821,14 +821,14 @@ function NewBillModal({
 
       <div className="grid grid-2">
         <Field label="Project" hint={onOrder ? 'Carried from the order' : 'Leave empty for overheads'}>
-          <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
+          <SearchSelect value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
             <option value="">— none —</option>
             {jobs.map((j) => (
               <option key={j.id} value={j.id}>
                 {j.number} — {j.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Budget line">
           <select

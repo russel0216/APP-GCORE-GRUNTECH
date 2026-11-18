@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { api, qs } from '../lib/api';
-import { useToast } from './ui';
 import { useAuth } from '../lib/auth';
+
+// The full New supplier form, loaded when first asked for.
+const SupplierForm = lazy(() => import('../pages/masters/Suppliers').then((m) => ({ default: m.SupplierForm })));
 
 export interface SupplierRef {
   id: string;
@@ -53,7 +56,7 @@ export interface SupplierRef {
 export function SupplierPicker({
   value,
   onChange,
-  onError,
+
   inputId,
   invalid,
   describedBy,
@@ -87,7 +90,6 @@ export function SupplierPicker({
   /** Set by `Field`. */
   'aria-invalid'?: boolean;
 }) {
-  const toast = useToast();
   const { can } = useAuth();
   const mayCreate = allowCreate && can('gchain.suppliers.create');
   const [text, setText] = useState(value?.name ?? '');
@@ -98,7 +100,8 @@ export function SupplierPicker({
   // wait for the answer. A failed lookup answers too, as `failed`.
   const [answered, setAnswered] = useState('');
   const [failed, setFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The New supplier form, open in a popup over the page (2026-11-18).
+  const [creating, setCreating] = useState<string | null>(null);
   const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -149,19 +152,11 @@ export function SupplierPicker({
     inputRef.current?.focus();
   }
 
-  async function createSupplier() {
+  function createSupplier() {
     const name = text.trim();
     if (name.length < 2) return;
-    setBusy(true);
-    try {
-      const created = await api.post<SupplierRef>('/suppliers', { name });
-      toast('ok', `${name} added as a supplier`);
-      pick({ id: created.id, name: created.name, code: created.code });
-    } catch (err) {
-      onError?.(err);
-    } finally {
-      setBusy(false);
-    }
+    setPicking(false);
+    setCreating(name);
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -253,14 +248,29 @@ export function SupplierPicker({
           {offerCreate && (
             <li className="lookup-new">
               <div className="lookup-new-row">
-                <button type="button" onClick={createSupplier} disabled={busy}>
-                  {matches.length ? 'Not one of these — ' : ''}add “{term}” as a new supplier
+                <button type="button" onClick={createSupplier}>
+                  {matches.length ? 'Not one of these — ' : ''}+ New supplier “{term}”
                 </button>
               </div>
             </li>
           )}
         </ul>
       )}
+
+      {creating !== null &&
+        createPortal(
+          <Suspense fallback={null}>
+            <SupplierForm
+              presetName={creating}
+              onClose={() => setCreating(null)}
+              onSaved={(newId, name) => {
+                setCreating(null);
+                pick({ id: newId, name });
+              }}
+            />
+          </Suspense>,
+          document.body,
+        )}
     </div>
   );
 }

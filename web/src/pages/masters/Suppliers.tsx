@@ -414,13 +414,12 @@ export function Suppliers() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Suppliers</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Suppliers</h1>
 
       <DataList<SupplierRow>
+        printButton
+        exportable={false}
         listKey="suppliers"
         endpoint="/suppliers"
         columns={columns}
@@ -800,21 +799,24 @@ export function SupplierDetail() {
 
 // ── Forms ────────────────────────────────────────────────────────────────────
 
-function SupplierForm({
+export function SupplierForm({
   supplier,
+  presetName,
   onClose,
   onSaved,
 }: {
   supplier?: SupplierDetailData;
+  /** A new supplier's name to start with — what was typed in a picker. */
+  presetName?: string;
   onClose: () => void;
-  onSaved: (id: string) => void;
+  onSaved: (id: string, name: string) => void;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
     code: supplier?.code ?? '',
-    name: supplier?.name ?? '',
+    name: supplier?.name ?? presetName ?? '',
     legalName: supplier?.legalName ?? '',
     tin: supplier?.tin ?? '',
     category: supplier?.category ?? '',
@@ -855,7 +857,7 @@ function SupplierForm({
         ? await api.patch<{ id: string }>(`/suppliers/${supplier.id}`, payload)
         : await api.post<{ id: string }>('/suppliers', payload);
       toast('ok', `${form.name} saved`);
-      onSaved(saved.id);
+      onSaved(saved.id, form.name);
     } catch (err) {
       setError(err);
       setBusy(false);

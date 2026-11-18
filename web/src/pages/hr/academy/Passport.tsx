@@ -21,6 +21,7 @@ import {
   type Tone,
 } from '../../../components/ui';
 import { useCourseOptions } from './Sessions';
+import { SearchSelect } from '../../../components/SearchSelect';
 
 /**
  * The training passport — one person's required courses against what they
@@ -652,14 +653,14 @@ export function ExternalCertModal({
           : 'Training you completed outside a Gruntech session. It counts once HR has verified it.'}
       </p>
       <Field label="Course" required>
-        <select value={form.courseId} onChange={(e) => setForm({ ...form, courseId: e.target.value })}>
+        <SearchSelect value={form.courseId} onChange={(e) => setForm({ ...form, courseId: e.target.value })}>
           <option value="">Which course does it cover?</option>
           {courses.map((c) => (
             <option key={c.id} value={c.id}>
               {c.code} — {c.title}
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
       <div className="grid grid-2">
         <Field label="Completed" required>

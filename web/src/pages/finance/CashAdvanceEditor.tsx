@@ -20,6 +20,7 @@ import {
 import { todayLocal } from '../../lib/day';
 import type { Route } from '../chain/PurchaseRequisitionEditor';
 import type { Advance } from './CashAdvances';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The cash advance as a PAGE (2026-10-19, the owner's call: "do the same for
@@ -260,7 +261,7 @@ export function CashAdvanceEditor() {
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
               </Field>
               <Field label="Charge to project" hint="Leave empty for the office — then choose its office budget line">
-                <select
+                <SearchSelect
                   value={header.jobId}
                   onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '', officeBudgetLineId: e.target.value ? '' : h.officeBudgetLineId }))}
                 >
@@ -275,7 +276,7 @@ export function CashAdvanceEditor() {
                       {j.number} — {j.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               {header.jobId && (
                 <Field label="Budget line" required hint="Charged exactly this line" error={attempted && !header.costCategoryId ? 'Choose the budget line' : null}>

@@ -85,20 +85,14 @@ export function Roles() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Roles &amp; Permissions</h1>
-          <p>
-            A person's access is their roles' — View and Manage, each Own, Team or All, per screen. A screen
-            appears in someone's menu only when a role of theirs may view it.
-          </p>
-        </div>
-        {can('admin.roles.create') && (
-          <button className="btn btn-primary" onClick={() => setEditing('new')}>
+      <h1 className="visually-hidden">Roles &amp; Permissions</h1>
+      {can('admin.roles.create') && (
+        <div className="list-toolbar">
+          <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
             + New role
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <ErrorBox error={error} />
 

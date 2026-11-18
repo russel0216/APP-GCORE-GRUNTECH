@@ -12,6 +12,7 @@ import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Pull-out slips — the INTERNAL release slip (2026-10-14, then the owner's
@@ -104,12 +105,11 @@ export function PulloutSlips() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Pull-out Slips</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Pull-out Slips</h1>
       <DataList<PulloutRow>
+        printButton
+        exportable={false}
         listKey="pullout-slips"
         endpoint="/pullout-slips"
         printPath="/api/pullout-slips/pdf"
@@ -847,14 +847,14 @@ export function PulloutEditor() {
             hint={own ? (atSite ? 'Delivered to site — this slip confirms the project received them' : 'Kept in the warehouse for the project') : undefined}
             error={attempted && !form.warehouseId ? (own ? 'Say where the goods are' : 'Choose the warehouse') : null}
           >
-            <select value={form.warehouseId} required onChange={(e) => void chooseWarehouse(e.target.value)}>
+            <SearchSelect createKind="warehouse" value={form.warehouseId} required onChange={(e) => void chooseWarehouse(e.target.value)}>
               <option value="">— choose —</option>
               {data.warehouses.map((w) => (
                 <option key={w.id} value={w.id}>
                   {own && w.items !== undefined ? `${w.name} — ${w.items} item${w.items === 1 ? '' : 's'}` : w.name}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
           <Field label="Date">
             <input type="date" value={form.pulloutDate} onChange={set('pulloutDate')} />
@@ -875,7 +875,7 @@ export function PulloutEditor() {
                 hint="Company stock going to a project with no requisition behind it — the project is charged at the warehouse's average, by each item's budget line"
                 error={attempted && form.purpose === 'PROJECT_USE' && !form.jobId ? 'Name the project the stock is for' : null}
               >
-                <select value={form.jobId} onChange={set('jobId')}>
+                <SearchSelect value={form.jobId} onChange={set('jobId')}>
                   <option value="">— none —</option>
                   {jobs.map((j) => (
                     <option key={j.id} value={j.id}>
@@ -887,7 +887,7 @@ export function PulloutEditor() {
                       {source.job.number} — {source.job.name}
                     </option>
                   )}
-                </select>
+                </SearchSelect>
               </Field>
             )}
             <Field label="Why no source document" required error={attempted && form.reason.trim().length < 3 ? 'Say why there is no source document' : null}>

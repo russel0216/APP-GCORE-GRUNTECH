@@ -11,6 +11,7 @@ import type { Route } from '../chain/PurchaseRequisitionEditor';
 import type { Claim } from './Expenses';
 import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
 import { ChargeCell, chargeBody, chargeKey, chargeOf, type LineCharge } from '../../components/LineCharge';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The reimbursement as a PAGE (2026-10-19, the owner's call: "do the same for
@@ -437,7 +438,7 @@ export function ClaimEditor() {
               ) : (
                 <>
                   <Field label="Charge to project" hint="Every receipt takes this unless its own line says otherwise. Leave empty for an office expense — then choose its office budget line">
-                    <select
+                    <SearchSelect
                       value={header.jobId}
                       onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '', officeBudgetLineId: e.target.value ? '' : h.officeBudgetLineId }))}
                     >
@@ -452,7 +453,7 @@ export function ClaimEditor() {
                           {j.number} — {j.name}
                         </option>
                       ))}
-                    </select>
+                    </SearchSelect>
                   </Field>
                   {header.jobId && (
                     <Field label="Budget line" required hint="Which part of the project's budget this spends" error={attempted && !header.costCategoryId ? 'Choose the budget line' : null}>

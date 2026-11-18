@@ -8,6 +8,7 @@ import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicke
 import { ApprovalStepper, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { todayLocal } from '../../lib/day';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The Incoming Report as a PAGE (2026-10-14, the owner's call: "Incoming can
@@ -583,7 +584,7 @@ export function IncomingEditor() {
                       : null
                 }
               >
-                <select value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
+                <SearchSelect createKind="warehouse" value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
                   <option value="">
                     {forProject ? '— choose —' : mode === 'order' ? (order?.kind === 'SALES_ORDER' ? '— straight to the customer —' : '— as on the order —') : '— choose —'}
                   </option>
@@ -593,7 +594,7 @@ export function IncomingEditor() {
                       {forProject ? `Into ${w.name}` : w.name}
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
               <Field label="Delivery receipt no.">
                 <input value={header.deliveryRefNo} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, deliveryRefNo: e.target.value }))} />

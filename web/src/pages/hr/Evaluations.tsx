@@ -23,6 +23,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Evaluations — G-HR › People (item 12).
@@ -418,9 +419,7 @@ export function Evaluations() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Evaluations</h1>
-      </div>
+      <h1 className="visually-hidden">Evaluations</h1>
 
       {viewAll && (
         <div className="eval-due-block">
@@ -455,6 +454,8 @@ export function Evaluations() {
       )}
 
       <DataList<EvaluationRow>
+        printButton
+        exportable={false}
         listKey="evaluations"
         endpoint="/evaluations"
         printPath="/api/evaluations/pdf"
@@ -653,7 +654,7 @@ export function ScheduleModal({
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or employee number" />
           </Field>
           <Field label="Employee" required>
-            <select value={form.employeeId} onChange={(e) => setForm({ ...form, employeeId: e.target.value, milestone: '' })}>
+            <SearchSelect value={form.employeeId} onChange={(e) => setForm({ ...form, employeeId: e.target.value, milestone: '' })}>
               <option value="">— choose —</option>
               {people.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -661,7 +662,7 @@ export function ScheduleModal({
                   {p.industry ? ` · ${p.industry.code}` : ''}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         </>
       )}

@@ -23,6 +23,7 @@ import {
 } from '../../components/ui';
 import { addDays, todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Accounts Receivable.
@@ -407,11 +408,8 @@ export function Receivables() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Accounts Receivable</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Accounts Receivable</h1>
 
       {notice && <div className="alert warn">{notice}</div>}
 
@@ -475,6 +473,8 @@ export function Receivables() {
       )}
 
       <DataList<Invoice>
+        printButton
+        exportable={false}
         listKey="invoices"
         endpoint="/invoices"
         printPath="/api/invoices/pdf"
@@ -2605,13 +2605,12 @@ export function Payments({ register = 'collections' }: { register?: 'collections
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>{collections ? 'Collections' : 'Payments & Repayments'}</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">{collections ? 'Collections' : 'Payments & Repayments'}</h1>
 
       <DataList<PaymentRow>
+        printButton
+        exportable={false}
         key={register}
         listKey={collections ? 'payments' : 'payments-out'}
         endpoint="/payments"
@@ -3134,14 +3133,14 @@ function OnAccountRow({
               <p className="faint">{payment.customer?.name} has no open invoice yet.</p>
             ) : (
               <div className="fin-line-stack">
-                <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} aria-label="Invoice to apply it to">
+                <SearchSelect value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} aria-label="Invoice to apply it to">
                   <option value="">— choose the invoice —</option>
                   {invoices.map((i) => (
                     <option key={i.id} value={i.id}>
                       {i.number} — {formatMoney(i.outstanding)} outstanding
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </div>
             )}
             <div className="card-foot">

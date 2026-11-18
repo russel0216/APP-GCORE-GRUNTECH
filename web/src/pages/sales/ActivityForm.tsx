@@ -9,6 +9,7 @@ import { PersonSelect, toPerson } from '../../components/People';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { REMINDERS, REPEATS, type Activity, type ActivityTypeDef, type Person } from './activityShared';
 import { mapsSearchUrl } from '../../components/MapLink';
+import { SearchSelect } from '../../components/SearchSelect';
 
 // ════════════════════════════════════════════════════════════════════
 //  THE ACTIVITY FORM  (2026-10-08, SCORO's "New event" dialog)
@@ -428,7 +429,7 @@ export function ActivityModal({
                   />
                 </Field>
                 <Field label="Contact person">
-                  <select value={form.contactId} disabled={!form.customer} onChange={(e) => set('contactId', e.target.value)}>
+                  <SearchSelect createKind="contact" createCustomerId={form.customer?.id} value={form.contactId} disabled={!form.customer} onChange={(e) => set('contactId', e.target.value)}>
                     <option value="">{form.customer ? (contacts.length ? '— none —' : 'No contacts on file') : 'Pick the customer first'}</option>
                     {contacts.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -436,7 +437,7 @@ export function ActivityModal({
                         {c.position ? ` · ${c.position}` : ''}
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                 </Field>
               </>
             ) : (

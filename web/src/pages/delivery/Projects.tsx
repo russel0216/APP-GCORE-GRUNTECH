@@ -20,6 +20,7 @@ import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicke
 import { PersonSelect, usePeople } from '../../components/People';
 import { isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
 import { useHolidayKeys } from '../../lib/holidays';
+import { SearchSelect } from '../../components/SearchSelect';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -194,29 +195,12 @@ export function Projects() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Projects</h1>
-        </div>
-      </div>
-
-      {/* The registers across every project (2026-10-06): off the menu — each
-          is a tab inside a project — but kept one click away here. */}
-      <p className="del-registers">
-        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Requests for approval</Link>}
-        {can('gops.budget_monitoring.view_all') && <Link to="/g-ops/budget-monitoring">Budget monitoring</Link>}
-        {(can('gops.purchase_requests.view_all') || can('gops.purchase_requests.view_own')) && (
-          <Link to="/g-ops/purchase-requests">Purchase requests</Link>
-        )}
-        {(can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own')) && (
-          <Link to="/g-ops/budget-requests">Budget requests</Link>
-        )}
-        {(can('gops.progress_billing.view_all') || can('gops.progress_billing.view_own')) && (
-          <Link to="/g-ops/progress">Progress &amp; billing</Link>
-        )}
-      </p>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Projects</h1>
 
       <DataList<JobRow>
+        printButton
+        exportable={false}
         listKey="projects"
         endpoint="/jobs"
         columns={columns}
@@ -495,14 +479,14 @@ function NewJobModal({
       )}
 
       <Field label="Costing" hint="Final costings only. Its scope sections must already total the contract value">
-        <select value={form.costingId} onChange={(e) => pickCosting(e.target.value)}>
+        <SearchSelect value={form.costingId} onChange={(e) => pickCosting(e.target.value)}>
           <option value="">— choose —</option>
           {costings.map((c) => (
             <option key={c.id} value={c.id}>
               {c.number} — {c.title}
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
 
       {chosen &&
@@ -600,18 +584,18 @@ function NewJobModal({
           )}
         </Field>
         <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+          <SearchSelect value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
             <option value="">— none —</option>
             {sites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         {approvedRevisions.length > 1 && (
           <Field label="Quotation" hint="The approved revision this project delivers">
-            <select
+            <SearchSelect
               value={form.quotationRevisionId}
               onChange={(e) => setForm({ ...form, quotationRevisionId: e.target.value })}
             >
@@ -621,7 +605,7 @@ function NewJobModal({
                   {r.quotation.number} R{r.revision}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         )}
         <Field label="Technical Manager" htmlFor={pmId}>

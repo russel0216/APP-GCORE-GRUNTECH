@@ -98,13 +98,11 @@ export function HelpTickets() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Help Tickets</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Help Tickets</h1>
       <ReceiversCard />
       <DataList<TicketRow>
+        printButton
+        exportable={false}
         listKey="help-tickets"
         endpoint="/help-tickets"
         columns={columns}

@@ -23,6 +23,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { CustomerForm, SubIndustryLabel, TeamLabel, type CustomerRow } from './Customers';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Customer 360 (model §3).
@@ -901,22 +902,25 @@ export function Detail({ label, value }: { label: string; value: ReactNode }) {
 
 // ── Contact modal ────────────────────────────────────────────────────────────
 
-function ContactModal({
+export function ContactModal({
   customerId,
   contact,
+  presetName,
   onClose,
   onSaved,
 }: {
   customerId: string;
   contact: Contact | null;
+  /** A new contact's name to start with — what was typed in a picker. */
+  presetName?: string;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (saved?: { id: string; name: string }) => void;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
-    name: contact?.name ?? '',
+    name: contact?.name ?? presetName ?? '',
     position: contact?.position ?? '',
     email: contact?.email ?? '',
     phone: contact?.phone ?? '',
@@ -938,10 +942,11 @@ function ContactModal({
         isPrimary: form.isPrimary,
         notes: form.notes || null,
       };
-      if (contact) await api.patch(`/customers/${customerId}/contacts/${contact.id}`, payload);
-      else await api.post(`/customers/${customerId}/contacts`, payload);
+      const saved = contact
+        ? await api.patch<{ id: string; name: string }>(`/customers/${customerId}/contacts/${contact.id}`, payload)
+        : await api.post<{ id: string; name: string }>(`/customers/${customerId}/contacts`, payload);
       toast('ok', `${form.name} saved`);
-      onSaved();
+      onSaved(saved);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -1101,7 +1106,7 @@ function SiteModal({
         </Field>
       </div>
       <Field label="Site contact" hint="Who to reach on site — often different from head office">
-        <select value={form.contactId} onChange={(e) => setForm({ ...form, contactId: e.target.value })}>
+        <SearchSelect value={form.contactId} onChange={(e) => setForm({ ...form, contactId: e.target.value })}>
           <option value="">— none —</option>
           {contacts.map((c) => (
             <option key={c.id} value={c.id}>
@@ -1109,7 +1114,7 @@ function SiteModal({
               {c.position ? ` — ${c.position}` : ''}
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
       <Field label="Notes">
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />

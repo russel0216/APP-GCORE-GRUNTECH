@@ -81,13 +81,11 @@ export function Audit() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Audit Logs</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Audit Logs</h1>
 
       <DataList<AuditRow>
+        printButton
+        exportable={false}
         listKey="admin-audit"
         endpoint="/audit"
         printPath="/api/audit/pdf"

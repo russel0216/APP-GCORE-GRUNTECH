@@ -22,6 +22,7 @@ import { todayLocal } from '../../lib/day';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { FilingRoute } from './FilingRoute';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * Overtime — two filings against one record.
@@ -171,13 +172,11 @@ export function Overtime() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Overtime</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Overtime</h1>
 
       <DataList<OtRow>
+        printButton
+        exportable={false}
         listKey="overtime"
         endpoint="/overtime"
         printPath="/api/overtime/pdf"
@@ -439,7 +438,7 @@ export function PriorModal({
         label="Charge which project? (optional)"
         hint="Leave it empty if you are not sure — the person you report to sets or corrects it: a project, a sales order or a quotation"
       >
-        <select
+        <SearchSelect
           value={form.jobId}
           onChange={(e) => setForm({ ...form, jobId: e.target.value })}
         >
@@ -449,7 +448,7 @@ export function PriorModal({
               {j.number} — {j.name}
             </option>
           ))}
-        </select>
+        </SearchSelect>
       </Field>
 
       {form.jobId && (
@@ -898,7 +897,7 @@ function AllocatePanel({ row, onClose, onSaved }: { row: OtDetail; onClose: () =
         </Field>
         {kind !== 'none' && (
           <Field label={kind === 'job' ? 'Project' : kind === 'salesOrder' ? 'Sales order' : 'Quotation'}>
-            <select value={pick} onChange={(e) => setPick(e.target.value)} disabled={!opts}>
+            <SearchSelect value={pick} onChange={(e) => setPick(e.target.value)} disabled={!opts}>
               <option value="">— choose —</option>
               {shown.map((o) => (
                 <option key={o.id} value={o.id}>
@@ -906,7 +905,7 @@ function AllocatePanel({ row, onClose, onSaved }: { row: OtDetail; onClose: () =
                   {o.name ? ` — ${o.name}` : ''}
                 </option>
               ))}
-            </select>
+            </SearchSelect>
           </Field>
         )}
         {kind === 'job' && (

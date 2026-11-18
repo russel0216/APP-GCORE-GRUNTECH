@@ -189,12 +189,10 @@ export function Assets() {
   const mayIssue = can('ghr.assets.edit_all') || can('ghr.assets.edit_own');
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Asset Management</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Asset Management</h1>
       <DataList<AssetRow>
+        printButton
+        exportable={false}
         listKey="company-assets"
         endpoint="/assets"
         printPath="/api/assets/pdf"

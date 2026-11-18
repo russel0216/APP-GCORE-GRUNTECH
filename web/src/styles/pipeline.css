@@ -876,6 +876,12 @@ h4.quote-panel-title {
   display: none;
 }
 
+/* Except the overdue deals' (2026-11-17): a red count has to say what it counts. */
+.pipe-kpis .kpi-card.danger .kpi-subtext {
+  display: block;
+  font-size: var(--fs-xs);
+}
+
 /* "Show all 262" under a column's first twenty cards (2026-11-13). */
 .pipe-more {
   align-self: stretch;

@@ -60,6 +60,44 @@ interface ItemRow {
   canEdit?: boolean;
 }
 
+/** What saving an item answers — enough for a picker to choose it. */
+export interface SavedItem {
+  id: string;
+  code: string;
+  name: string;
+  partNumber: string | null;
+  unit: string;
+  standardCost: number | string | null;
+}
+
+/** The New item form with the lists it needs, for a popup opened from a picker (2026-11-18). */
+export function NewItemPopup({
+  presetName,
+  onClose,
+  onSaved,
+}: {
+  presetName?: string;
+  onClose: () => void;
+  onSaved: (saved: SavedItem) => void;
+}) {
+  const [categories, setCategories] = useState<Ref[]>([]);
+  const [costCategories, setCostCategories] = useState<Ref[]>([]);
+  useEffect(() => {
+    api.get<Ref[]>('/reference/item-categories').then(setCategories).catch(() => {});
+    api.get<Ref[]>('/reference/cost-categories').then(setCostCategories).catch(() => {});
+  }, []);
+  return (
+    <ItemForm
+      item={null}
+      presetName={presetName}
+      categories={categories}
+      costCategories={costCategories}
+      onClose={onClose}
+      onSaved={(saved) => (saved ? onSaved(saved) : onClose())}
+    />
+  );
+}
+
 export function Items() {
   const { can } = useAuth();
   const navigate = useNavigate();
@@ -173,13 +211,12 @@ export function Items() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Item Master</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Item Master</h1>
 
       <DataList<ItemRow>
+        printButton
+        exportable={false}
         listKey="items"
         endpoint="/items"
         printPath="/api/items/pdf"
@@ -262,18 +299,21 @@ export function Items() {
   );
 }
 
-function ItemForm({
+export function ItemForm({
   item,
+  presetName,
   categories,
   costCategories,
   onClose,
   onSaved,
 }: {
   item: ItemRow | null;
+  /** A new item's name to start with — what was typed in a picker. */
+  presetName?: string;
   categories: Ref[];
   costCategories: Ref[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (saved?: SavedItem) => void;
 }) {
   const { me } = useAuth();
   const isSuperAdmin = me?.user.isSuperAdmin === true;
@@ -288,7 +328,7 @@ function ItemForm({
     code: item?.code ?? '',
     partNumber: item?.partNumber ?? '',
     brand: item?.brand ?? '',
-    name: item?.name ?? '',
+    name: item?.name ?? presetName ?? '',
     description: item?.description ?? '',
     itemType: item?.itemType ?? 'MATERIAL',
     categoryId: item?.category?.id ?? '',
@@ -333,10 +373,11 @@ function ItemForm({
         isActive: form.isActive,
         notes: form.notes || null,
       };
-      if (item) await api.patch(`/items/${item.id}`, payload);
-      else await api.post('/items', payload);
+      const saved = item
+        ? await api.patch<SavedItem>(`/items/${item.id}`, payload)
+        : await api.post<SavedItem>('/items', payload);
       toast('ok', `${form.name} saved`);
-      onSaved();
+      onSaved(saved);
     } catch (err) {
       setError(err);
       setBusy(false);

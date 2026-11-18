@@ -194,11 +194,7 @@ export function Users() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Users</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Users</h1>
 
       <MailLine />
 
@@ -227,6 +223,8 @@ export function Users() {
         <OrgChart key={`h${reload}`} rolesOnly />
       ) : (
       <DataList<UserRow>
+       printButton
+       exportable={false}
         listKey="admin-users"
         endpoint="/users"
         printPath="/api/users/pdf"

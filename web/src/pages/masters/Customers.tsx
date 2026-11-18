@@ -9,6 +9,7 @@ import { Checkbox, ErrorBox, Field, Modal, ModalFoot, StatusBadge, formatDate, f
 import type { Industry, SubIndustry } from './Reference';
 import { NumberInput } from '../../components/NumberInput';
 import { loadPeople } from '../../components/People';
+import { SearchSelect } from '../../components/SearchSelect';
 
 export interface CustomerRow {
   id: string;
@@ -387,13 +388,12 @@ export function Customers() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Customers</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Customers</h1>
 
       <DataList<CustomerRow>
+        printButton
+        exportable={false}
         listKey="customers"
         endpoint="/customers"
         columns={columns}
@@ -481,12 +481,15 @@ export function Customers() {
 
 export function CustomerForm({
   customer,
+  presetName,
   onClose,
   onSaved,
 }: {
   customer?: CustomerRow;
+  /** A new customer's name to start with — what was typed in a picker. */
+  presetName?: string;
   onClose: () => void;
-  onSaved: (id: string) => void;
+  onSaved: (id: string, name: string) => void;
 }) {
   const toast = useToast();
   const allSubIndustries = useSubIndustries();
@@ -495,7 +498,7 @@ export function CustomerForm({
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
     code: customer?.code ?? '',
-    name: customer?.name ?? '',
+    name: customer?.name ?? presetName ?? '',
     legalName: customer?.legalName ?? '',
     tin: customer?.tin ?? '',
     subIndustryId: customer?.subIndustryId ?? '',
@@ -558,7 +561,7 @@ export function CustomerForm({
         ? await api.patch<{ id: string }>(`/customers/${customer.id}`, payload)
         : await api.post<{ id: string }>('/customers', payload);
       toast('ok', `${form.name} saved`);
-      onSaved(saved.id);
+      onSaved(saved.id, form.name);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -592,7 +595,7 @@ export function CustomerForm({
           <input className="mono" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} />
         </Field>
         <Field label="Sub-industry" hint="Where in the market they sit — Healthcare, Government, Food and Beverage… Leave it until you know.">
-          <select value={form.subIndustryId} onChange={(e) => setForm({ ...form, subIndustryId: e.target.value })}>
+          <SearchSelect value={form.subIndustryId} onChange={(e) => setForm({ ...form, subIndustryId: e.target.value })}>
             <option value="">— not stated —</option>
             {subIndustries.map((i) => (
               <option key={i.id} value={i.id}>
@@ -600,7 +603,7 @@ export function CustomerForm({
                 {i.isActive ? '' : ' (inactive)'}
               </option>
             ))}
-          </select>
+          </SearchSelect>
         </Field>
         <Field label="Team" hint="Who handles this customer — KAT, HIT, UIT, GIB or SIT. Leave it open until it is decided.">
           <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>

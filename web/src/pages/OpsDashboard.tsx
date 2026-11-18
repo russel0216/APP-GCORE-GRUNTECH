@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, qs } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { todayLocal } from '../lib/day';
 import { ErrorBox, Loading } from '../components/ui';
 import { BarList, Donut, Funnel, Panel, Stat, type Slice } from '../components/charts';
@@ -50,7 +51,13 @@ interface Tally {
 }
 
 interface Overview {
-  sales: { leads: Tally | null; quotations: Tally | null; costings: Tally | null } | null;
+  sales: {
+    leads: Tally | null;
+    quotations: Tally | null;
+    costings: Tally | null;
+    /** Quotations lost to somebody else in the range — never one the customer cancelled. */
+    lost: number | null;
+  } | null;
   delivery: { jobs: Tally | null; reportsAwaitingApproval: number | null } | null;
   aftermarket: {
     contracts: Tally | null;
@@ -63,6 +70,7 @@ const n = (t: Tally | null | undefined, ...keys: string[]) =>
   keys.reduce((sum, k) => sum + (t?.[k] ?? 0), 0);
 
 export function OpsDashboard() {
+  const { can } = useAuth();
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [from, setFrom] = useState(`${new Date().getFullYear()}-01-01`);
@@ -131,7 +139,18 @@ export function OpsDashboard() {
       ]
     : [];
 
-  const lost = sales ? n(sales.leads, 'LOST') + n(sales.quotations, 'LOST') : 0;
+  // Quotations lost to somebody else (2026-11-18, the owner's call): one the
+  // customer cancelled — a sample, a project that did not push through — is not
+  // a loss, and a lead follows its quotation, so counting leads too counted twice.
+  const lost = sales?.lost ?? 0;
+  // The same quotations on their list: raised in the range, lost, under the
+  // scope the count was made in.
+  const lostTo = `/g-ops/quotations${qs({
+    lostKind: 'lost',
+    createdFrom: from,
+    createdTo: to,
+    scope: can('gops.quotations.view_all') ? 'all' : 'mine',
+  })}`;
   const onHold = sales ? n(sales.leads, 'ON_HOLD') : 0;
 
   return (
@@ -206,8 +225,8 @@ export function OpsDashboard() {
                     icon="alert"
                     value={lost}
                     tone="muted"
-                    to="/g-ops/leads"
-                    hint="Leads and quotations together"
+                    to={lostTo}
+                    hint="Quotations lost — cancelled ones left out"
                   />
                 </div>
               </div>

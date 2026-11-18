@@ -5,8 +5,8 @@ import { useAuth } from '../../lib/auth';
 import { parseDay } from '../../lib/day';
 import { BarList, MiniBar, Panel, Stat } from '../../components/charts';
 import { TickPicker } from '../../components/TickPicker';
+import { ToolsMenu } from '../../components/ToolsMenu';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
-import { ExportButton } from '../insights/Overview';
 import { STAGE_TONES } from './Quotations';
 
 /*
@@ -294,13 +294,53 @@ export function Forecast() {
 
   const periodWord = PERIODS.find((p) => p.value === period)!.word;
 
+  // Filters open in a panel and show as removable chips, as on every list.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const names = (ids: string[], pool: { id: string; label: string }[], one: string, many: string) =>
+    ids.length === 1 ? (pool.find((p) => p.id === ids[0])?.label ?? one) : `${ids.length} ${many}`;
+  const chips: { id: string; text: string; clear: Record<string, null> }[] = [];
+  if (range) chips.push({ id: 'range', text: RANGES.find((r) => r.value === range)?.label ?? range, clear: { range: null } });
+  else if (from || to)
+    chips.push({ id: 'dates', text: `${from ? formatDate(parseDay(from)) : '…'} to ${to ? formatDate(parseDay(to)) : '…'}`, clear: { from: null, to: null } });
+  if (ownerIds.length)
+    chips.push({
+      id: 'owner',
+      text: `Salesperson: ${names(ownerIds, (data?.people ?? []).map((p) => ({ id: p.id, label: p.name })), '1 person', 'people')}`,
+      clear: { ownerId: null },
+    });
+  if (teamIds.length)
+    chips.push({
+      id: 'team',
+      text: `Team: ${names(teamIds, [...(data?.teams ?? []).map((t) => ({ id: t.id, label: t.code })), { id: 'none', label: 'No team' }], '1 team', 'teams')}`,
+      clear: { teamId: null },
+    });
+  if (groupKeys.length)
+    chips.push({
+      id: 'group',
+      text: `Group: ${names(groupKeys, [...(data?.groupChoices ?? []).map((g) => ({ id: g.key, label: g.name })), { id: 'none', label: 'No group' }], '1 group', 'groups')}`,
+      clear: { group: null },
+    });
+  if (compare)
+    chips.push({
+      id: 'compare',
+      text: `Compared with ${COMPARES.find((c) => c.value === compare)?.label.toLowerCase() ?? compare}`,
+      clear: { compare: null, compareFrom: null, compareTo: null },
+    });
+  if (leads) chips.push({ id: 'leads', text: 'Leads without a quotation included', clear: { leads: null } });
+
   return (
     <div className="forecast">
-      <div className="page-head">
-        <div>
-          <h1>Forecast</h1>
-        </div>
-        <div className="row">
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Forecast</h1>
+
+      {/*
+        The list's toolbar (2026-11-17, the owner's call: "Forecast filter are
+        different to other menu"): what somebody came for on the left — the
+        period, Mine · Team · All and Filters — the filters that narrow it as
+        removable chips, and Print at the right end.
+      */}
+      <div className="list-toolbar list-toolbar-main">
+        <div className="list-lead">
           <div className="scope-switch" role="group" aria-label="Period">
             {PERIODS.map((p) => (
               <button
@@ -329,122 +369,160 @@ export function Forecast() {
               </button>
             ))}
           </div>
-          <ExportButton path={`/pipeline/forecast.csv${query}`} />
           <button
             type="button"
-            className="btn"
+            className="btn btn-sm list-filter-button"
+            aria-expanded={filtersOpen}
+            aria-controls="forecast-filters"
+            onClick={() => setFiltersOpen((o) => !o)}
+          >
+            Filters
+            {chips.length > 0 && (
+              <span className="list-filter-count" aria-label={`${chips.length} on`}>
+                {chips.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {chips.length > 0 && (
+          <div className="list-chips list-chips-inline" aria-label="What narrows the forecast">
+            {chips.map((c) => (
+              <span key={c.id} className="list-chip">
+                {c.text}
+                <button type="button" aria-label={`Remove ${c.text}`} onClick={() => set(c.clear)}>
+                  ×
+                </button>
+              </span>
+            ))}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => set(Object.assign({}, ...chips.map((c) => c.clear)))}>
+              Clear all
+            </button>
+          </div>
+        )}
+
+        <div className="list-tools">
+          <button
+            type="button"
+            className="btn btn-sm list-print"
             onClick={() => openPdf(`/api/pipeline/forecast.pdf${paperQuery}`, () => toast('error', 'The PDF could not be opened'))}
           >
             Print
           </button>
+          <ToolsMenu items={[{ label: 'Refresh', onSelect: () => void load() }]} />
         </div>
       </div>
 
-      <div className="row fc-controls">
-        {/* A specified date range (2026-10-12): a ready-made one, or Custom — typing a date. */}
-        <label className="fc-control">
-          <span>Range</span>
-          <select
-            value={range || (from || to ? 'custom' : '')}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === 'custom') set({ range: null, from: data?.from ?? from, to: data?.to ?? to });
-              else set({ range: v || null, from: null, to: null });
-            }}
-          >
-            <option value="">Default window</option>
-            {RANGES.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-            <option value="custom">Custom</option>
-          </select>
-        </label>
-        <label className="fc-control">
-          <span>From</span>
-          <input
-            type="date"
-            value={data?.from ?? from}
-            onChange={(e) => e.target.value && set({ range: null, from: e.target.value, to: data?.to ?? to })}
-          />
-        </label>
-        <label className="fc-control">
-          <span>To</span>
-          <input
-            type="date"
-            value={data?.to ?? to}
-            onChange={(e) => e.target.value && set({ range: null, from: data?.from ?? from, to: e.target.value })}
-          />
-        </label>
-        <div className="fc-control">
-          <span>Salesperson</span>
-          <TickPicker
-            label="Salespeople"
-            noun="salespeople"
-            none="Everyone"
-            choices={(data?.people ?? []).map((p) => ({ value: p.id, label: p.name }))}
-            value={ownerIds}
-            onChange={(v) => set({ ownerId: v.join(',') })}
-          />
-        </div>
-        <div className="fc-control">
-          <span>Team</span>
-          <TickPicker
-            label="Teams"
-            noun="teams"
-            none="Every team"
-            choices={[
-              ...(data?.teams ?? []).map((t) => ({ value: t.id, label: t.code, hint: t.name })),
-              { value: 'none', label: 'No team' },
-            ]}
-            value={teamIds}
-            onChange={(v) => set({ teamId: v.join(',') })}
-          />
-        </div>
-        <div className="fc-control">
-          <span>Product group</span>
-          <TickPicker
-            label="Product groups"
-            noun="product groups"
-            none="Every group"
-            choices={[...(data?.groupChoices ?? []).map((g) => ({ value: g.key, label: g.name })), { value: 'none', label: 'No group' }]}
-            value={groupKeys}
-            onChange={(v) => set({ group: v.join(',') })}
-          />
-        </div>
-        {/* The comparison (2026-10-12): a second window beside the first. */}
-        <label className="fc-control">
-          <span>Compare with</span>
-          <select
-            value={compare}
-            onChange={(e) => {
-              const v = e.target.value;
-              set({ compare: v || null, ...(v === 'custom' ? {} : { compareFrom: null, compareTo: null }) });
-            }}
-          >
-            <option value="">Nothing</option>
-            {COMPARES.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        {compare === 'custom' && (
-          <>
-            <label className="fc-control">
-              <span>Compare from</span>
-              <input type="date" value={compareFrom} onChange={(e) => set({ compareFrom: e.target.value || null })} />
-            </label>
-            <label className="fc-control">
-              <span>Compare to</span>
-              <input type="date" value={compareTo} onChange={(e) => set({ compareTo: e.target.value || null })} />
-            </label>
-          </>
-        )}
-        <Checkbox checked={leads} onChange={(v) => set({ leads: v ? 'true' : null })} label="Include leads without a quotation" />
-      </div>
+      {filtersOpen && (
+        <section id="forecast-filters" className="card list-filter-panel" aria-label="Filters">
+          {/* A specified date range (2026-10-12): a ready-made one, or Custom — typing a date. */}
+          <label className="list-filter-field">
+            Range
+            <select
+              value={range || (from || to ? 'custom' : '')}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'custom') set({ range: null, from: data?.from ?? from, to: data?.to ?? to });
+                else set({ range: v || null, from: null, to: null });
+              }}
+            >
+              <option value="">Default window</option>
+              {RANGES.map((r) => (
+                <option key={r.value} value={r.value}>
+                  {r.label}
+                </option>
+              ))}
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <div className="list-filter-field" role="group" aria-labelledby="fc-dates">
+            <span id="fc-dates">Dates</span>
+            <span className="list-date-range">
+              <input
+                type="date"
+                aria-label="From"
+                value={data?.from ?? from}
+                onChange={(e) => e.target.value && set({ range: null, from: e.target.value, to: data?.to ?? to })}
+              />
+              <span aria-hidden="true">to</span>
+              <input
+                type="date"
+                aria-label="To"
+                value={data?.to ?? to}
+                onChange={(e) => e.target.value && set({ range: null, from: data?.from ?? from, to: e.target.value })}
+              />
+            </span>
+          </div>
+          <div className="list-filter-field">
+            Salesperson
+            <TickPicker
+              label="Salespeople"
+              noun="salespeople"
+              none="Everyone"
+              choices={(data?.people ?? []).map((p) => ({ value: p.id, label: p.name }))}
+              value={ownerIds}
+              onChange={(v) => set({ ownerId: v.join(',') })}
+            />
+          </div>
+          <div className="list-filter-field">
+            Team
+            <TickPicker
+              label="Teams"
+              noun="teams"
+              none="Every team"
+              choices={[
+                ...(data?.teams ?? []).map((t) => ({ value: t.id, label: t.code, hint: t.name })),
+                { value: 'none', label: 'No team' },
+              ]}
+              value={teamIds}
+              onChange={(v) => set({ teamId: v.join(',') })}
+            />
+          </div>
+          <div className="list-filter-field">
+            Product group
+            <TickPicker
+              label="Product groups"
+              noun="product groups"
+              none="Every group"
+              choices={[...(data?.groupChoices ?? []).map((g) => ({ value: g.key, label: g.name })), { value: 'none', label: 'No group' }]}
+              value={groupKeys}
+              onChange={(v) => set({ group: v.join(',') })}
+            />
+          </div>
+          {/* The comparison (2026-10-12): a second window beside the first. */}
+          <label className="list-filter-field">
+            Compare with
+            <select
+              value={compare}
+              onChange={(e) => {
+                const v = e.target.value;
+                set({ compare: v || null, ...(v === 'custom' ? {} : { compareFrom: null, compareTo: null }) });
+              }}
+            >
+              <option value="">Nothing</option>
+              {COMPARES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {compare === 'custom' && (
+            <div className="list-filter-field" role="group" aria-labelledby="fc-compare-dates">
+              <span id="fc-compare-dates">Compare dates</span>
+              <span className="list-date-range">
+                <input type="date" aria-label="Compare from" value={compareFrom} onChange={(e) => set({ compareFrom: e.target.value || null })} />
+                <span aria-hidden="true">to</span>
+                <input type="date" aria-label="Compare to" value={compareTo} onChange={(e) => set({ compareTo: e.target.value || null })} />
+              </span>
+            </div>
+          )}
+          <div className="list-filter-field">
+            Leads
+            <Checkbox checked={leads} onChange={(v) => set({ leads: v ? 'true' : null })} label="Include leads without a quotation" />
+          </div>
+        </section>
+      )}
 
       {error ? (
         <ErrorBox error={error} />

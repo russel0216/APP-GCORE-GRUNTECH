@@ -583,13 +583,12 @@ export function Leads() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Leads</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Leads</h1>
 
       <DataList<LeadRow>
+        printButton
+        exportable={false}
         listKey="leads"
         // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
         defaultFilters={{ createdFrom: yearStartKey(new Date()), working: 'yes' }}

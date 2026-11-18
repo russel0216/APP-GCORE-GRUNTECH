@@ -929,6 +929,54 @@ localhost and kept the fifth (a mix of two), then "all the table uniform".
   module's table a head of its own.
 - My Account's Details card is a `<dl className="kv">` (rule 20).
 
+## The uniform list layout, and pickers you type in (2026-11-18)
+
+The owner's calls, module by module on localhost: "apply the same layout" to
+Sales, Project Management, Aftermarket, G-CHAIN, G-FIN, G-HR and Admin, then
+"make all the search bar type then suggested … if none appear a suggestion to
+create one, popup window so it will retain on the page".
+
+- **A list screen has no big title**: `<h1 className="visually-hidden">` keeps
+  it for screen readers; "+ New …" is FIRST on the toolbar; **Print** is a
+  visible button at the right, then ⋯; **no Export CSV** (`printButton`,
+  `exportable={false}` on `DataList`). A view switch (List / Cards, List /
+  Month) sits in `actions` after the New button; a page that is not a
+  DataList puts its New button in `<div className="list-toolbar">`. Stat
+  cards are centred. **Settings pages, dashboards and every overview keep
+  their title** (G-OPS / G-CHAIN / G-FIN / Aftermarket Overview, HR
+  Dashboard). The Projects list no longer links the five hidden registers —
+  they are tabs inside a project. `clearListLayoutNudges()`
+  (`shared/listLayoutNudges.ts`, the seed, once,
+  `seed.listLayoutNudges20261117`) removed the Modify-layout nudges made for
+  the old layout on those screens. `docs/UI-STYLE.md` is the style written
+  down for another G-Core app.
+- **`SearchSelect` (`components/SearchSelect.tsx`) is the select you type
+  in**: a drop-in for a native `<select>` that picks a RECORD — the same
+  `<option>` / `<optgroup>` children, `value`, and `onChange({ target: {
+  value } })` — typing narrows the list (case- and space-blind), arrows and
+  Enter pick, Escape puts the choice back; a `fieldControl`. `PersonSelect`
+  renders through it, and so do the record dropdowns of the forms (projects,
+  warehouses, sales orders, quotations, costings, sites, contacts, machines,
+  contracts, courses, employees, candidates, positions, roles,
+  sub-industries, invoices, office budget lines). Short fixed lists (status,
+  type, year, currency, tax, team, budget line) stay native selects. A new
+  record dropdown is a `SearchSelect`.
+- **"+ New …" opens the record's own New form in a popup**
+  (`components/CreatePopup.tsx`, lazy-loaded, portalled to `document.body`),
+  the typed name filled in (`presetName` on the form), the saved record
+  picked: `CustomerPicker` and `SupplierPicker` (the full `CustomerForm` /
+  `SupplierForm`, replacing the add-by-name-alone), `createKind="warehouse"`
+  and `createKind="contact"` (+ `createCustomerId`) on a `SearchSelect`, and
+  "+ New item" in `ItemCell` (purchase request and order lines,
+  `NewItemPopup`). Offered only to whoever holds the create right
+  (`CREATE_RIGHT`); a record made this way is listed in the box that made it
+  before the page refetches. Not on Incoming lines (a typed item is filed at
+  save) nor on lines that list only what a shelf holds.
+- verify-foundation fails eight checks and verify-sales stops at an approval
+  on the Windows laptop with or without this change (path separators in the
+  source scan, and this database's role holders) — compare with the last
+  commit before reading a failure there as a regression.
+
 ## Verification
 
 ```bash

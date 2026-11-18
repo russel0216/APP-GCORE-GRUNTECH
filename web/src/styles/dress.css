@@ -136,6 +136,70 @@
   display: none;
 }
 
+/* Every stat card centred, its figure straight under its name (2026-11-17,
+   the owner's call: "card name center … the number values should all
+   aligned"). The figure used to sit at the card's foot when the card had no
+   caption and under the name when it had one, so a row of cards read at two
+   heights; now each figure is at the same place, the caption under it. */
+[data-theme='day'] .kpi-card {
+  align-items: center;
+  text-align: center;
+}
+
+[data-theme='day'] .kpi-card :is(.kpi-figure, .kpi-value) {
+  margin-top: 0;
+}
+
+/* In a row of cards, every name takes the height of the row's longest one
+   (2026-11-18): a name wrapping to two lines pushed only its own figure down,
+   16px under its neighbours'. Each card spans four tracks of the row — name,
+   figure, caption, footer link — shared with the cards beside it (subgrid). */
+[data-theme='day'] .kpi-grid > .kpi-card {
+  display: grid;
+  grid-row: span 4;
+  grid-template-rows: subgrid;
+  row-gap: 0;
+  align-content: start;
+  align-items: start;
+  justify-items: center;
+}
+
+[data-theme='day'] .kpi-grid > .kpi-card > .kpi-label {
+  align-self: center;
+}
+
+[data-theme='day'] .kpi-grid > .kpi-card > .kpi-more {
+  align-self: end;
+}
+
+[data-theme='day'] .kpi-card > .kpi-figure {
+  justify-self: stretch;
+}
+
+/* A card's icon sits in its top-left corner, so its name stays on the first
+   line and its figure at the same height as a card without one (the owner's
+   own Modify layout put the Costing tiles' icons there, 2026-11-17). */
+[data-theme='day'] .kpi-card .icon-badge {
+  position: absolute;
+  top: var(--card-pad-y);
+  left: var(--card-pad-x);
+  margin: 0;
+}
+
+[data-theme='day'] .kpi-card:has(> .icon-badge) .kpi-label {
+  padding-inline: calc(var(--s-8) + var(--s-1));
+  min-height: var(--s-6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Its footer link reads across the card, centred like the rest. */
+[data-theme='day'] .kpi-card .kpi-more {
+  align-self: stretch;
+  justify-content: center;
+}
+
 /* Big only for a COUNT (12, 465). Money and long figures (.figure) keep the
    size the card gives them — on a list's summary row that size shrinks with
    the card, and a fixed 28px cut "₱114,693,870.03" off at the card's edge
@@ -152,12 +216,15 @@
    `.kpi-card`), so it never applied. The card is the size container here,
    and a long figure takes 8% of its width — fifteen characters inside the
    padding. */
-[data-theme='day'] .list-summary .kpi-card {
+[data-theme='day'] .list-summary .kpi-figure {
   container-type: inline-size;
 }
 
+/* The container is the figure's box, inside the padding (2026-11-18: the card
+   itself must stay a subgrid, which a size container cannot be), so the share
+   is of the box: fifteen characters across it. */
 [data-theme='day'] .list-summary .kpi-value.figure {
-  font-size: clamp(var(--fs-xs), 8cqi, var(--fs-base));
+  font-size: clamp(var(--fs-xs), 11cqi, var(--fs-base));
 }
 
 [data-theme='day'] .kpi-card:is(.neon, .ok) .kpi-value {

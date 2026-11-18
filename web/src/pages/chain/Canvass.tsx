@@ -220,14 +220,13 @@ export function Canvasses() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Canvass</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Canvass</h1>
       {adding && <NewCanvassPanel onClose={() => setAdding(false)} />}
 
       <DataList<CanvassRow>
+        printButton
+        exportable={false}
         listKey="canvasses"
         endpoint="/canvasses"
         printPath="/api/canvasses/pdf"

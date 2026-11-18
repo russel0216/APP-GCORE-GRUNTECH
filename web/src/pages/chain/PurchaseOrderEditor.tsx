@@ -11,6 +11,7 @@ import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { orderTotals, parseDelimited, prLineAmount, rowsToPrLines } from '../../lib/prLines';
 import { DiscountCalculator } from '../sales/editorParts';
 import { ItemCell, type BudgetLine, type Category, type Route, type Suggestion } from './PurchaseRequisitionEditor';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * The purchase order as a PAGE (2026-10-13, the owner's call after the
@@ -724,7 +725,7 @@ export function PurchaseOrderEditor() {
                       <option value="quotation">An open quotation</option>
                     </select>
                     {forMode === 'quotation' && (
-                      <select value={pickedQuotationId} onChange={(e) => setPickedQuotationId(e.target.value)}>
+                      <SearchSelect value={pickedQuotationId} onChange={(e) => setPickedQuotationId(e.target.value)}>
                         <option value="">— choose the quotation —</option>
                         {quotationChoices.map((q) => (
                           <option key={q.id} value={q.id}>
@@ -732,37 +733,37 @@ export function PurchaseOrderEditor() {
                             {q.subject ? ` · ${q.subject}` : ''}
                           </option>
                         ))}
-                      </select>
+                      </SearchSelect>
                     )}
                     {forMode === 'stock' && (
-                      <select value={pickedWarehouseId} onChange={(e) => setPickedWarehouseId(e.target.value)}>
+                      <SearchSelect createKind="warehouse" value={pickedWarehouseId} onChange={(e) => setPickedWarehouseId(e.target.value)}>
                         <option value="">— the warehouse named on the Incoming —</option>
                         {warehouseChoices.map((w) => (
                           <option key={w.id} value={w.id}>
                             {w.name}
                           </option>
                         ))}
-                      </select>
+                      </SearchSelect>
                     )}
                     {forMode === 'project' && (
-                      <select value={pickedJobId} onChange={(e) => setPickedJobId(e.target.value)}>
+                      <SearchSelect value={pickedJobId} onChange={(e) => setPickedJobId(e.target.value)}>
                         <option value="">— choose the project —</option>
                         {jobChoices.map((j) => (
                           <option key={j.id} value={j.id}>
                             {j.number} — {j.name}
                           </option>
                         ))}
-                      </select>
+                      </SearchSelect>
                     )}
                     {forMode === 'order' && (
-                      <select value={pickedOrderId} onChange={(e) => setPickedOrderId(e.target.value)}>
+                      <SearchSelect value={pickedOrderId} onChange={(e) => setPickedOrderId(e.target.value)}>
                         <option value="">— choose the sales order —</option>
                         {orderChoices.map((o) => (
                           <option key={o.id} value={o.id}>
                             Sales order {o.number} — {o.customer}
                           </option>
                         ))}
-                      </select>
+                      </SearchSelect>
                     )}
                   </div>
                 ) : (

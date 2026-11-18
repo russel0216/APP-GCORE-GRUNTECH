@@ -136,6 +136,18 @@ interface Props<T> {
    */
   printPath?: string;
   /**
+   * Print as a button of its own at the right end of the toolbar line, beside
+   * the ⋯ menu, instead of an item inside it (2026-11-17, the owner's call for
+   * the Sales screens: "a visible Print button").
+   */
+  printButton?: boolean;
+  /**
+   * Offer Export CSV — in the ⋯ menu and as Export selected. False on the
+   * Sales screens (2026-11-17, the owner's call: "export csv is not needed
+   * for sales").
+   */
+  exportable?: boolean;
+  /**
    * The screen's report (2026-10-15, the owner's call: "a Report button per
    * menu, any applicable to the list, selectable time range"): a Report
    * button beside the screen's actions, opening this path — the report page
@@ -197,6 +209,8 @@ export function DataList<T>({
   reloadToken = 0,
   urlState = true,
   printPath,
+  printButton = false,
+  exportable = true,
   reportPath,
   selectable = false,
   bulkActions,
@@ -777,6 +791,11 @@ export function DataList<T>({
         )}
 
         <div className="list-tools">
+          {printButton && printPath && (
+            <button type="button" className="btn btn-sm list-print" onClick={print} title="Every row the search and filters select">
+              Print
+            </button>
+          )}
           <div className="menu-wrap">
             <button
               ref={menuButton}
@@ -823,20 +842,22 @@ export function DataList<T>({
                 >
                   Columns…
                 </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-disabled={!data?.rows.length}
-                  onClick={() => {
-                    if (!data?.rows.length) return;
-                    setMenuOpen(false);
-                    exportCsv();
-                  }}
-                >
-                  Export CSV
-                  <span className="menu-pop-why">The rows on this page, as shown</span>
-                </button>
-                {printPath && (
+                {exportable && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-disabled={!data?.rows.length}
+                    onClick={() => {
+                      if (!data?.rows.length) return;
+                      setMenuOpen(false);
+                      exportCsv();
+                    }}
+                  >
+                    Export CSV
+                    <span className="menu-pop-why">The rows on this page, as shown</span>
+                  </button>
+                )}
+                {printPath && !printButton && (
                   <button
                     type="button"
                     role="menuitem"
@@ -1055,9 +1076,11 @@ export function DataList<T>({
           <button type="button" className="btn btn-ghost btn-sm" onClick={bulk.clear}>
             Clear selection
           </button>
-          <button type="button" className="btn btn-sm" onClick={exportSelected}>
-            Export selected
-          </button>
+          {exportable && (
+            <button type="button" className="btn btn-sm" onClick={exportSelected}>
+              Export selected
+            </button>
+          )}
           {printPath && (
             <button type="button" className="btn btn-sm" onClick={printSelected}>
               Print selected

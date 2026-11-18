@@ -157,12 +157,10 @@ export function EvaluationRuns() {
   }
   return (
     <div className="stack">
-      <div className="page-head">
-        <div>
-          <h1>Evaluation Runs</h1>
-        </div>
+      <h1 className="visually-hidden">Evaluation Runs</h1>
+      <div className="list-toolbar">
         {(can('ghr.evaluation_runs.create') || can('ghr.evaluation_runs.edit_all')) && (
-          <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
             + New evaluation run
           </button>
         )}

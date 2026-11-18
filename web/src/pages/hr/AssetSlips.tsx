@@ -318,18 +318,14 @@ export function AssetSlips() {
   }, [pending]);
   return (
     <div className="stack">
-      <div className="page-head">
-        <div>
-          <h1>Issuance Slips</h1>
-        </div>
+      <h1 className="visually-hidden">Issuance Slips</h1>
+      <div className="card">
+        <div className="card-head">
         {can('ghr.assets.edit_all') || can('ghr.assets.edit_own') ? (
-          <button type="button" className="btn btn-primary" onClick={() => setIssuing(true)}>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setIssuing(true)}>
             + Issue several assets
           </button>
         ) : null}
-      </div>
-      <div className="card">
-        <div className="card-head">
           <div className="scope-switch" role="group" aria-label="Which slips">
             <button type="button" className={pending ? '' : 'active'} aria-pressed={!pending} onClick={() => setPending(false)}>
               All

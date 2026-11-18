@@ -178,15 +178,9 @@ export function FinanceDashboard() {
 
   return (
     <div className="stack">
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
       <div className="page-head">
-        <div>
-          <h1>Executive Dashboard</h1>
-          <p>
-            Where the money is, as of {formatDate(data.asOf)}. Every figure is read off the
-            documents themselves — nothing here is keyed separately, so nothing here can disagree
-            with them.
-          </p>
-        </div>
+        <h1>G-FIN Overview</h1>
       </div>
 
       {/* `figure` sets these in Inter rather than Orbitron: these are pesos
@@ -682,15 +676,9 @@ export function CashFlow() {
 
   return (
     <div className="stack">
-      <div className="page-head">
-        <div>
-          <h1>Cash Flow</h1>
-          <p>
-            What has actually moved, and what is due to. Actuals count{' '}
-            <strong>cleared money only</strong> — an uncleared cheque is a promise, and a position
-            that counts promises is the one that bounces.
-          </p>
-        </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Cash Flow</h1>
+      <div className="list-toolbar">
         <Field label="Months">
           <select value={months} onChange={(e) => setMonths(Number(e.target.value))}>
             <option value={3}>3</option>
@@ -858,16 +846,8 @@ export function BudgetVsActual() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Budget vs Actual</h1>
-          <p>
-            Five columns that have to be read together. A project can be profitable on paper and
-            still be the reason there is no cash — <strong>unbilled</strong> and{' '}
-            <strong>uncollected</strong> are where that shows up.
-          </p>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Budget vs Actual</h1>
 
       <div className="card">
         <div className="table-wrap">

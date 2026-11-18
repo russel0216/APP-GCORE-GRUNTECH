@@ -86,12 +86,10 @@ function CorrectionList() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Time Appeals</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Time Appeals</h1>
       <DataList<Row>
+        printButton
+        exportable={false}
         listKey="attendance-corrections"
         endpoint="/attendance-corrections"
         printPath="/api/attendance-corrections/pdf"

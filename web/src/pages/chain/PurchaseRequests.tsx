@@ -155,13 +155,12 @@ export function PurchaseRequests() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Purchase Requests</h1>
-        </div>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Purchase Requests</h1>
 
       <DataList<PrRow>
+        printButton
+        exportable={false}
         listKey="purchase-requests"
         endpoint="/purchase-requests"
         printPath="/api/purchase-requests/pdf"

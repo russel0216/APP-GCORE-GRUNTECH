@@ -11,6 +11,7 @@ import { Stat } from '../../components/charts';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { EwtPicker, TermsPicker } from './Receivables';
 import { NumberInput } from '../../components/NumberInput';
+import { SearchSelect } from '../../components/SearchSelect';
 
 /**
  * INVOICE REQUESTS (2026-10-15, the owner's call): an approved progress
@@ -115,10 +116,11 @@ export function InvoiceRequests() {
   ];
   return (
     <div>
-      <div className="page-head">
-        <h1>Invoice Requests</h1>
-      </div>
+      {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
+      <h1 className="visually-hidden">Invoice Requests</h1>
       <DataList<RequestRow>
+        printButton
+        exportable={false}
         listKey="invoice-requests"
         endpoint="/invoice-requests"
         printPath="/api/invoice-requests/pdf"
@@ -418,7 +420,7 @@ export function InvoiceRequestModal({
                 }
                 error={over ? `Only ${formatMoney(left)} of ${order!.number} is left — this billing is ${formatMoney(gross)}` : undefined}
               >
-                <select value={form.salesOrderId} onChange={(e) => pickOrder(e.target.value)}>
+                <SearchSelect value={form.salesOrderId} onChange={(e) => pickOrder(e.target.value)}>
                   <option value="">— choose —</option>
                   {source.salesOrders.map((o) => (
                     <option key={o.id} value={o.id}>
@@ -426,7 +428,7 @@ export function InvoiceRequestModal({
                       {o.poNumber ? ` · PO ${o.poNumber}` : ''} — {formatMoney(o.left)} left
                     </option>
                   ))}
-                </select>
+                </SearchSelect>
               </Field>
             </>
           ) : (

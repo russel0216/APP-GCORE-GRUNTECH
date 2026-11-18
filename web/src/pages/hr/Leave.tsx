@@ -217,11 +217,7 @@ function LeaveList() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Leave</h1>
-        </div>
-      </div>
+      <h1 className="visually-hidden">Leave</h1>
 
       {balances && balances.length > 0 && (
         <div className="grid grid-4 hraud-balances">
@@ -245,6 +241,8 @@ function LeaveList() {
       )}
 
       <DataList<LeaveRow>
+        printButton
+        exportable={false}
         listKey="leave"
         endpoint="/leave"
         printPath="/api/leave/pdf"
