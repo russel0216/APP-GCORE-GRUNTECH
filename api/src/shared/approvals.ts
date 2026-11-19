@@ -414,7 +414,16 @@ export async function approversForStep(
       // Lead, an engineer to the Technical Manager, and their documents still
       // go to the team's leader). Department staff with no team, and a team
       // with no leader, keep the "Reports to".
-      const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx, ctx.teamId) : [];
+      //
+      // Unless the "Reports to" is a MANAGER (2026-11-19, the owner's call:
+      // Filipina, HR on KAT, reports to the HR Manager, and her claim went to
+      // KAT's Team Leader): a "Reports to" holding any role at the step role's
+      // level or higher (`Role.rank`, 1 the CEO) decides it. Crew reporting to
+      // a Project Lead or an engineer still go to the team's leader. A
+      // document FOR another team (`ctx.teamId`) keeps that team's leader.
+      const managerDecides =
+        !!supervisorId && !ctx.teamId && !!step.roleId && (await managerAtLevelOf(supervisorId, step.roleId, tx));
+      const onTeam = step.roleId && !managerDecides ? await teamFirstHolders(step.roleId, requesterId, tx, ctx.teamId) : [];
       if (onTeam.length) base = onTeam;
       else if (supervisorId) {
         // A role that ALSO reports to other roles (Admin › Roles › Hierarchy,
@@ -480,6 +489,21 @@ export const OWN_TEAM_ROLES = ['technical_manager', 'service_manager'];
  * no role and stays the direct superior's.
  */
 export const TEAM_FIRST_ROLES = ['team_leader'];
+
+/**
+ * Whether `userId` holds a role at `roleId`'s level or higher (a lower
+ * `Role.rank`; 1 is the CEO). A role with no level, on either side, never
+ * counts — the team-first rule then stands, as before.
+ */
+export async function managerAtLevelOf(userId: string, roleId: string, tx: Prisma.TransactionClient): Promise<boolean> {
+  const step = await tx.role.findUnique({ where: { id: roleId }, select: { rank: true } });
+  if (step?.rank == null) return false;
+  const held = await tx.userRole.findFirst({
+    where: { userId, role: { rank: { not: null, lte: step.rank } } },
+    select: { userId: true },
+  });
+  return !!held;
+}
 
 /** The TEAM_FIRST holders of `roleId` on the requester's own team, never the requester; empty for any other role. */
 async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.TransactionClient, teamId?: string | null): Promise<string[]> {

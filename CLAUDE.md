@@ -5952,7 +5952,15 @@ manager."
   to the Technical Manager, and their documents still go to the team's
   leader; a requester with no team (department staff) and a team with no
   leader keep the "Reports to"; a step naming no role (leave, overtime)
-  stays the direct superior's.
+  stays the direct superior's. **Unless the "Reports to" is a manager**
+  (2026-11-19, the owner's call: Filipina, HR Officer on KAT, reports to the
+  HR Manager and her claim went to KAT's Team Leader): a "Reports to" holding
+  any role at the step role's level or higher (`Role.rank`; Team Leader is
+  level 2 on live, beside the department managers) decides it —
+  `managerAtLevelOf()` in `shared/approvals.ts`. Crew reporting to a Project
+  Lead or an engineer still go to the team's leader; a document FOR another
+  team (`ctx.teamId`) keeps that team's. The engine reads it live, so a
+  request already waiting follows it.
 - **The follow-up** (`followUp()` in `shared/approvals.ts`; `POST
   /approvals/:id/follow-up { note? }`; "Follow up" in the Approval panel
   for the requester while PENDING on a route with `standIns`, asked in the

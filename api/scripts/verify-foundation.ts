@@ -1178,6 +1178,22 @@ async function main() {
   check('a requester with no team keeps their "Reports to"', (await approversForStep(tlStep, approverB.id)).join() === bossOf.id);
   const plainStep = { approverType: 'SUPERVISOR', roleId: null, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
   check('a step naming no role (leave, overtime) stays the direct superior’s', (await approversForStep(plainStep, katCrew.id)).join() === katSeller.id);
+  // …unless the "Reports to" is a MANAGER (2026-11-19, the owner's call: an
+  // HR officer on KAT reporting to the HR Manager): a role at the Team
+  // Leader's level or higher decides it, in place of the team's leader.
+  if (tlRole.rank == null) {
+    check('a "Reports to" at the Team Leader’s level decides the step (skipped: the Team Leader role has no level here)', true);
+  } else {
+    const mgrRole = await prisma.role.create({ data: { key: `${TAG}_mgr`, name: `${TAG} Manager`, rank: tlRole.rank } });
+    const mgr = await makeUser('Verify KAT Manager', 'katmgr@verify.local', []);
+    await prisma.userRole.create({ data: { userId: mgr.id, roleId: mgrRole.id } });
+    const katStaff = await makeUser('Verify KAT Staff', 'katstaff@verify.local', [], mgr.id);
+    await prisma.employee.create({ data: { employeeNo: `${TAG}EMP10`, firstName: 'Verify', lastName: 'KAT Staff', userId: katStaff.id, industryId: kat.id } });
+    check('a "Reports to" at the Team Leader’s level decides the step, not the team’s Team Leader', (await approversForStep(tlStep, katStaff.id)).join() === mgr.id, JSON.stringify(await approversForStep(tlStep, katStaff.id)));
+    check('…while crew reporting below that level still go to the team’s Team Leader', (await approversForStep(tlStep, katCrew.id)).join() === leadKat.id);
+    await prisma.userRole.deleteMany({ where: { roleId: mgrRole.id } });
+    await prisma.role.delete({ where: { id: mgrRole.id } });
+  }
   await prisma.userRole.deleteMany({ where: { roleId: tlRole.id, userId: leadKat.id } });
 
   // The importation twin: a Purchasing Manager step on an importation goes
