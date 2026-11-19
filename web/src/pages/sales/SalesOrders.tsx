@@ -1010,6 +1010,8 @@ export function SalesOrderDetail() {
                         {(l.providerSupplier || l.providerUser) && (
                           <div className="faint">{l.providerSupplier?.name ?? l.providerUser?.name}</div>
                         )}
+                        {/* The line's cost note, as the order's paper prints it (2026-11-19). */}
+                        {l.costNote?.trim() && <div className="faint so-cost-note">{l.costNote}</div>}
                       </td>
                     )}
                     {showCost && (

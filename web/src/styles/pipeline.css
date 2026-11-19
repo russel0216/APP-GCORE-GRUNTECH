@@ -887,3 +887,10 @@ h4.quote-panel-title {
   align-self: stretch;
   justify-content: center;
 }
+
+/* A sales order line's cost note under its cost and provider (2026-11-19):
+   the words as typed, kept to the line breaks they were typed with. */
+.so-cost-note {
+  font-family: var(--body);
+  white-space: pre-line;
+}
