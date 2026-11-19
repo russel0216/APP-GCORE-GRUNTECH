@@ -6571,7 +6571,10 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   see it — `withoutCostColumns()` strips the cost columns from the layout
   and `salesOrderPrintData(order, showCost)` sends no cost cell or cost
   total — because it is the internal booking record, never the customer's
-  copy (the invoice is G-FIN's). **The margin prints as a percentage too**
+  copy (the invoice is G-FIN's). **A line's cost note prints under its
+  cost** (2026-11-19, the owner's call): the cell's grey `note`, under the
+  supplier — cost viewers only, off with the table's `lineNotes` switch.
+  **The margin prints as a percentage too**
   (2026-10-11, the owner's call): each line's margin cell carries its share
   of the line's amount under it, and "Margin %:" (of the sum without tax,
   `totalMarginPct`) follows "Margin sum:" — `{{order.marginPct}}` for a

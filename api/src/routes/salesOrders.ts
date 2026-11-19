@@ -2486,6 +2486,10 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
               cost: {
                 title: l.costAmount == null ? '' : amount(num(l.costAmount)),
                 body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
+                // The line's cost note (how the cost was worked out) under it
+                // (2026-11-19, the owner's call); the table's `lineNotes`
+                // switch in Admin › PDF Templates leaves it off.
+                note: l.costNote?.trim() || undefined,
               },
               // The margin after the discount and, under it, its share.
               margin:
