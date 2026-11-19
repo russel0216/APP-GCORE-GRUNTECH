@@ -1,4 +1,5 @@
 import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
+import { routePurchaseRequestsByProject } from '../src/shared/prTechnicalManager';
 import { clearListLayoutNudges } from '../src/shared/listLayoutNudges';
 import { markScoroCancelledQuotations } from '../src/shared/scoroCancelled';
 import { syncCatalogue } from '../src/shared/catalogue';
@@ -146,12 +147,15 @@ const WORKFLOWS: WorkflowSeed[] = [
     // a Project Engineer, an Industry Specialist, a Technical Manager or a
     // Team Leader. No amount band: the budget guard still refuses an
     // over-budget direct-to-job request. The two banded routes are RETIRED.
+    // Since 2026-11-19 the Technical Manager is the PROJECT's (the request's
+    // project's Technical Manager, else the one on the team that owns it;
+    // with no project, the requester's team's) — `routePurchaseRequestsByProject`.
     documentType: 'purchase_request',
     name: 'Purchase Request — technical manager, team leader',
     preparerSigns: true,
     standIns: true,
     steps: [
-      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
     ],
   },
@@ -1076,6 +1080,13 @@ async function main() {
       });
       if (flagged) console.log(`  · The preparer signs the steps they hold on ${flagged} route(s); managers may stand in`);
     }
+  }
+
+  // A purchase request's Technical Manager is the project's (2026-11-19):
+  // every purchase request route's Technical Manager step, once.
+  {
+    const moved = await routePurchaseRequestsByProject();
+    if (moved) console.log(`  · A purchase request's Technical Manager step goes to the project's Technical Manager (${moved} step(s))`);
   }
 
   // The job order's route takes the preparer's signature and stand-ins once

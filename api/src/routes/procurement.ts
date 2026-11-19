@@ -1403,6 +1403,9 @@ purchaseRequestRoutes.post(
         amount: total,
         link: `/g-chain/purchase-requests/${pr.id}`,
         requesterId: pr.requestedById,
+        // The project it buys for: its Technical Manager step is that
+        // project's Technical Manager (2026-11-19), not the requester's team's.
+        jobId: pr.jobId,
       });
     } catch (err) {
       // Refused (no workflow, nobody to approve, already open): back to a
@@ -4968,7 +4971,7 @@ purchaseRequestRoutes.get(
     const slots = await approvalSlots(
       'purchase_request',
       pr.id,
-      pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById } : undefined,
+      pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById, jobId: pr.jobId } : undefined,
     );
     const signatories: Signatory[] = [
       { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: preparedAt(slots) ?? pr.createdAt },

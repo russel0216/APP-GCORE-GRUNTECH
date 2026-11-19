@@ -62,6 +62,25 @@ export async function teamOfRequester(requesterId: string, tx: Prisma.Transactio
   return e?.industryId ?? null;
 }
 
+/**
+ * The team that OWNS a project (2026-11-19, the owner's call: a purchase
+ * request's Technical Manager is "the Team Technical Manager who owns the
+ * project", not the requester's): the team of the quotation it was won from
+ * — its tag, else its author's — else the team of its costing's author; null
+ * when neither has one.
+ */
+export async function projectTeamOf(jobId: string, tx: Prisma.TransactionClient = prisma): Promise<string | null> {
+  const job = await tx.job.findUnique({
+    where: { id: jobId },
+    select: {
+      quotationRevision: { select: { quotation: { select: { teamId: true, owner: { select: { employee: { select: { industryId: true } } } } } } } },
+      costing: { select: { owner: { select: { employee: { select: { industryId: true } } } } } },
+    },
+  });
+  const quotation = job?.quotationRevision?.quotation;
+  return quotation?.teamId ?? quotation?.owner.employee?.industryId ?? job?.costing.owner.employee?.industryId ?? null;
+}
+
 /** Once: KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT. */
 export async function seedSharedPosts(): Promise<number | null> {
   if (await prisma.setting.findUnique({ where: { key: TEAM_POSTS_MARK } })) return null;

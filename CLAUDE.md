@@ -7780,6 +7780,38 @@ requisition-page.png`). `pages/chain/PurchaseRequisitionEditor.tsx`,
   nobody is picked on the form. "Submit for approval" saves, then submits; a
   refused submit leaves the saved draft and says why.
 
+## A purchase request's Technical Manager is the project's (2026-11-19)
+
+The owner's call: "I want the technical manager who will approve is the Team
+Technical Manager who owns the project" — GT-PR-2026-0058, raised by a SIT
+engineer on another team's project, named SIT's Technical Manager because a
+ROLE step reads the REQUESTER's team.
+
+- **The PR names its project at submit** (`jobId` on `submitForApproval`, as
+  the route preview and the draft paper already did), and its Technical
+  Manager step is the engine's **PROJECT_MANAGER** type ("The Technical
+  Manager on the document or project", the role its fallback): the project's
+  own Technical Manager (`Job.projectManagerId`), else — none named, or the
+  manager raised it — the Technical Managers on the team that OWNS the project,
+  else the requester's team's. A request with no project (stock, a sales order,
+  a quotation) is as before.
+- **The team that owns a project** is `projectTeamOf()` (`shared/teamPosts.ts`):
+  the quotation it was won from (tag, else author), else its costing's author.
+  Every PROJECT_MANAGER step with a project and no `ctx.teamId` falls back to
+  it (`projectStepTeam` in `shared/approvals.ts` — the kick-off chart, the
+  phase date change, a job order on a project too).
+- **`holdsStep`** on a PROJECT_MANAGER step with a project: the project's own
+  Technical Manager signs it at submit; with none named, a holder of the role
+  on the team that owns it — never a Technical Manager of another team.
+- **`routePurchaseRequestsByProject()`** (`shared/prTechnicalManager.ts`, the
+  seed, once, `seed.prTechnicalManagerByProject20261119`) moved every
+  purchase request route's ROLE `technical_manager` step to PROJECT_MANAGER in
+  place (row, name, role kept; audited per route) — the seeded route and any
+  an administrator made (the live install's "cost controller, technical
+  manager, team leader"). A request already pending carries no project and
+  keeps its approver. The seeded route is PROJECT_MANAGER from the start.
+- verify-chain pins the engine on its own teams and the submit's `jobId`.
+
 ## The purchase order page (2026-10-13)
 
 The owner's call, after the requisition page: "do the same full page for

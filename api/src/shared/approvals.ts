@@ -1,6 +1,6 @@
 import { Prisma, type ApprovalRequest, type ApprovalStep } from '@prisma/client';
 import { prisma } from '../prisma';
-import { teamOfRequester, teamPostHolders } from './teamPosts';
+import { projectTeamOf, teamOfRequester, teamPostHolders } from './teamPosts';
 import { badRequest, conflict, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
@@ -249,6 +249,15 @@ export async function projectAgreementOpen(
 const teamFor = async (requesterId: string, tx: Prisma.TransactionClient, ctx: ApprovalContext) => ctx.teamId ?? (await teamOfRequester(requesterId, tx));
 
 /**
+ * The team a PROJECT_MANAGER step falls back to: the document's
+ * (`ctx.teamId`), else the team that OWNS the project the document is about
+ * (`projectTeamOf`, 2026-11-19 — a SIT engineer's purchase request on a UIT
+ * project goes to UIT's Technical Manager), else the requester's.
+ */
+const projectStepTeam = async (requesterId: string, tx: Prisma.TransactionClient, ctx: ApprovalContext) =>
+  ctx.teamId ?? (ctx.jobId ? await projectTeamOf(ctx.jobId, tx) : null) ?? (await teamOfRequester(requesterId, tx));
+
+/**
  * Roles with an IMPORTATION twin (2026-10-17, the owner's chart: Dina is the
  * Purchasing Manager (Local), Carter the Purchasing Manager (Importation)).
  * On an importation (`ApprovalContext.importation`) a step naming the key
@@ -315,7 +324,8 @@ export async function activeSupervisor(requesterId: string, tx: Prisma.Transacti
  * project, or the manager IS the requester (2026-10-07, the owner's call: a
  * PM's own request goes up to management, never to nobody). The project's
  * manager is its Technical Manager (2026-10-15); a step falling back to the
- * `technical_manager` role asks the one on the requester's team.
+ * `technical_manager` role asks the one on the team that owns the project
+ * (2026-11-19), else the one on the requester's team.
  */
 export async function approversForStep(
   step: ApprovalStep,
@@ -346,11 +356,13 @@ export async function approversForStep(
         });
         const holders = rows.map((r) => r.userId);
         // The Technical Manager fallback (2026-10-15: the project's manager IS
-        // its Technical Manager) is the one on the requester's own team, as a
-        // ROLE step naming that role is — never a Technical Manager of another team.
+        // its Technical Manager) is the one on the team that owns the project
+        // (2026-11-19), else on the requester's own team, as a ROLE step
+        // naming that role is — never a Technical Manager of another team.
         if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) {
-          const post = await teamPostHolders(rows[0].role.key, await teamFor(requesterId, tx, ctx), requesterId, tx);
-          return post ?? leadersFor(holders, requesterId, tx, ctx.teamId);
+          const team = await projectStepTeam(requesterId, tx, ctx);
+          const post = await teamPostHolders(rows[0].role.key, team, requesterId, tx);
+          return post ?? leadersFor(holders, requesterId, tx, team);
         }
         return holders;
       }
@@ -577,7 +589,17 @@ export async function holdsStep(
   // somebody else, who must sign it.
   if (step.approverType === 'PROJECT_MANAGER') {
     if (ctx.projectManagerId) return ctx.projectManagerId === requesterId;
-    if (ctx.jobId) return false;
+    // A document about a project (2026-11-19, the purchase request): held by
+    // the project's own Technical Manager; with none named, by a holder of
+    // the step's role on the team that owns the project — never by a
+    // Technical Manager of another team, whom the step does not go to.
+    if (ctx.jobId) {
+      const job = await tx.job.findUnique({ where: { id: ctx.jobId }, select: { projectManager: { select: { id: true, isActive: true } } } });
+      if (job?.projectManager?.isActive) return job.projectManager.id === requesterId;
+      if (!step.roleId) return false;
+      const [team, mine] = await Promise.all([projectStepTeam(requesterId, tx, ctx), teamOfRequester(requesterId, tx)]);
+      if (team && team !== mine) return false;
+    }
     if (!step.roleId) return false;
     return !!(await tx.userRole.findFirst({
       where: { userId: requesterId, roleId: step.roleId, user: { isActive: true } },

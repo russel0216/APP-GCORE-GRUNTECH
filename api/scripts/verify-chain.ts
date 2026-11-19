@@ -17,7 +17,7 @@ import { HOLDER_ALIASES, NO_BRAND_LABEL, assetCategory, matchHolder, mergeOdooRo
 import { odooAssetsSpec, odooAssetsWrite, odooInventorySpec, odooInventoryWrite } from '../src/routes/imports/odoo';
 import { receiptUnitCost, restateForeignReceipts } from '../src/shared/receiptCost';
 import bcrypt from 'bcryptjs';
-import { Prisma } from '@prisma/client';
+import { Prisma, type ApprovalStep } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
 import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
@@ -37,7 +37,7 @@ import { receiveStock } from '../src/shared/inventory';
 import { odooPicturesSpec, odooPicturesWrite } from '../src/routes/imports/odooPictures';
 import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
-import { submitForApproval, act, pickWorkflow, reopenApproved, byHighestRole, withoutCoSignedRepeats, type ApprovalSlot } from '../src/shared/approvals';
+import { submitForApproval, act, pickWorkflow, reopenApproved, byHighestRole, withoutCoSignedRepeats, approversForStep, holdsStep, type ApprovalSlot } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
   receiveStock,
@@ -298,6 +298,7 @@ async function cleanup() {
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.employee.deleteMany({ where: { employeeNo: { startsWith: TAG } } });
+  await prisma.industry.deleteMany({ where: { code: { startsWith: TAG } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verifyc.local' } },
     select: { id: true },
@@ -568,6 +569,68 @@ async function main() {
       prSigned[0].actedAt.getTime() === prSigned[1].actedAt.getTime(),
     JSON.stringify(prSigned.map((a) => [a.sequence, a.coSignedWith])),
   );
+  // A purchase request's Technical Manager is the PROJECT's (2026-11-19, the
+  // owner's call): the project's own Technical Manager, else the one on the
+  // team that owns it — never the Technical Manager of the requester's team.
+  // Checked on the step itself, so the install's routes take no part; the
+  // teams are the script's own, so nobody real holds a post on them.
+  {
+    const [teamMine, teamTheirs] = await Promise.all([
+      prisma.industry.create({ data: { code: `${TAG}TA`, name: `${TAG} Requester team` } }),
+      prisma.industry.create({ data: { code: `${TAG}TB`, name: `${TAG} Project team` } }),
+    ]);
+    const prEng = await makeUser('Verify Project Engineer', 'preng@verifyc.local', ['project_engineer']);
+    const tmMine = await makeUser('Verify TM Mine', 'tmmine@verifyc.local', ['technical_manager']);
+    const tmTheirs = await makeUser('Verify TM Theirs', 'tmtheirs@verifyc.local', ['technical_manager']);
+    const tmProject = await makeUser('Verify TM Project', 'tmproject@verifyc.local', ['technical_manager']);
+    for (const [u, team, no] of [
+      [prEng, teamMine, 1],
+      [tmMine, teamMine, 2],
+      [tmTheirs, teamTheirs, 3],
+      [tmProject, teamTheirs, 4],
+    ] as const) {
+      await prisma.employee.create({ data: { employeeNo: `${TAG}-P${no}`, firstName: 'Verify', lastName: u.name, userId: u.id, industryId: team.id } });
+    }
+    await prisma.user.update({ where: { id: prEng.id }, data: { supervisorId: tmMine.id } });
+    const projectCosting = (title: string) =>
+      prisma.costing.create({ data: { number: `${TAG}-PC-${title}`, title: `${TAG} ${title}`, ownerId: tmTheirs.id, totalCost: D(1000), contractValue: D(1200) } });
+    const projectJob = async (title: string, managerId: string | null) =>
+      prisma.job.create({
+        data: { number: `${TAG}-PJ-${title}`, name: `${TAG} ${title}`, customerId: customer.id, costingId: (await projectCosting(title)).id, createdById: tmTheirs.id, projectManagerId: managerId, contractValue: D(1200) },
+      });
+    const named = await projectJob('Named', tmProject.id);
+    const unnamed = await projectJob('Unnamed', null);
+    const tmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
+    const tmStep = { id: 'zz', workflowId: 'zz', sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleId: tmRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+    const [onNamed, onUnnamed, noProject] = await Promise.all([
+      approversForStep(tmStep, prEng.id, prisma, { jobId: named.id }),
+      approversForStep(tmStep, prEng.id, prisma, { jobId: unnamed.id }),
+      approversForStep(tmStep, prEng.id, prisma, {}),
+    ]);
+    check(
+      'a request on a project goes to that project’s Technical Manager — not the Technical Manager of the requester’s team, nor of the project’s',
+      onNamed.length === 1 && onNamed[0] === tmProject.id,
+      JSON.stringify(onNamed),
+    );
+    check(
+      'a project naming no Technical Manager: the Technical Managers on the team that owns it, never the requester’s team’s',
+      onUnnamed.includes(tmTheirs.id) && onUnnamed.includes(tmProject.id) && !onUnnamed.includes(tmMine.id),
+      JSON.stringify(onUnnamed),
+    );
+    check('a request on no project: the Technical Manager on the requester’s team, as before', noProject.includes(tmMine.id) && !noProject.includes(tmTheirs.id), JSON.stringify(noProject));
+    const [projectTmHolds, mineHolds, theirsHoldsUnnamed, mineHoldsUnnamed] = await Promise.all([
+      holdsStep(tmStep, tmProject.id, prisma, { jobId: named.id }),
+      holdsStep(tmStep, tmMine.id, prisma, { jobId: named.id }),
+      holdsStep(tmStep, tmTheirs.id, prisma, { jobId: unnamed.id }),
+      holdsStep(tmStep, tmMine.id, prisma, { jobId: unnamed.id }),
+    ]);
+    check(
+      'the project’s own Technical Manager signs that step at submit; a Technical Manager of another team never does',
+      projectTmHolds && !mineHolds && theirsHoldsUnnamed && !mineHoldsUnnamed,
+      JSON.stringify({ projectTmHolds, mineHolds, theirsHoldsUnnamed, mineHoldsUnnamed }),
+    );
+  }
+
   const poRoute = async (amount: number) => (await pickWorkflow('purchase_order', amount))?.steps.map((st) => st.name).join(' › ');
   check(
     'a purchase order up to ₱100,000.00 goes to the Purchasing Manager alone; above it, the CEO / President follows',
@@ -2156,9 +2219,9 @@ async function main() {
       where: { documentType: 'purchase_request', documentId: prId, status: 'PENDING' },
     });
     check(
-      'the requester submits it, in their own name',
-      prSubmitted.status === 200 && prRequest?.requesterId === requester.id,
-      `${prSubmitted.status} ${JSON.stringify(prSubmitted.body).slice(0, 120)}`,
+      'the requester submits it, in their own name, naming its project for the project’s Technical Manager',
+      prSubmitted.status === 200 && prRequest?.requesterId === requester.id && prRequest?.jobId === job.id,
+      `${prSubmitted.status} ${prRequest?.jobId} ${JSON.stringify(prSubmitted.body).slice(0, 120)}`,
     );
     const pendingRead = await api(requesterToken, 'GET', `/purchase-requests/${prId}`);
     check(
