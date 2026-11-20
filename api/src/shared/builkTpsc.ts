@@ -1,8 +1,4 @@
-import { Prisma } from '@prisma/client';
-import { prisma } from '../prisma';
-import { audit } from './audit';
-import { nextNumber } from './numbering';
-import { postJobCost } from './inventory';
+import { checkBuilkData, importBuilkProject, type BuilkLine, type BuilkOrder, type BuilkProject } from './builkImport';
 
 /**
  * What Builk already bought for project j-2688 "RA '26 TPSC - TOSHIBA LTI"
@@ -31,9 +27,8 @@ import { postJobCost } from './inventory';
 export const BUILK_TPSC_MARK = 'seed.builkTpsc20261119';
 export const BUILK_TPSC_QUOTATION = '1052607084.1';
 
-type Cat = 'MAT' | 'EQP';
-interface Line { name: string; description?: string; qty: number; unit: string; price: number; cat: Cat }
-interface Order { builk: string; supplier: string; date: string; delivery: string; total: number; createdBy: string; notes?: string; lines: Line[] }
+type Line = BuilkLine;
+type Order = BuilkOrder;
 
 const m = (name: string, qty: number, unit: string, price: number, description?: string): Line => ({ name, qty, unit, price, cat: 'MAT', description });
 const e = (name: string, qty: number, unit: string, price: number, description?: string): Line => ({ name, qty, unit, price, cat: 'EQP', description });
@@ -119,178 +114,15 @@ export const BUILK_TPSC_ORDERS: Order[] = [
 /** Builk's actual cost of the project, by budget line — what the import must come to. */
 export const BUILK_TPSC_ACTUAL = { MAT: 164525.19, EQP: 138578.38 } as const;
 
-const toCents = (v: number) => Math.round(v * 100);
-const lineCents = (l: Line) => Math.round(l.qty * 1000) * toCents(l.price) / 1000;
-const fold = (s: string) => s.toLowerCase().replace(/[^a-z0-9&]+/g, ' ').trim();
-const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
+export const BUILK_TPSC: BuilkProject = {
+  mark: BUILK_TPSC_MARK,
+  markDescription: "seed: Builk's purchases for RA '26 TPSC - TOSHIBA LTI were brought over once (2026-11-19)",
+  builkName: "j-2688 RA '26 TPSC - TOSHIBA LTI",
+  quotation: BUILK_TPSC_QUOTATION,
+  deliverTo: "RA '26 TPSC - TOSHIBA LTI, Laguna — person in charge Salvador Ugaban",
+  actual: BUILK_TPSC_ACTUAL,
+  orders: BUILK_TPSC_ORDERS,
+};
 
-/** The data checked against Builk's own totals — every order and both budget lines — before anything is written. */
-export function checkBuilkTpscData(): string[] {
-  const problems: string[] = [];
-  const byCat = { MAT: 0, EQP: 0 };
-  for (const o of BUILK_TPSC_ORDERS) {
-    let sum = 0;
-    for (const l of o.lines) {
-      const c = lineCents(l);
-      if (!Number.isInteger(c)) problems.push(`${o.builk} ${l.name}: ${l.qty} x ${l.price} is not a whole centavo`);
-      sum += c;
-      byCat[l.cat] += c;
-    }
-    if (sum !== toCents(o.total)) problems.push(`${o.builk} adds up to ${(sum / 100).toFixed(2)}, Builk says ${o.total.toFixed(2)}`);
-  }
-  for (const k of ['MAT', 'EQP'] as const) {
-    if (byCat[k] !== toCents(BUILK_TPSC_ACTUAL[k])) problems.push(`${k} adds up to ${(byCat[k] / 100).toFixed(2)}, Builk says ${BUILK_TPSC_ACTUAL[k].toFixed(2)}`);
-  }
-  return problems;
-}
-
-export type BuilkTpscResult =
-  | { done: false; reason: string }
-  | { done: true; job: string; orders: { builk: string; po: string; receiving: string; total: number }[]; materials: number; equipment: number };
-
-/**
- * Runs once. Waits, unmarked, while the project does not exist yet; refuses
- * (unmarked, said) if a supplier, a budget line or the data does not add up,
- * and leaves alone a project that already carries a Builk order.
- */
-export async function importBuilkTpsc(opts: { dryRun?: boolean; force?: boolean; /** A test's own project in place of the quotation's (scripts/test-builk-tpsc.ts). */ jobId?: string } = {}): Promise<BuilkTpscResult | null> {
-  if (!opts.dryRun && !opts.force && (await prisma.setting.findUnique({ where: { key: BUILK_TPSC_MARK } }))) return null;
-
-  const problems = checkBuilkTpscData();
-  if (problems.length) return { done: false, reason: `the Builk data does not add up: ${problems.join('; ')}` };
-
-  const job = await prisma.job.findFirst({
-    where: opts.jobId ? { id: opts.jobId } : { status: { not: 'CANCELLED' }, quotationRevision: { quotation: { number: BUILK_TPSC_QUOTATION } } },
-    select: { id: true, number: true, projectManagerId: true, createdById: true },
-    orderBy: { createdAt: 'asc' },
-  });
-  if (!job) return { done: false, reason: `no project is built from quotation ${BUILK_TPSC_QUOTATION} yet` };
-
-  const already = await prisma.purchaseOrder.count({ where: { jobId: job.id, notes: { contains: 'Builk PO' } } });
-  if (already) return { done: false, reason: `${job.number} already carries ${already} order(s) from Builk` };
-
-  const cats = await prisma.costCategory.findMany({ where: { code: { in: ['MAT', 'EQP'] } }, select: { id: true, code: true } });
-  const catId = Object.fromEntries(cats.map((c) => [c.code, c.id])) as Record<Cat, string>;
-  if (!catId.MAT || !catId.EQP) return { done: false, reason: 'the Materials or Equipment budget line is not on file' };
-
-  const suppliers = await prisma.supplier.findMany({ select: { id: true, name: true } });
-  const supplierOf = new Map<string, { id: string; name: string }>();
-  for (const o of BUILK_TPSC_ORDERS) {
-    const hits = suppliers.filter((s) => fold(s.name).startsWith(fold(o.supplier)));
-    if (hits.length !== 1) return { done: false, reason: `supplier "${o.supplier}" matches ${hits.length} on file` };
-    supplierOf.set(o.builk, hits[0]);
-  }
-
-  const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true, name: true } });
-  const admin = await prisma.user.findFirst({ where: { isSuperAdmin: true }, select: { id: true }, orderBy: { createdAt: 'asc' } });
-  // "Ayessa Yaya" finds "Ayessa Jane Yaya": every word of the name, in any login's name; one login only.
-  const userNamed = (name: string) => {
-    const words = fold(name).split(' ');
-    const hits = users.filter((u) => { const n = fold(u.name).split(' '); return words.every((w) => n.includes(w)); });
-    return (hits.length === 1 ? hits[0].id : null) ?? job.createdById ?? admin?.id;
-  };
-  const receiverId = job.projectManagerId ?? job.createdById ?? admin?.id;
-  if (!receiverId) return { done: false, reason: 'nobody to record as the receiver' };
-
-  if (opts.dryRun) {
-    return { done: true, job: job.number, orders: BUILK_TPSC_ORDERS.map((o) => ({ builk: o.builk, po: '(dry run)', receiving: '(dry run)', total: o.total })), materials: BUILK_TPSC_ACTUAL.MAT, equipment: BUILK_TPSC_ACTUAL.EQP };
-  }
-
-  return prisma.$transaction(
-    async (tx: Prisma.TransactionClient) => {
-      const done: { builk: string; po: string; receiving: string; total: number }[] = [];
-      for (const o of BUILK_TPSC_ORDERS) {
-        const supplier = supplierOf.get(o.builk)!;
-        const createdById = userNamed(o.createdBy)!;
-        const ponumber = await nextNumber('purchase_order', tx);
-        const total = new Prisma.Decimal(o.total.toFixed(2));
-        const po = await tx.purchaseOrder.create({
-          data: {
-            number: ponumber,
-            status: 'RECEIVED',
-            kind: 'DIRECT_TO_JOB',
-            supplierId: supplier.id,
-            jobId: job.id,
-            createdById,
-            orderDate: day(o.date),
-            deliveryDate: day(o.delivery),
-            deliverTo: "RA '26 TPSC - TOSHIBA LTI, Laguna — person in charge Salvador Ugaban",
-            quoteRef: `Builk PO ${o.builk}`,
-            terms: 'Cash',
-            notes: `Builk PO ${o.builk} — imported from Builk (approved there by ${o.createdBy} on ${o.date}); no approval in G-CORE.${o.notes ? ` ${o.notes}` : ''}`,
-            vatRate: new Prisma.Decimal(0),
-            subtotal: total,
-            total,
-            issuedAt: day(o.date),
-            approvedAt: day(o.date),
-            items: {
-              create: o.lines.map((l, i) => ({
-                costCategoryId: catId[l.cat],
-                name: l.name,
-                description: l.description ? `${l.name} — ${l.description}` : l.name,
-                quantity: new Prisma.Decimal(l.qty),
-                unit: l.unit,
-                unitPrice: new Prisma.Decimal(l.price.toFixed(2)),
-                amount: new Prisma.Decimal((lineCents(l) / 100).toFixed(2)),
-                receivedQty: new Prisma.Decimal(l.qty),
-                sortOrder: i,
-              })),
-            },
-          },
-          include: { items: { orderBy: { sortOrder: 'asc' } } },
-        });
-
-        const rrnumber = await nextNumber('receiving', tx);
-        const receiving = await tx.receiving.create({
-          data: {
-            number: rrnumber,
-            orderId: po.id,
-            warehouseId: null,
-            receivedById: receiverId,
-            receivedDate: day(o.delivery),
-            status: 'RECEIVED',
-            notes: `Builk PO ${o.builk} — delivered to and used at site (imported from Builk); no stock held.`,
-            items: {
-              create: po.items.map((it) => ({
-                orderItemId: it.id,
-                description: it.description,
-                unit: it.unit,
-                quantity: it.quantity,
-                unitCost: it.unitPrice,
-                costTyped: true,
-              })),
-            },
-          },
-        });
-
-        for (const cat of ['MAT', 'EQP'] as const) {
-          const amount = o.lines.filter((l) => l.cat === cat).reduce((s, l) => s + lineCents(l), 0) / 100;
-          await postJobCost(tx, {
-            jobId: job.id,
-            costCategoryId: catId[cat],
-            state: 'INCURRED',
-            amount,
-            sourceType: 'receiving',
-            sourceId: receiving.id,
-            sourceNumber: receiving.number,
-            description: `Goods received from ${supplier.name} — Builk PO ${o.builk}`,
-            createdById: receiverId,
-          });
-        }
-
-        await audit({ entityType: 'purchase_order', entityId: po.id, action: 'CREATED', summary: `${po.number} imported from Builk PO ${o.builk} for ${job.number} — ${supplier.name}, ${o.total.toFixed(2)}, issued and received there (no approval in G-CORE)`, after: { builk: o.builk, total: o.total } }, undefined, tx);
-        await audit({ entityType: 'receiving', entityId: receiving.id, action: 'CREATED', summary: `${receiving.number} imported from Builk PO ${o.builk} — received at site, charged to ${job.number}`, after: { builk: o.builk } }, undefined, tx);
-        done.push({ builk: o.builk, po: po.number, receiving: receiving.number, total: o.total });
-      }
-
-      await audit({ entityType: 'job', entityId: job.id, action: 'UPDATED', summary: `Builk's purchases brought over: ${done.length} orders, Materials ${BUILK_TPSC_ACTUAL.MAT.toFixed(2)} and Equipment ${BUILK_TPSC_ACTUAL.EQP.toFixed(2)} incurred (Builk j-2688)` }, undefined, tx);
-      await tx.setting.upsert({
-        where: { key: BUILK_TPSC_MARK },
-        create: { key: BUILK_TPSC_MARK, value: { at: new Date().toISOString(), job: job.number, orders: done }, description: "seed: Builk's purchases for RA '26 TPSC - TOSHIBA LTI were brought over once (2026-11-19)" },
-        update: { value: { at: new Date().toISOString(), job: job.number, orders: done } },
-      });
-      return { done: true as const, job: job.number, orders: done, materials: BUILK_TPSC_ACTUAL.MAT, equipment: BUILK_TPSC_ACTUAL.EQP };
-    },
-    { maxWait: 15_000, timeout: 120_000 },
-  );
-}
+export const checkBuilkTpscData = () => checkBuilkData(BUILK_TPSC);
+export const importBuilkTpsc = (opts: { dryRun?: boolean; force?: boolean; jobId?: string } = {}) => importBuilkProject(BUILK_TPSC, opts);

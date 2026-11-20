@@ -55,6 +55,7 @@ import { applyFinAccess, applyMoneyInAccess } from '../src/shared/finAccess';
 import { applyChainAccess } from '../src/shared/chainAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { importBuilkTpsc } from '../src/shared/builkTpsc';
+import { importBuilkAjoya } from '../src/shared/builkAjoya';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1942,6 +1943,14 @@ async function main() {
     const builk = await importBuilkTpsc();
     if (builk?.done) console.log(`  ✓ Builk TPSC: ${builk.orders.length} orders on ${builk.job} (${builk.orders.map((o) => `${o.builk} → ${o.po}`).join(', ')})`);
     else if (builk) console.log(`  · Builk TPSC import waits: ${builk.reason}`);
+  }
+
+  // ── Builk's purchases for Ajoya Pampanga, j-2658 (2026-11-20) ─────────────
+  // Once, onto the project built from quotation 0062602018.2 (shared/builkAjoya.ts).
+  {
+    const builk = await importBuilkAjoya();
+    if (builk?.done) console.log(`  ✓ Builk Ajoya: ${builk.orders.length} orders on ${builk.job}`);
+    else if (builk) console.log(`  · Builk Ajoya import waits: ${builk.reason}`);
   }
 
   // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
