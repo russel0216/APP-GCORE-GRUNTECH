@@ -5173,8 +5173,8 @@ async function main() {
           const heldOther = await heldSequences({ preparerSigns: true, steps: [checking] }, finance.id, prisma, { documentType: 'supplier_bill' });
           await prisma.user.update({ where: { id: finance.id }, data: { supervisorId: null } });
           check(
-            'on a money document a step the requester holds is never signed by them at submit — it goes to the person they report to as well',
-            asMoney.includes(engineer.id) && !asOther.includes(engineer.id) && heldMoney.size === 0 && heldOther.has(checking.sequence),
+            'on a money document a step the requester holds is never signed by them at submit — it goes to the person they report to, and to them alone',
+            asMoney.join() === engineer.id && !asOther.includes(engineer.id) && heldMoney.size === 0 && heldOther.has(checking.sequence),
             `${asMoney.includes(engineer.id)} ${asOther.includes(engineer.id)} ${heldMoney.size} ${[...heldOther].join()}`,
           );
         }

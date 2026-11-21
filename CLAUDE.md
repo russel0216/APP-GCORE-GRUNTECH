@@ -9259,9 +9259,13 @@ to the CEO / President.
 - **A money document's own steps go up**: `MONEY_DOCUMENTS` in
   `shared/approvals.ts` — `budget_request`, `travel_request`,
   `cash_advance`, `expense`. On these `heldSequences()` signs nothing at
-  submit whatever `preparerSigns` says, and a step whose holders include the
-  requester also goes to their "Reports to" (`activeSupervisor`), who then
-  signs it (and co-signs the next step they hold). `ApprovalContext.documentType`
+  submit whatever `preparerSigns` says, and a step the requester holds
+  (`holdsStep`, or they are among its holders) goes to their "Reports to"
+  (`activeSupervisor`) ALONE, who signs it and co-signs the next step they
+  hold — never to another team's holder (the owner's call on GT-TR-2026-0002:
+  Salvador, GIB's only Technical Manager, saw his step fall to every other
+  team's Technical Manager; it is Carter's). With nobody above them, the
+  step's other holders. `ApprovalContext.documentType`
   carries the type (`ctxOf` reads it off the stored request, submit and
   `routePreview` set it). Every other document keeps the preparer's
   signature as before.

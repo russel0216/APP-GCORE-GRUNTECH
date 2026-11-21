@@ -348,11 +348,16 @@ export async function approversForStep(
   ctx: ApprovalContext = {},
 ): Promise<string[]> {
   const ids = await stepHolders(step, requesterId, tx, ctx);
-  // A money document's step the requester holds goes up to the person they
-  // report to as well (`MONEY_DOCUMENTS`, 2026-11-21) — never to nobody.
-  if (!isMoney(ctx) || step.approverType === 'PROJECT_MANAGERS' || !ids.includes(requesterId)) return ids;
+  // A money document's step the requester holds goes to the person they
+  // report to, ALONE (`MONEY_DOCUMENTS`, 2026-11-21; the owner's call the same
+  // day on GT-TR-2026-0002: Salvador, GIB's only Technical Manager, saw his
+  // step fall to every other team's Technical Manager — "Carter approves").
+  // Never another team's holder; with nobody above them, the step's own
+  // holders other than the requester, as before.
+  if (!isMoney(ctx) || step.approverType === 'PROJECT_MANAGERS') return ids;
+  if (!ids.includes(requesterId) && !(await holdsStep(step, requesterId, tx, ctx))) return ids;
   const up = await activeSupervisor(requesterId, tx);
-  return up && up !== requesterId && !ids.includes(up) ? [...ids, up] : ids;
+  return up && up !== requesterId ? [up] : ids;
 }
 
 async function stepHolders(
