@@ -23,6 +23,7 @@ import {
 import { registerSearch } from '../shared/search';
 import { renderDocument, formatMoney, formatAmount, formatQuantity, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, refreshBudgetRequest } from '../shared/finance';
+import { REQUEST_MONEY, cashSpent, requestMoney } from '../shared/requestMoney';
 import { cashRequestSections, cashRequestSignatories, budgetSections as chargeSections } from './finance';
 import { officeBudgetPosition, officePosition, requestOffice } from '../shared/officeBudget';
 import { OFFICE_LINE_SELECT } from '../shared/officeBudget';
@@ -92,8 +93,15 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
   const released = num(row.amountReleased);
   const spent = num(row.amountSpent);
   const refunded = num(row.amountRefunded);
-  const liquidated = !!row.liquidatedAt;
-  const refundDue = liquidated ? cents(Math.max(0, released - spent)) : 0;
+  // The split travel request (2026-11-21): the finance part booked on the
+  // company card, the cash part released to the traveller and liquidated.
+  const financePart = num(row.financePart);
+  const booked = num(row.amountBooked);
+  const cashPart = cents(Math.max(0, amount - financePart));
+  const cashSpentNow = cashSpent(row);
+  const liquidated = !!row.liquidatedAt && released > 0.005;
+  const refundDue = liquidated ? cents(Math.max(0, released - cashSpentNow)) : 0;
+  const open = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(row.status);
   const liquidation = row.liquidations.find((l) => (LIVE_LIQUIDATION as readonly string[]).includes(l.status)) ?? null;
   const { employee: _e, ...requester } = row.requestedBy;
   return {
@@ -111,11 +119,19 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
     amountReleased: released,
     amountSpent: spent,
     amountRefunded: refunded,
-    /** What finance still has to hand over. Only an approved request is owed anything. */
-    toRelease: row.status === 'APPROVED' ? cents(amount - released) : 0,
+    financePart,
+    amountBooked: booked,
+    /** The cash the traveller is handed and liquidates: the amount less the finance part. */
+    cashPart,
+    /** What finance still has to hand over in cash. Only an approved request is owed anything. */
+    toRelease: row.status === 'APPROVED' && cashPart > 0.005 ? cents(cashPart - released) : 0,
+    /** What finance may still book on the company card — the finance part not yet booked. */
+    toBook: open && financePart > 0.005 ? cents(Math.max(0, financePart - booked)) : 0,
     spent,
+    /** The liquidation's part of what was spent (the bookings are the rest). */
+    cashSpent: cashSpentNow,
     /** Spent beyond the cash released — owed to the person who filed the receipts, settled on the claim. */
-    excessDue: liquidated ? cents(Math.max(0, spent - released)) : 0,
+    excessDue: liquidated ? cents(Math.max(0, cashSpentNow - released)) : 0,
     /** Unspent cash owed back. Zero until a liquidation says what was spent. */
     refundDue,
     refundOutstanding: row.status === 'REFUND_DUE' ? cents(refundDue - refunded) : 0,
@@ -128,6 +144,30 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
     liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total), amountPaid: num(l.amountPaid) })),
     items: row.items.map((i) => ({ ...i, quantity: num(i.quantity), unitCost: num(i.unitCost), amount: num(i.amount) })),
   };
+}
+
+/**
+ * The person's request whose cash is out past its liquidation deadline, if
+ * any — cash released, no liquidation approved, the deadline before today
+ * (Manila's day), and no liquidation filed for it yet — one filed and
+ * waiting for approval is the requester's part done.
+ */
+export async function overdueLiquidationOf(userId: string) {
+  return prisma.budgetRequest.findFirst({
+    where: {
+      requestedById: userId,
+      status: 'RELEASED',
+      liquidationDueDate: { lt: dayKey(new Date()) },
+      liquidations: { none: { status: { in: ['PENDING_APPROVAL', 'APPROVED', 'SETTLED', 'REIMBURSED'] } } },
+    },
+    select: { id: true, number: true, liquidationDueDate: true },
+    orderBy: { liquidationDueDate: 'asc' },
+  });
+}
+
+/** The finance part a save writes: the lines finance books on a travel request; nothing on any other. */
+function financePartOf(isTravel: boolean, lines: { amount: Prisma.Decimal; financePays: boolean }[]): number {
+  return isTravel ? cents(lines.filter((l) => l.financePays).reduce((s, l) => s + num(l.amount), 0)) : 0;
 }
 
 type Me = ReturnType<typeof currentUser>;
@@ -275,20 +315,23 @@ async function budgetRequestListSummary(where: Prisma.BudgetRequestWhereInput) {
       _count: { _all: true },
       _sum: { amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
     });
-  const [all, approved, pending, toRelease, released, refundDue] = await Promise.all([
+  const [all, approved, pending, released, refundDue, owing] = await Promise.all([
     sum({ status: { notIn: ['REJECTED', 'CANCELLED'] } }),
     sum({ status: { in: [...APPROVED_STATES] } }),
     sum({ status: 'PENDING_APPROVAL' }),
-    sum({ status: 'APPROVED' }),
     sum({ status: { in: [...RELEASED_STATES] } }),
     sum({ status: 'REFUND_DUE' }),
+    // Still to pay: the cash not yet released and a travel request's finance
+    // part not yet booked (2026-11-21) — `requestMoney().waiting`.
+    prisma.budgetRequest.findMany({ where: { AND: [where, { status: { in: ['APPROVED', 'RELEASED'] } }] }, select: REQUEST_MONEY }),
   ]);
+  const waiting = owing.map((r) => requestMoney(r).waiting).filter((w) => w > 0.005);
   const liquidated = await prisma.budgetRequest.aggregate({
     where: { AND: [where, { status: { in: [...RELEASED_STATES] }, liquidatedAt: { not: null } }] },
-    _sum: { amountReleased: true, amountSpent: true },
+    _sum: { amountReleased: true, amountSpent: true, amountBooked: true },
   });
-  // Unspent cash on a liquidated request: what was released and not spent.
-  const unspent = Math.max(0, cents(num(liquidated._sum.amountReleased) - num(liquidated._sum.amountSpent)));
+  // Unspent cash on a liquidated request: what was released and not spent in cash.
+  const unspent = Math.max(0, cents(num(liquidated._sum.amountReleased) - (num(liquidated._sum.amountSpent) - num(liquidated._sum.amountBooked))));
   return {
     total: num(all._sum.amount),
     count: all._count._all,
@@ -296,8 +339,8 @@ async function budgetRequestListSummary(where: Prisma.BudgetRequestWhereInput) {
     approvedCount: approved._count._all,
     pending: num(pending._sum.amount),
     pendingCount: pending._count._all,
-    toRelease: cents(num(toRelease._sum.amount) - num(toRelease._sum.amountReleased)),
-    toReleaseCount: toRelease._count._all,
+    toRelease: cents(waiting.reduce((s, w) => s + w, 0)),
+    toReleaseCount: waiting.length,
     released: num(released._sum.amountReleased),
     releasedCount: released._count._all,
     spent: num(liquidated._sum.amountSpent),
@@ -624,6 +667,9 @@ type BudgetRow = {
   amount: Prisma.Decimal;
   amountReleased: Prisma.Decimal;
   amountRefunded: Prisma.Decimal;
+  amountSpent: Prisma.Decimal;
+  amountBooked: Prisma.Decimal;
+  liquidatedAt: Date | null;
   officeBudgetLineId?: string | null;
   split?: boolean;
 } & Parameters<typeof sourceOf>[0];
@@ -644,14 +690,22 @@ async function recordOrProjectBudget(row: BudgetRow) {
   // quotation or costing reads that record's cost (2026-10-26) — one budget
   // line each, or one "whole cost" row where the record carries none.
   const source = sourceOf(row);
-  const pool =
-    row.jobId || !source
-      ? { ...(await projectBudgetByLine(row.jobId!, { exclude: { sourceType: 'budget_request', sourceId: row.id }, own: { budgetRequestId: row.id } })), perLine: true }
-      : (await recordBudget(source, row.id)) ?? { lines: [], total: { budgeted: 0, committed: 0, incurred: 0, consumed: 0, available: 0 }, perLine: false };
-  const { lines, total, perLine } = pool;
   const settled = ['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(row.status);
   const out = ['RELEASED', 'REFUND_DUE'].includes(row.status);
-  const thisRequest = settled ? 0 : out ? cents(Math.max(0, num(row.amountReleased) - num(row.amountRefunded))) : num(row.amount);
+  // Settled, the line is read as it stands — this request's own rows with it
+  // (what finance booked stays spent there); otherwise its own money is left
+  // out and shown as "this request".
+  const pool =
+    row.jobId || !source
+      ? {
+          ...(await projectBudgetByLine(row.jobId!, settled ? {} : { exclude: { sourceType: 'budget_request', sourceId: row.id }, own: { budgetRequestId: row.id } })),
+          perLine: true,
+        }
+      : (await recordBudget(source, settled ? null : row.id)) ?? { lines: [], total: { budgeted: 0, committed: 0, incurred: 0, consumed: 0, available: 0 }, perLine: false };
+  const { lines, total, perLine } = pool;
+  // Asked: the amount; once money moves, what is still waiting, out in cash
+  // and booked by finance together (2026-11-21) — `requestMoney().total`.
+  const thisRequest = settled ? 0 : row.status === 'DRAFT' ? num(row.amount) : requestMoney(row).total;
   const line = (perLine ? lines.find((l) => l.id === row.costCategoryId) : lines[0]) ?? null;
   const before = line?.available ?? 0;
   const after = cents(before - thisRequest);
@@ -709,8 +763,7 @@ async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): P
       ledger.filter((l) => l.jobId === r.jobId && l.costCategoryId === r.costCategoryId && l.state === state).reduce((s, l) => s + num(l._sum.amount), 0) -
       own.filter((o) => o.sourceId === r.id && o.costCategoryId === r.costCategoryId && o.state === state).reduce((s, o) => s + num(o._sum.amount), 0);
     const before = of('BUDGETED') - of('COMMITTED') - of('INCURRED');
-    const out_ = ['RELEASED', 'REFUND_DUE'].includes(r.status);
-    const take = out_ ? Math.max(0, num(r.amountReleased) - num(r.amountRefunded)) : num(r.amount);
+    const take = r.status === 'DRAFT' ? num(r.amount) : requestMoney(r).total;
     out.set(r.id, cents(before - take));
   }
   return out;
@@ -801,12 +854,21 @@ budgetRequestRoutes.get(
     // named before anybody presses Submit (names only).
     const approvalRoute =
       row.status === 'DRAFT' ? await routeBrief(docType(row), num(row.amount), row.requestedById, null, { jobId: row.jobId, jobIds: jobIdsOf(row, row.items) }) : null;
+    const shown = presentBudgetRequest(row);
+    const payer = me.isSuperAdmin || me.permissions.has('gfin.ap.create');
+    const untouched = row.status === 'APPROVED' && num(row.amountReleased) <= 0.005 && num(row.amountBooked) <= 0.005;
     res.json({
-      ...presentBudgetRequest(row),
+      ...shown,
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
       canEdit: row.status === 'DRAFT' && canEditRecord(me, 'gops', 'budget_requests', row.requestedById),
-      /** Finance may book and pay an approved travel request itself — the company card (2026-11-10). */
-      canBook: row.isTravel && row.status === 'APPROVED' && (me.isSuperAdmin || me.permissions.has('gfin.ap.create')),
+      /**
+       * Finance may book the finance part on the company card (2026-11-10;
+       * split 2026-11-21) while some of it is left — or, on a request saved
+       * before the split with no lines, book it whole.
+       */
+      canBook: row.isTravel && payer && (shown.toBook > 0.005 || (untouched && !row.items.length)),
+      /** Finance may mark which lines it books while no money has gone out. */
+      canSetFinanceLines: row.isTravel && payer && untouched && row.items.length > 0,
       approvalType: docType(row),
       approvalRoute,
       budget: await requestBudget(row),
@@ -826,6 +888,8 @@ const itemSchema = z.object({
   jobId: z.string().optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
   officeBudgetLineId: z.string().optional().nullable(),
+  /** A travel request's line finance books and pays itself — the company card (2026-11-21). */
+  financePays: z.boolean().optional(),
 });
 
 const requestSchema = z.object({
@@ -900,6 +964,8 @@ function moneyOf(body: RequestBody, charges: LineCharge[] = []) {
     unit: i.unit?.trim() || 'pcs',
     unitCost: D(Math.round(i.unitCost * 100) / 100),
     amount: D(requestLineAmount(i.quantity, i.unitCost)),
+    // Only a travel request's line is booked by finance; on any other the box means nothing.
+    financePays: !!body.travel && !!i.financePays,
     ...(charges[n] ?? NO_CHARGE),
   }));
   const amount = lines.length ? cents(lines.reduce((s, l) => s + num(l.amount), 0)) : cents(body.amount ?? 0);
@@ -974,6 +1040,13 @@ budgetRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(requestSchema, req.body);
+    // No new money while cash is out past its deadline (2026-11-21, the owner's call).
+    const late = await overdueLiquidationOf(me.id);
+    if (late) {
+      throw badRequest(
+        `${late.number} was due to be liquidated on ${formatShortDate(late.liquidationDueDate!)} — liquidate it first, then raise a new ${body.travel ? 'travel' : 'budget'} request`,
+      );
+    }
     const source = await requestCharging(me, body);
     const { lines, amount } = moneyOf(body, source.itemCharges);
     const travel = travelColumns(body);
@@ -988,6 +1061,7 @@ budgetRequestRoutes.post(
           costCategoryId: source.costCategoryId,
           split: source.split,
           amount: D(amount),
+          financePart: D(financePartOf(travel.isTravel, lines)),
           items: { create: lines },
           reason: body.reason,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
@@ -1051,6 +1125,7 @@ budgetRequestRoutes.put(
     const { lines, amount } = kept?.length
       ? { lines: null, amount: cents(kept.reduce((s, l) => s + num(l.amount), 0)) }
       : moneyOf(body, source.itemCharges);
+    const financePart = financePartOf(existing.isTravel, lines ?? kept ?? []);
 
     const request = await prisma.$transaction(async (tx) => {
       // Claimed on DRAFT: a submit that landed first wins.
@@ -1063,6 +1138,7 @@ budgetRequestRoutes.put(
           split: source.split,
           ...travel,
           amount: D(amount),
+          financePart: D(financePart),
           reason: body.reason,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
           notes: body.notes || null,
@@ -1238,49 +1314,98 @@ onApprovalReopened('budget_request', reopenRequest);
 onApprovalReopened('travel_request', reopenRequest);
 
 /**
- * Finance books and pays the trip itself (2026-11-10, the owner's call:
- * "finance can also pay, particularly the booking of an airline using a
- * credit card"). An APPROVED travel request, the A/P create right: one
- * payment voucher for what the booking cost — never more than was approved —
- * allocated to the request and marked `paidDirect`. Nobody holds cash, so
- * `refreshBudgetRequest()` reads what was paid as what was spent: the request
- * is LIQUIDATED at once, a project is charged INCURRED, an office line counts
- * it as actual. Deleting the voucher puts the request back to approved.
+ * Finance books and pays part of the trip itself (2026-11-10, then the split
+ * of 2026-11-21 — the owner's call: "the air fare and the booking of the hotel
+ * can be paid by finance through the company credit card"). A travel
+ * request's lines marked `financePays` make its FINANCE part; finance books
+ * them — one voucher per booking, as many as the trip needs, together never
+ * more than the finance part — with the booking reference, the card's last
+ * four digits and the statement month the charge falls on. Each booking is
+ * spent at once (`refreshBudgetRequest()`: a project is charged INCURRED, an
+ * office line counts it as actual) and is never liquidated; the CASH part is
+ * released in one voucher as ever and liquidated by the traveller. A request
+ * that is all finance part is LIQUIDATED at its first booking. Deleting a
+ * booking's voucher takes it off again.
+ *
+ * A request saved before the split with no lines is booked whole, as before.
  */
+const bookSchema = z.object({
+  amount: z.number().positive('What did the booking cost?'),
+  method: z.enum(['CREDIT_CARD', 'BANK_TRANSFER', 'ONLINE', 'CASH', 'CHECK']).default('CREDIT_CARD'),
+  paymentDate: z.string().optional().nullable(),
+  /** The airline's or the hotel's booking reference — what the card statement names. */
+  reference: z.string().trim().max(200).optional().nullable(),
+  /** The company card's last four digits (a card charge). */
+  cardLast4: z.string().trim().regex(/^\d{4}$/, 'The card’s last four digits').optional().nullable(),
+  /** The statement month the charge falls on, "2026-11" (a card charge; the payment's month by default). */
+  statementMonth: z.string().trim().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'The statement month, as 2026-11').optional().nullable(),
+  carrier: z.string().trim().max(200).optional().nullable(),
+  notes: z.string().trim().max(2000).optional().nullable(),
+});
+
+/** A booking reference already on a reimbursement or another card charge — the same charge claimed twice (2026-11-21). */
+export async function bookingReferenceTaken(reference: string, db: Prisma.TransactionClient = prisma, exceptPaymentId?: string): Promise<string | null> {
+  const ref = reference.trim();
+  if (!ref) return null;
+  const [line, card] = await Promise.all([
+    db.expenseClaimLine.findFirst({
+      where: { receiptNo: { equals: ref, mode: 'insensitive' }, claim: { status: { notIn: ['REJECTED', 'CANCELLED'] } } },
+      select: { claim: { select: { number: true } } },
+    }),
+    db.payment.findFirst({
+      where: { kind: 'DISBURSEMENT', method: 'CREDIT_CARD', reference: { equals: ref, mode: 'insensitive' }, ...(exceptPaymentId ? { id: { not: exceptPaymentId } } : {}) },
+      select: { number: true },
+    }),
+  ]);
+  if (line) return `reimbursement ${line.claim.number}`;
+  if (card) return `card charge ${card.number}`;
+  return null;
+}
+
+const BOOKABLE: RequestStatus[] = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'];
+
 budgetRequestRoutes.post(
   '/:id/book',
   require_('gfin.ap.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        amount: z.number().positive('What did the booking cost?'),
-        method: z.enum(['CREDIT_CARD', 'BANK_TRANSFER', 'ONLINE', 'CASH', 'CHECK']).default('CREDIT_CARD'),
-        paymentDate: z.string().optional().nullable(),
-        reference: z.string().trim().max(200).optional().nullable(),
-        carrier: z.string().trim().max(200).optional().nullable(),
-        notes: z.string().trim().max(2000).optional().nullable(),
-      }),
-      req.body,
-    );
-    const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id }, include: { requestedBy: { select: { id: true, name: true } } } });
+    const body = parseBody(bookSchema, req.body);
+    const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id }, include: { items: { select: { id: true } } } });
     if (!request) throw notFound('Travel request not found');
     if (!request.isTravel) throw badRequest('Only a travel request is booked and paid by finance — a budget request is released to its requester');
-    if (request.status !== 'APPROVED') throw badRequest(`${request.number} is ${statusLabel(request.status).toLowerCase()} — only an approved travel request can be booked`);
+    if (!BOOKABLE.includes(request.status)) throw badRequest(`${request.number} is ${statusLabel(request.status).toLowerCase()} — only an approved travel request can be booked`);
     const amount = cents(body.amount);
-    if (amount > num(request.amount) + 0.005) {
-      throw badRequest(`${request.number} was approved for ${formatMoney(num(request.amount))} — the booking cannot cost more. Raise another request for the difference`);
-    }
     const paymentDate = body.paymentDate ? asDate(body.paymentDate, 'Payment date') : dayKey(new Date());
     if (paymentDate > dayKey(new Date())) throw badRequest('The payment date is still to come');
+    const card = body.method === 'CREDIT_CARD';
+    if (body.reference) {
+      const taken = await bookingReferenceTaken(body.reference);
+      if (taken) throw badRequest(`Booking reference ${body.reference} is already on ${taken} — the same charge is never paid twice`);
+    }
 
     const payment = await prisma.$transaction(async (tx) => {
-      // Claimed on APPROVED with nothing paid: two clicks book once.
-      const claimed = await tx.budgetRequest.updateMany({
-        where: { id: request.id, status: 'APPROVED', paidDirect: false },
-        data: { paidDirect: true, ...(body.carrier ? { carrier: body.carrier } : {}) },
-      });
-      if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
+      // One booking at a time on a request: the finance part is checked under its row's lock.
+      await tx.$queryRaw`SELECT id FROM "BudgetRequest" WHERE id = ${request.id} FOR UPDATE`;
+      const row = await tx.budgetRequest.findUniqueOrThrow({ where: { id: request.id } });
+      if (!BOOKABLE.includes(row.status)) throw badRequest('This request moved a moment ago — reload to see where it stands');
+      let financePart = num(row.financePart);
+      // A request saved before the split, with no lines and nothing released: booked whole.
+      if (financePart <= 0.005 && !request.items.length && row.status === 'APPROVED' && num(row.amountReleased) <= 0.005) {
+        financePart = num(row.amount);
+        await tx.budgetRequest.update({ where: { id: row.id }, data: { financePart: D(financePart) } });
+      }
+      if (financePart <= 0.005) {
+        throw badRequest(`No line of ${row.number} is marked for finance to book — mark the air fare or the hotel as "Finance books" first`);
+      }
+      const left = cents(financePart - num(row.amountBooked));
+      if (amount > left + 0.005) {
+        throw badRequest(
+          left <= 0.005
+            ? `${row.number}'s finance part (${formatMoney(financePart)}) is already booked in full`
+            : `${row.number} has ${formatMoney(left)} of its finance part left to book — the booking cannot cost more. Raise another request for the difference`,
+        );
+      }
+      if (body.carrier) await tx.budgetRequest.update({ where: { id: row.id }, data: { carrier: body.carrier } });
       const number = await nextNumber('disbursement', tx);
       const created = await tx.payment.create({
         data: {
@@ -1290,23 +1415,26 @@ budgetRequestRoutes.post(
           paymentDate,
           amount: D(amount),
           reference: body.reference || null,
+          cardLast4: card ? body.cardLast4 || null : null,
+          statementMonth: card ? body.statementMonth || paymentDate.toISOString().slice(0, 7) : null,
           // A cheque is a promise until it clears; a card or a transfer is paid on the day.
           clearedAt: body.method === 'CHECK' ? null : paymentDate,
-          notes: `Booked and paid directly for ${request.number} — ${journeyOf(request)}${body.notes ? `. ${body.notes}` : ''}`,
+          notes: `Booked and paid directly for ${row.number} — ${journeyOf(row)}${body.notes ? `. ${body.notes}` : ''}`,
           recordedById: me.id,
-          allocations: { create: [{ budgetRequestId: request.id, amount: D(amount) }] },
+          allocations: { create: [{ budgetRequestId: row.id, amount: D(amount), booking: true }] },
         },
       });
-      await refreshBudgetRequest(tx, request.id);
+      await refreshBudgetRequest(tx, row.id);
       return created;
     });
+    const cashLeft = cents(num(request.amount) - Math.max(num(request.financePart), request.items.length ? 0 : num(request.amount)));
     await notify([
       {
         userId: request.requestedById,
         type: 'system' as const,
         title: `${request.number} booked — ${formatMoney(amount)} paid by finance`,
-        body: `${journeyOf(request)}${body.reference ? ` · ref. ${body.reference}` : ''}. Nothing to liquidate.`,
-        link: `/g-ops/budget-requests/${request.id}`,
+        body: `${journeyOf(request)}${body.reference ? ` · ref. ${body.reference}` : ''}. ${cashLeft > 0.005 ? `The cash part (${formatMoney(cashLeft)}) is released to you and liquidated as usual.` : 'Nothing to liquidate.'}`,
+        link: `/g-ops/travel-requests/${request.id}`,
       },
     ]);
     await audit(
@@ -1314,12 +1442,57 @@ budgetRequestRoutes.post(
         entityType: 'budget_request',
         entityId: request.id,
         action: 'UPDATED',
-        summary: `${request.number} booked and paid directly by finance — ${amount} (${payment.number}, ${statusLabel(body.method).toLowerCase()}); nothing to liquidate`,
-        after: { paymentId: payment.id, amount, method: body.method },
+        summary: `${request.number} booked and paid directly by finance — ${amount} (${payment.number}, ${statusLabel(body.method).toLowerCase()}${body.reference ? `, ref. ${body.reference}` : ''})`,
+        after: { paymentId: payment.id, amount, method: body.method, statementMonth: payment.statementMonth },
       },
       req,
     );
     res.json({ ok: true, paymentId: payment.id, paymentNumber: payment.number });
+  }),
+);
+
+/**
+ * Who pays which line, changed after approval (2026-11-21): finance decides
+ * how a trip is paid, not what it costs, so on an APPROVED travel request with
+ * no money out yet the A/P create right may mark which lines finance books.
+ * The amount — what was approved — never moves.
+ */
+budgetRequestRoutes.put(
+  '/:id/finance-lines',
+  require_('gfin.ap.create'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ lineIds: z.array(z.string()).max(200) }), req.body);
+    const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id }, include: { items: { select: { id: true, name: true, amount: true, financePays: true } } } });
+    if (!request) throw notFound('Travel request not found');
+    if (!request.isTravel) throw badRequest('Only a travel request has lines finance books');
+    if (request.status !== 'APPROVED') throw badRequest(`${request.number} is ${statusLabel(request.status).toLowerCase()} — who pays which line is set before any money goes out`);
+    if (num(request.amountReleased) > 0.005 || num(request.amountBooked) > 0.005) throw badRequest('Money already went out on this request — who pays which line stays as it is');
+    const known = new Set(request.items.map((i) => i.id));
+    if (body.lineIds.some((id) => !known.has(id))) throw badRequest('That line is not on this request');
+    const picked = new Set(body.lineIds);
+    const financePart = cents(request.items.filter((i) => picked.has(i.id)).reduce((s, i) => s + num(i.amount), 0));
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.budgetRequest.updateMany({
+        where: { id: request.id, status: 'APPROVED', amountReleased: 0, amountBooked: 0 },
+        data: { financePart: D(financePart) },
+      });
+      if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
+      await tx.budgetRequestItem.updateMany({ where: { requestId: request.id }, data: { financePays: false } });
+      if (picked.size) await tx.budgetRequestItem.updateMany({ where: { requestId: request.id, id: { in: [...picked] } }, data: { financePays: true } });
+    });
+    const names = request.items.filter((i) => picked.has(i.id)).map((i) => i.name);
+    await audit(
+      {
+        entityType: 'budget_request',
+        entityId: request.id,
+        action: 'UPDATED',
+        summary: `${request.number}: finance books ${names.length ? names.join(', ') : 'nothing'} (${formatMoney(financePart)}); cash to the traveller ${formatMoney(cents(num(request.amount) - financePart))}`,
+        before: { financeLines: request.items.filter((i) => i.financePays).map((i) => i.name) },
+        after: { financeLines: names },
+      },
+      req,
+    );
+    res.json({ ok: true, financePart, cashPart: cents(num(request.amount) - financePart) });
   }),
 );
 
@@ -1335,7 +1508,7 @@ budgetRequestRoutes.post(
     const editAll = me.isSuperAdmin || me.permissions.has('gops.budget_requests.edit_all');
     if (request.status === 'DRAFT' || request.status === 'PENDING_APPROVAL') {
       if (!mine && !editAll) throw forbidden('That is someone else’s budget request');
-    } else if (request.status === 'APPROVED' && num(request.amountReleased) <= 0.005) {
+    } else if (request.status === 'APPROVED' && num(request.amountReleased) <= 0.005 && num(request.amountBooked) <= 0.005) {
       if (!mine && !editAll) throw forbidden('That is someone else’s budget request');
     } else if (request.status === 'CANCELLED' || request.status === 'REJECTED') {
       throw badRequest(`This request is already ${request.status.toLowerCase()}`);
@@ -1404,7 +1577,8 @@ budgetRequestRoutes.get(
     await assertCanOpen(me, row, !!res.locals.deciderOnly);
     const view = presentBudgetRequest(row);
 
-    const release = row.allocations.find((a) => a.payment.kind === 'DISBURSEMENT');
+    // The CASH release — a booking finance paid on the card is listed apart (2026-11-21).
+    const release = row.allocations.find((a) => a.payment.kind === 'DISBURSEMENT' && !a.booking);
     const sections = cashRequestSections({
       requestedBy: row.requestedBy.name,
       neededBy: row.neededBy,
@@ -1414,8 +1588,9 @@ budgetRequestRoutes.get(
       purpose: row.reason,
       release: release ? release.payment : null,
       liquidationDueDate: row.liquidationDueDate,
-      liquidated: !!row.liquidatedAt,
-      figures: view,
+      liquidated: !!row.liquidatedAt && view.amountReleased > 0.005,
+      // The liquidation accounts for the cash alone; the bookings are shown below.
+      figures: { ...view, amount: row.isTravel && view.financePart > 0.005 ? view.cashPart : view.amount, spent: view.cashSpent },
       liquidation: view.liquidation,
       notes: row.notes,
       currency: await companyCurrency(),
@@ -1426,8 +1601,8 @@ budgetRequestRoutes.get(
       sections.splice(1, 0, {
         kind: 'table',
         title: 'Breakdown',
-        head: ['#', 'Item and description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`],
-        align: ['left', 'left', 'right', 'left', 'right', 'right'],
+        head: ['#', 'Item and description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`, ...(row.isTravel ? ['Paid by'] : [])],
+        align: ['left', 'left', 'right', 'left', 'right', 'right', ...(row.isTravel ? ['left' as const] : [])],
         rows: row.items.map((i, n) => [
           String(n + 1),
           i.description ? { title: i.name, body: i.description } : i.name,
@@ -1435,8 +1610,33 @@ budgetRequestRoutes.get(
           i.unit,
           formatAmount(num(i.unitCost)),
           formatAmount(num(i.amount)),
+          ...(row.isTravel ? [i.financePays ? 'Finance (company card)' : 'Cash to traveller'] : []),
         ]),
       });
+    }
+    // How a split travel request is paid (2026-11-21): what finance books on
+    // the card and has booked, beside the cash the traveller is handed.
+    if (row.isTravel && view.financePart > 0.005) {
+      const currency = await companyCurrency();
+      const bookings = row.allocations.filter((a) => a.booking && a.payment.kind === 'DISBURSEMENT');
+      sections.push(
+        {
+          kind: 'table',
+          title: 'How it is paid',
+          head: ['Paid by', `Amount (${currency})`],
+          align: ['left', 'right'],
+          rows: [
+            ['Finance books on the company card', formatAmount(view.financePart)],
+            ...bookings.map((b) => [
+              { title: `Booked — ${b.payment.number}`, body: `${formatShortDate(b.payment.paymentDate)}${b.payment.reference ? ` · ref. ${b.payment.reference}` : ''}` },
+              formatAmount(num(b.amount)),
+            ]),
+            ...(view.toBook > 0.005 ? [['Still to book', formatAmount(view.toBook)]] : []),
+            ['Cash to the traveller — liquidated with receipts', formatAmount(view.cashPart)],
+          ],
+        },
+        { kind: 'totals', rows: [{ label: 'Total approved', value: formatMoney(view.amount, currency), bold: true }] },
+      );
     }
     if (row.isTravel) {
       // The journey, right under the request's details.
@@ -1452,7 +1652,9 @@ budgetRequestRoutes.get(
           { label: 'Return', value: row.returnOn ? formatShortDate(row.returnOn) : 'One way' },
           { label: 'Carrier', value: row.carrier ?? '—' },
           { label: 'Travellers / cargo', value: row.travellers ?? '—' },
-          ...(row.paidDirect ? [{ label: 'Paid', value: 'Booked and paid directly by finance — nothing to liquidate' }] : []),
+          ...(view.financePart > 0.005
+            ? [{ label: 'Paid', value: view.cashPart > 0.005 ? 'Part booked by finance, part cash to the traveller' : 'Booked and paid directly by finance — nothing to liquidate' }]
+            : []),
         ],
       });
     }

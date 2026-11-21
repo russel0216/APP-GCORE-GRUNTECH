@@ -4,6 +4,7 @@ import { badRequest } from '../http/kit';
 import { addDays, dayKey, daysBetween, manilaDate } from './day';
 import { postJobCost } from './inventory';
 import { requestGroups, spreadOver } from './budgetRequestCharges';
+import { cashSpent, requestMoney } from './requestMoney';
 
 /**
  * The money arithmetic G-FIN shares, in one place.
@@ -277,14 +278,15 @@ export async function settleable(
   if (kind === 'budget_request') {
     const row = await tx.budgetRequest.findUnique({ where: { id } });
     if (!row) return null;
-    const payable = num(row.amount);
+    // Only the CASH part is released (2026-11-21); the finance part is booked.
+    const payable = cents(Math.max(0, num(row.amount) - num(row.financePart)));
     const paid = num(row.amountReleased);
     return { kind, id, number: row.number, payable, paid, outstanding: row.status === 'APPROVED' ? cents(payable - paid) : 0 };
   }
   if (kind === 'budget_request_refund') {
     const row = await tx.budgetRequest.findUnique({ where: { id } });
     if (!row) return null;
-    const payable = row.liquidatedAt ? cents(Math.max(0, num(row.amountReleased) - num(row.amountSpent))) : 0;
+    const payable = row.liquidatedAt ? cents(Math.max(0, num(row.amountReleased) - cashSpent(row))) : 0;
     const paid = num(row.amountRefunded);
     return { kind, id, number: row.number, payable, paid, outstanding: row.status === 'REFUND_DUE' ? cents(payable - paid) : 0 };
   }
@@ -312,11 +314,18 @@ export async function refreshBudgetRequest(
 
   const allocations = await tx.paymentAllocation.findMany({
     where: { budgetRequestId: id },
-    select: { amount: true, payment: { select: { kind: true, paymentDate: true } } },
+    select: { amount: true, booking: true, payment: { select: { kind: true, paymentDate: true } } },
     orderBy: { createdAt: 'asc' },
   });
-  const releases = allocations.filter((a) => a.payment.kind === 'DISBURSEMENT');
+  // Two kinds of money out (2026-11-21, the split travel request): a BOOKING
+  // — finance paid the air fare or the hotel itself on the company card,
+  // spent at once — and the CASH released to the traveller, liquidated with
+  // receipts. Only the cash is released in one voucher and liquidated.
+  const disbursed = allocations.filter((a) => a.payment.kind === 'DISBURSEMENT');
+  const releases = disbursed.filter((a) => !a.booking);
+  const bookings = disbursed.filter((a) => a.booking);
   const released = cents(releases.reduce((s, a) => s + num(a.amount), 0));
+  const booked = cents(bookings.reduce((s, a) => s + num(a.amount), 0));
   const refunded = cents(allocations.filter((a) => a.payment.kind === 'RECEIPT').reduce((s, a) => s + num(a.amount), 0));
 
   const liquidation = await tx.expenseClaim.findFirst({
@@ -324,34 +333,37 @@ export async function refreshBudgetRequest(
     orderBy: { approvedAt: 'desc' },
     select: { total: true, approvedAt: true },
   });
-  // Paid by finance directly (2026-11-10: a travel booking on the company
-  // card): nobody holds cash, so what was paid IS what was spent and there is
-  // nothing to liquidate. A deleted voucher puts it back to approved.
-  const direct = row.paidDirect && !liquidation && released > 0.005;
-  const spent = liquidation ? num(liquidation.total) : direct ? released : 0;
-  const liquidatedAt = liquidation ? liquidation.approvedAt : direct ? (row.liquidatedAt ?? new Date()) : null;
   const amount = num(row.amount);
+  const cashPart = cents(Math.max(0, amount - num(row.financePart)));
+  // Paid by finance alone (2026-11-10: the whole trip booked on the card):
+  // nobody holds cash, so what was paid IS what was spent and there is
+  // nothing to liquidate. A deleted booking puts it back to approved.
+  const direct = cashPart <= 0.005 && booked > 0.005;
+  const cashSpentNow = liquidation ? num(liquidation.total) : 0;
+  const spent = cents(cashSpentNow + booked);
+  const liquidatedAt = liquidation ? liquidation.approvedAt : direct ? (row.liquidatedAt ?? new Date()) : null;
 
   const frozen = ['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status);
   let status: string = row.status;
   if (!frozen) {
     if (direct) status = 'LIQUIDATED';
     else if (!liquidation) {
-      status = released + 0.005 >= amount ? 'RELEASED' : 'APPROVED';
+      status = cashPart > 0.005 && released + 0.005 >= cashPart ? 'RELEASED' : 'APPROVED';
     } else {
-      const refundDue = cents(Math.max(0, released - spent));
+      const refundDue = cents(Math.max(0, released - cashSpentNow));
       status = refundDue - refunded > 0.005 ? 'REFUND_DUE' : 'LIQUIDATED';
     }
   }
 
   const isReleased = !frozen && status !== 'APPROVED';
-  const releasedAt = isReleased ? (row.releasedAt ?? releases[0]?.payment.paymentDate ?? dayKey(new Date())) : null;
+  const releasedAt = isReleased ? (row.releasedAt ?? releases[0]?.payment.paymentDate ?? bookings[0]?.payment.paymentDate ?? dayKey(new Date())) : null;
+  // The deadline runs from the CASH release only — a booking is accounted for by its voucher.
   let liquidationDueDate: Date | null = null;
-  if (releasedAt) {
+  if (releasedAt && released > 0.005) {
     if (row.liquidationDueDate) liquidationDueDate = row.liquidationDueDate;
     else {
       const settings = await financeSettings();
-      liquidationDueDate = addDays(releasedAt, settings.budgetRequestLiquidationDays);
+      liquidationDueDate = addDays(releases[0]?.payment.paymentDate ?? releasedAt, settings.budgetRequestLiquidationDays);
     }
   }
 
@@ -361,11 +373,12 @@ export async function refreshBudgetRequest(
       amountReleased: D(released),
       amountRefunded: D(refunded),
       amountSpent: D(spent),
+      amountBooked: D(booked),
       liquidatedAt,
       releasedAt,
       liquidationDueDate,
       status: status as never,
-      ...(row.paidDirect && !direct && !liquidation ? { paidDirect: false } : {}),
+      paidDirect: booked > 0.005,
     },
   });
 
@@ -378,7 +391,8 @@ export async function refreshBudgetRequest(
   // the difference, so deleting the release voucher takes it off again.
   // A request on a sales order, quotation or costing (2026-10-26) has no
   // ledger until a project built from it takes it over.
-  const shouldCommit = !frozen && !liquidation && !direct ? released : 0;
+  // The cash out until its liquidation; a booking is never committed — it is spent.
+  const shouldCommit = !frozen && !liquidation ? cents(Math.max(0, released - refunded)) : 0;
   // A request charged item by item (2026-11-11) commits each project's share
   // of the cash on its own budget line — the items' amounts per place, the
   // released cash spread over them (`spreadOver`); one charged whole, its own.
@@ -393,7 +407,8 @@ export async function refreshBudgetRequest(
   const asked = row.split ? amount : places.reduce((s, p) => s + p.amount, 0);
   const projectShare = (sum: number) => (asked > 0 ? cents((sum * places.reduce((s, p) => s + p.amount, 0)) / asked) : 0);
   const commitShares = spreadOver(places, row.split ? projectShare(shouldCommit) : shouldCommit);
-  const incurShares = spreadOver(places, row.split ? projectShare(direct ? released : 0) : direct ? released : 0);
+  // What finance booked is the project's cost at once (the cash part posts through its liquidation claim).
+  const incurShares = spreadOver(places, row.split ? projectShare(frozen ? 0 : booked) : frozen ? 0 : booked);
   for (const [i, place] of places.entries()) {
     const ledger = await tx.jobCostEntry.aggregate({
       where: { jobId: place.jobId, costCategoryId: place.costCategoryId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
@@ -434,13 +449,14 @@ export async function refreshBudgetRequest(
         sourceType: 'budget_request',
         sourceId: id,
         sourceNumber: row.number,
-        description: gap > 0 ? `Paid directly by finance — ${row.reason}` : 'Direct payment reversed',
+        description: gap > 0 ? `Booked and paid by finance — ${row.reason}` : 'Booking reversed',
       });
     }
   }
 
-  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : direct ? released : amount;
-  const paid = status === 'REFUND_DUE' ? refunded : released;
+  // What is still owed: the unspent cash back once liquidated, else the cash part to release.
+  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - cashSpentNow)) : direct ? 0 : cashPart;
+  const paid = status === 'REFUND_DUE' ? refunded : direct ? 0 : released;
   return { paid, outstanding: cents(payable - paid), status };
 }
 
@@ -709,7 +725,7 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
     }),
     prisma.budgetRequest.findMany({
       where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
-      select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
+      select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true, amountBooked: true, liquidatedAt: true },
     }),
   ]);
 
@@ -754,11 +770,9 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
 
   // The same two figures for project cash — a budget request is the project's
   // money promised and then held by its team, the advance's arithmetic over.
-  const budgetRequestsToRelease = cents(
-    openRequests
-      .filter((r) => r.status === 'APPROVED')
-      .reduce((s, r) => s + Math.max(0, num(r.amount) - num(r.amountReleased)), 0),
-  );
+  // To release: the cash still to hand over AND a travel request's finance
+  // part still to book (2026-11-21) — both are money finance has yet to pay.
+  const budgetRequestsToRelease = cents(openRequests.reduce((s, r) => s + requestMoney(r).waiting, 0));
   const budgetRequestsInHand = cents(
     openRequests
       .filter((r) => r.status !== 'APPROVED')
@@ -767,7 +781,7 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
           s +
           (r.status === 'RELEASED'
             ? num(r.amountReleased)
-            : Math.max(0, num(r.amountReleased) - num(r.amountSpent) - num(r.amountRefunded))),
+            : Math.max(0, num(r.amountReleased) - cashSpent(r) - num(r.amountRefunded))),
         0,
       ),
   );

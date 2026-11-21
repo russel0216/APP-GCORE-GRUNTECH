@@ -123,6 +123,11 @@ export interface Claim {
     receiptNo: string | null;
     vendor: string | null;
     amount: number;
+    /** A meal at the fixed rate, no receipt; spent abroad, its currency and rate (2026-11-21). */
+    perDiem?: boolean;
+    foreignCurrency?: string | null;
+    foreignAmount?: number | null;
+    exchangeRate?: number | null;
     /** Its own place, on a claim charged line by line (2026-11-11). */
     job?: { id: string; number: string; name: string } | null;
     costCategory?: { id: string; name: string } | null;

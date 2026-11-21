@@ -2370,10 +2370,25 @@ model BudgetRequest {
 
   neededBy DateTime? @db.Date
 
-  /// Re-derived: Σ DISBURSEMENT allocations. 0 or amount — released in one voucher.
+  /// Re-derived: Σ DISBURSEMENT allocations that are CASH (not a booking).
+  /// 0 or the cash part — released in one voucher.
   amountReleased Decimal @default(0) @db.Decimal(18, 2)
-  /// Re-derived: the approved liquidation's total, else 0.
+  /// Re-derived: the approved liquidation's total plus what finance booked
+  /// (`amountBooked`), else 0.
   amountSpent    Decimal @default(0) @db.Decimal(18, 2)
+  /// A travel request's FINANCE part (2026-11-21, the owner's call: "the air
+  /// fare and the booking of the hotel can be paid by finance through the
+  /// company credit card"): the lines marked `financePays`, booked and paid by
+  /// finance; the rest (`amount` − this) is the cash released to the
+  /// traveller and liquidated. Kept by the save; 0 on every other request.
+  financePart    Decimal @default(0) @db.Decimal(18, 2)
+  /// Re-derived: Σ DISBURSEMENT allocations marked `booking` — what finance
+  /// paid directly. Spent at once, never liquidated.
+  amountBooked   Decimal @default(0) @db.Decimal(18, 2)
+  /// Liquidation reminders (2026-11-21): the one three days before the
+  /// deadline and the one on the day, each claimed once.
+  liquidationReminderAt DateTime?
+  liquidationDueNoticeAt DateTime?
   /// Re-derived: Σ RECEIPT allocations (unspent cash returned).
   amountRefunded Decimal @default(0) @db.Decimal(18, 2)
 
@@ -2437,6 +2452,9 @@ model BudgetRequestItem {
   unit        String        @default("pcs")
   unitCost    Decimal       @db.Decimal(18, 2)
   amount      Decimal       @db.Decimal(18, 2)
+  /// On a travel request (2026-11-21): finance books and pays this line itself
+  /// (the air fare, the hotel — the company card); false, it is cash to the traveller.
+  financePays Boolean       @default(false)
 
   /// Where this line is charged (2026-11-11, the owner's call: one statement
   /// of account across several projects and the office): a project and its
@@ -5050,6 +5068,13 @@ model ExpenseClaimLine {
   /// Date — Company / receipt — Item / purpose).
   vendor      String?
   amount      Decimal  @db.Decimal(18, 2)
+  /// Spent abroad (2026-11-21): the receipt's own currency and figure, and the
+  /// rate it was taken in at. `amount` stays the pesos — what is posted.
+  foreignCurrency String?
+  foreignAmount   Decimal? @db.Decimal(18, 2)
+  exchangeRate    Decimal? @db.Decimal(18, 6)
+  /// A per diem (a meal at the company's fixed rate): claimed with no receipt.
+  perDiem         Boolean  @default(false)
 
   /// Where this line is charged (2026-11-11, the owner's call: one statement
   /// of account across several projects and the office): a project and its
@@ -5230,6 +5255,14 @@ model Payment {
   ewtCertificateById       String?
   ewtCertificateRecordedAt DateTime?
 
+  /// A charge on the company's credit card (2026-11-21): its last four digits
+  /// and the statement month it falls on ("2026-11"), and when finance ticked
+  /// it off that statement.
+  cardLast4          String?
+  statementMonth     String?
+  statementMatchedAt DateTime?
+  statementMatchedById String?
+
   notes String?
 
   recordedById String
@@ -5297,6 +5330,9 @@ model PaymentAllocation {
   /// advance: direction comes from Payment.kind.
   budgetRequestId String?
   budgetRequest   BudgetRequest? @relation(fields: [budgetRequestId], references: [id], onDelete: Cascade)
+  /// A DISBURSEMENT on a travel request that finance BOOKED and paid itself
+  /// (2026-11-21) — the finance part, spent at once — rather than cash released.
+  booking         Boolean        @default(false)
 
   /// A commission beneficiary's payout (2026-10-16): a DISBURSEMENT
   /// allocation to the share, written only by POST /commissions/:id/pay.

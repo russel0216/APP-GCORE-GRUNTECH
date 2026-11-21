@@ -9196,6 +9196,90 @@ liquidated it no longer exists on the travel request".
   own project; the save still decides). Requests raised before the project
   was built were handed over to it, as ever. verify-delivery pins it.
 
+## The split travel request, and money documents' own steps (2026-11-21)
+
+The owner's call: "the air fare and the booking of the hotel can be paid by
+finance through the company credit card", then his answers on the flaws
+found on the live site (GT-TR-2026-0002, ₱88,065.68: air fare and hotel
+beside food and pocket money; its requester held both the Technical Manager
+and Team Leader steps). Not changed, his call: every liquidation still goes
+to the CEO / President.
+
+- **A travel request's line says who pays it**: `BudgetRequestItem.financePays`
+  (the editor's "Paid by" column on a travel request only; a line named like
+  an air fare or a hotel starts as finance's, `financeLikely()` in
+  `components/RequestLines.tsx`). The save writes `BudgetRequest.financePart`
+  (those lines' sum, 0 on any other request); the CASH part is `amount −
+  financePart`. Finance may change which lines it books on an APPROVED
+  request with no money out yet (`PUT /budget-requests/:id/finance-lines`,
+  `gfin.ap.create`, the amount never moves; the page's ⋯ "Who pays which
+  line…").
+- **Bookings and the cash release are two kinds of money out**:
+  `PaymentAllocation.booking` marks a booking. `POST /budget-requests/:id/book`
+  (`gfin.ap.create`) takes as many bookings as the trip needs — together
+  never past the finance part, checked under the request's row lock —
+  with the booking reference, `Payment.cardLast4` and `statementMonth` (the
+  payment's month by default); a request from before the split with no
+  lines is booked whole as before. The cash part is released in ONE
+  voucher as ever (`settleable('budget_request')` owes the cash part only).
+- **`refreshBudgetRequest()` reads them apart**: `amountReleased` is the CASH
+  released, `amountBooked` the bookings, `amountSpent` the liquidation plus
+  the bookings. A request that is all finance part is LIQUIDATED at its
+  first booking; one with a cash part is RELEASED once the cash is out and
+  liquidated with receipts as ever (`cashSpent()` — the liquidation's part
+  — drives the refund and the excess); bookings may continue after. On a
+  project, a booking is INCURRED at once and the cash COMMITTED until its
+  liquidation. The liquidation deadline runs from the cash release only.
+- **One reading of what a request's money stands for**:
+  `requestMoney()` in `shared/requestMoney.ts` — `waiting` (approved, not yet
+  out: amount − booked − released, freed once the cash is liquidated),
+  `cashOut`, `spent`, `booked`, `total`. The office budget (`officeFigures`
+  counts `booked`, never `spent`, since the liquidation claim is counted
+  apart), the record budgets (`weigh`), a sales order's and a quotation's
+  spend, Budget Monitoring's Requested, the working position's "to release"
+  and the request's own "This request" all read it. A new reader of a
+  budget request's money goes through it.
+- **The paper**: the Breakdown's "Paid by" column, a "How it is paid" table
+  (finance books, each booking, still to book, the cash part), and the
+  liquidation figures over the cash part alone.
+- **The same card charge is never paid twice**: a booking reference already
+  on a reimbursement line or another card charge is refused; a reimbursement
+  whose receipt no. is a card booking's reference is refused at submit,
+  naming the booking. **Card statement**: Payments & Repayments filters
+  `?statement=YYYY-MM` and `?matched=yes|no`, a "Card statement" column, and
+  the mass action "Tick off the card statement" (`POST
+  /payments/statement-match`, `gfin.ap.create` / `edit_all`, card charges
+  only, `statementMatchedAt` / `ById`, audited).
+- **Liquidation deadlines**: `shared/liquidationReminders.ts` on the activity
+  reminders' minute tick (from 08:00 Manila) tells the requester three days
+  before (`liquidationReminderAt`) and on the day (`liquidationDueNoticeAt`),
+  each claimed once; bell and email. **A new budget or travel request is
+  refused** while the requester has cash RELEASED past its deadline with no
+  liquidation filed (`overdueLiquidationOf()`, routes/budgetRequests.ts).
+- **A money document's own steps go up**: `MONEY_DOCUMENTS` in
+  `shared/approvals.ts` — `budget_request`, `travel_request`,
+  `cash_advance`, `expense`. On these `heldSequences()` signs nothing at
+  submit whatever `preparerSigns` says, and a step whose holders include the
+  requester also goes to their "Reports to" (`activeSupervisor`), who then
+  signs it (and co-signs the next step they hold). `ApprovalContext.documentType`
+  carries the type (`ctxOf` reads it off the stored request, submit and
+  `routePreview` set it). Every other document keeps the preparer's
+  signature as before.
+- **Also**: a budget request whose purpose reads like a trip says so on the
+  form and links the travel request (`looksLikeTravel()`); a reimbursement
+  line takes `perDiem` (no receipt needed at submit) and, spent abroad,
+  `foreignCurrency`, `foreignAmount`, `exchangeRate` (the pesos stay
+  `amount`; the editor works them out from the rate); the Sales travel list's
+  first card says rejected and cancelled are left out.
+- `markBookedTravelRequests()` (`shared/travelSplit.ts`, the seed, once,
+  `seed.travelSplit20261121`) marked every travel request booked whole
+  before as all finance part, its allocations bookings.
+- verify-finance pins the split, the double-claim refusal, per diem and
+  foreign lines, the statement tick, the overdue block and reminder, and the
+  money documents' steps (489 passed; the nine that fail failed at the
+  commit before too). verify-delivery's two releases are dated today, or the
+  overdue block stopped the requester's next request.
+
 ## A reimbursement against the project budget (2026-11-09)
 
 The owner's question: "how can we see if the request in Reimbursement

@@ -2329,6 +2329,10 @@ interface PaymentRow {
    */
   ewt?: { amount: number; status: 'UNCOLLECTED' | 'PAID' | null };
   ewtCertificateNo?: string | null;
+  /** A company-card charge (2026-11-21): the card's last four digits, its statement month, and when it was ticked off. */
+  cardLast4?: string | null;
+  statementMonth?: string | null;
+  statementMatchedAt?: string | null;
   ewtCertificateAt?: string | null;
   ewtCertificateRecordedAt?: string | null;
   ewtCertificateBy?: { id: string; name: string } | null;
@@ -2415,12 +2419,24 @@ interface PaymentsSummary {
  * repayment, a salary or commission deduction, unspent budget returned. The
  * register is a preset (`initialFilters`), so each menu entry keeps its path.
  */
+/** The last eighteen months, newest first — the card statement filter's choices. */
+function statementMonths(): string[] {
+  const out: string[] = [];
+  const now = new Date();
+  for (let i = 0; i < 18; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return out;
+}
+
 export function Payments({ register = 'collections' }: { register?: 'collections' | 'other' }) {
   const collections = register === 'collections';
   const base = collections ? '/g-fin/payments' : '/g-fin/payments-out';
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const { can } = useAuth();
+  const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [reload, setReload] = useState(0);
   const { people } = usePeople('gops.quotations.create');
@@ -2524,6 +2540,26 @@ export function Payments({ register = 'collections' }: { register?: 'collections
       render: (r) => <EwtBadge status={r.ewt?.status} />,
     },
     {
+      key: 'card',
+      label: 'Card statement',
+      render: (r) =>
+        r.method === 'CREDIT_CARD' ? (
+          <div>
+            <div className="mono">
+              {r.cardLast4 ? `•••• ${r.cardLast4}` : 'Card'}
+              {r.statementMonth ? ` · ${r.statementMonth}` : ''}
+            </div>
+            {r.statementMatchedAt ? (
+              <div className="faint">ticked off {formatDate(r.statementMatchedAt)}</div>
+            ) : (
+              <StatusBadge status="UNMATCHED" extra={{ UNMATCHED: 'warn' }} label="not yet on the statement" />
+            )}
+          </div>
+        ) : (
+          <span className="faint">—</span>
+        ),
+    },
+    {
       key: 'kind',
       label: 'Direction',
       optional: collections,
@@ -2596,11 +2632,21 @@ export function Payments({ register = 'collections' }: { register?: 'collections
       },
     },
     { key: 'from', toKey: 'to', label: collections ? 'Date of collection' : 'Date', type: 'dateRange' },
+    // The company card's monthly statement (2026-11-21): a month's charges, ticked off or not.
+    { key: 'statement', label: 'Card statement month', options: statementMonths().map((m) => ({ value: m, label: m })) },
+    {
+      key: 'matched',
+      label: 'On the card statement',
+      options: [
+        { value: 'no', label: 'Not yet ticked off' },
+        { value: 'yes', label: 'Ticked off' },
+      ],
+    },
   ];
   // Collections are money in from customers: no direction to pick. The other
-  // register has no salesperson, team or customer to narrow by.
+  // register has no salesperson, team or customer to narrow by; only it holds card charges.
   const filters = allFilters.filter((d) =>
-    collections ? d.key !== 'kind' : !['salespersonId', 'teamId', 'customerId', 'ewt'].includes(d.key),
+    collections ? !['kind', 'statement', 'matched'].includes(d.key) : !['salespersonId', 'teamId', 'customerId', 'ewt'].includes(d.key),
   );
 
   return (
@@ -2616,7 +2662,7 @@ export function Payments({ register = 'collections' }: { register?: 'collections
         endpoint="/payments"
         printPath="/api/payments/pdf"
         reportPath={collections ? '/g-fin/reports?kind=collections' : '/g-fin/reports?kind=payments'}
-        columns={columns.filter((c) => collections || !['orNumber', 'salesperson', 'team', 'ewt', 'ewtStatus'].includes(c.key))}
+        columns={columns.filter((c) => (collections ? c.key !== 'card' : !['orNumber', 'salesperson', 'team', 'ewt', 'ewtStatus'].includes(c.key)))}
         rowKey={(r) => r.id}
         reloadToken={reload}
         searchPlaceholder={collections ? 'Search number, OR no., SI no., cheque, customer…' : 'Search number, reference, payee, document…'}
@@ -2626,6 +2672,34 @@ export function Payments({ register = 'collections' }: { register?: 'collections
         selectable
         initialFilters={{ register }}
         filters={filters}
+        bulkActions={
+          !collections && (can('gfin.ap.create') || can('gfin.ap.edit_all'))
+            ? (ctx) => {
+                const cards = ctx.rows.filter((r) => r.method === 'CREDIT_CARD');
+                if (!cards.length) return null;
+                const tick = async (matched: boolean) => {
+                  try {
+                    const res = await api.post<{ changed: number }>('/payments/statement-match', { ids: cards.map((r) => r.id), matched });
+                    toast('ok', `${res.changed} card charge${res.changed === 1 ? '' : 's'} ${matched ? 'ticked off' : 'taken off'} the statement`);
+                    ctx.clear();
+                    ctx.reload();
+                  } catch (err) {
+                    toast('error', err instanceof Error ? err.message : 'Could not change the statement ticks');
+                  }
+                };
+                return (
+                  <>
+                    <button type="button" className="btn btn-sm" onClick={() => void tick(true)}>
+                      Tick off the card statement ({cards.length})
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={() => void tick(false)}>
+                      Take off the statement
+                    </button>
+                  </>
+                );
+              }
+            : undefined
+        }
         summary={(raw) => {
           const sum = raw as unknown as PaymentsSummary | undefined;
           if (!sum) return null;

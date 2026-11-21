@@ -533,7 +533,8 @@ async function main() {
 
   // Released in one voucher, on its own deadline — the budget request's days,
   // not the cash advance's.
-  const releaseDate = new Date('2026-03-02');
+  // Today (2026-11-21): a release dated long ago is past its deadline, and its requester could raise nothing more.
+  const releaseDate = dayKey(new Date());
   await prisma.payment.create({
     data: {
       number: await nextNumber('disbursement'),
@@ -2495,10 +2496,10 @@ async function main() {
             number: await nextNumber('disbursement'),
             kind: 'DISBURSEMENT',
             method: 'CASH',
-            paymentDate: new Date('2026-03-02'),
+            paymentDate: dayKey(new Date()),
             payeeUserId: engineer.id,
             amount: d(amount),
-            clearedAt: new Date('2026-03-02'),
+            clearedAt: dayKey(new Date()),
             recordedById: finance.id,
             allocations: { create: [{ budgetRequestId: id, amount: d(amount) }] },
           },

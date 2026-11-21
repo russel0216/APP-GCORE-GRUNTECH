@@ -16,6 +16,7 @@ import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases, syncBudgetRequestCommitments } from '../src/shared/budgetRequests';
+import { markBookedTravelRequests } from '../src/shared/travelSplit';
 import { seedOfficeBudgets } from '../src/shared/officeBudget';
 import { applyDeclaredValueRule } from '../src/shared/declaredValue';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
@@ -1173,6 +1174,9 @@ async function main() {
     if (lineAwards) console.log(`  · Marked the awarded lines of ${lineAwards} canvass(es) awarded before the award went line by line`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
+    // Travel requests booked whole before the split (2026-11-21): their lines are finance's, once.
+    const bookedTravel = await markBookedTravelRequests();
+    if (bookedTravel) console.log(`  · Marked ${bookedTravel} travel request(s) booked by finance before the split`);
     const committedRequests = await syncBudgetRequestCommitments();
     if (committedRequests) console.log(`  · Committed the released cash of ${committedRequests} budget request(s) on Budget Monitoring`);
     // Orders issued under the price rule before 2026-10-22: the request's

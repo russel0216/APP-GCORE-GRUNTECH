@@ -3320,7 +3320,12 @@ export function presentClaim(row: ClaimRow) {
     budgetRequest: row.budgetRequest
       ? { ...row.budgetRequest, amountReleased: num(row.budgetRequest.amountReleased), amountRefunded: num(row.budgetRequest.amountRefunded) }
       : null,
-    lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
+    lines: row.lines.map((l) => ({
+      ...l,
+      amount: num(l.amount),
+      foreignAmount: l.foreignAmount == null ? null : num(l.foreignAmount),
+      exchangeRate: l.exchangeRate == null ? null : num(l.exchangeRate),
+    })),
   };
 }
 
@@ -3668,6 +3673,12 @@ const claimSchema = z.object({
         receiptNo: z.string().optional().nullable(),
         vendor: z.string().trim().max(200).optional().nullable(),
         amount: z.number().positive('Every line must be more than zero'),
+        /** Spent abroad (2026-11-21): the receipt's own currency and figure, and the rate taken. */
+        foreignCurrency: z.string().trim().regex(/^[A-Za-z]{3}$/, 'A currency code, as SGD').optional().nullable(),
+        foreignAmount: z.number().positive('The foreign amount must be more than zero').optional().nullable(),
+        exchangeRate: z.number().positive('The rate must be more than zero').optional().nullable(),
+        /** A per diem at the company's fixed rate: claimed with no receipt (2026-11-21). */
+        perDiem: z.boolean().optional(),
         /** Where this receipt is charged (2026-11-11); left out, the claim's own. */
         jobId: z.string().optional().nullable(),
         costCategoryId: z.string().optional().nullable(),
@@ -3691,8 +3702,14 @@ function claimLines(input: z.infer<typeof claimSchema>['lines'], charges?: LineC
     receiptNo: l.receiptNo || null,
     vendor: l.vendor || null,
     amount: cents(l.amount),
+    foreignCurrency: l.foreignCurrency ? l.foreignCurrency.toUpperCase() : null,
+    foreignAmount: l.foreignCurrency && l.foreignAmount ? D(cents(l.foreignAmount)) : null,
+    exchangeRate: l.foreignCurrency && l.exchangeRate ? D(Math.round(l.exchangeRate * 1e6) / 1e6) : null,
+    perDiem: !!l.perDiem,
     ...(charges?.[i] ?? NO_CHARGE),
   }));
+  const foreignHalf = rows.find((l) => !!l.foreignCurrency !== !!l.foreignAmount);
+  if (foreignHalf) throw badRequest(`"${foreignHalf.description}": give both the currency and the amount in it, or neither`);
   return {
     total: cents(rows.reduce((s, l) => s + l.amount, 0)),
     lines: rows.map((l) => ({ ...l, amount: D(l.amount) })),
@@ -4076,11 +4093,24 @@ expenseRoutes.post(
 
     // A claim without receipt numbers is not claimable, and finding that out at
     // approval time wastes the approver's round trip.
-    const missing = claim.lines.filter((l) => !l.receiptNo).length;
+    // A per diem (a meal at the company's fixed rate) needs none (2026-11-21).
+    const missing = claim.lines.filter((l) => !l.receiptNo && !l.perDiem).length;
     if (missing > 0) {
       throw badRequest(
-        `${missing} line${missing === 1 ? ' has' : 's have'} no receipt number. Finance needs an OR against every peso.`,
+        `${missing} line${missing === 1 ? ' has' : 's have'} no receipt number. Finance needs an OR against every peso — or mark a meal at the fixed rate as a per diem.`,
       );
+    }
+    // A charge finance already booked on the company card is never claimed again (2026-11-21).
+    for (const l of claim.lines) {
+      if (!l.receiptNo) continue;
+      const card = await prisma.payment.findFirst({
+        where: { kind: 'DISBURSEMENT', method: 'CREDIT_CARD', reference: { equals: l.receiptNo.trim(), mode: 'insensitive' } },
+        select: { number: true, allocations: { select: { budgetRequest: { select: { number: true } } }, take: 1 } },
+      });
+      if (card) {
+        const on = card.allocations[0]?.budgetRequest?.number;
+        throw badRequest(`Receipt ${l.receiptNo} is the company card's booking ${card.number}${on ? ` for ${on}` : ''} — finance already paid it`);
+      }
     }
 
     // Claimed on the claim exactly as read — still a draft, and not modified
@@ -4524,8 +4554,14 @@ expenseRoutes.get(
         rows: claim.lines.map((l, n) => [
           String(n + 1),
           formatShortDate(l.spentOn),
-          { title: l.vendor ?? '—', body: l.receiptNo ? `Receipt ${l.receiptNo}` : 'No receipt no.' },
-          { title: l.description, body: l.category ?? undefined },
+          { title: l.vendor ?? '—', body: l.receiptNo ? `Receipt ${l.receiptNo}` : l.perDiem ? 'Per diem — no receipt' : 'No receipt no.' },
+          {
+            title: l.description,
+            body:
+              [l.category, l.foreignCurrency && l.foreignAmount ? `${l.foreignCurrency} ${formatAmount(num(l.foreignAmount))}${l.exchangeRate ? ` at ${num(l.exchangeRate)}` : ''}` : null]
+                .filter(Boolean)
+                .join(' · ') || undefined,
+          },
           formatAmount(num(l.amount)),
         ]),
       },
@@ -4792,6 +4828,13 @@ function paymentListWhere(q: ListQuery, register: PaymentRegister | null = null)
   if (q.filters.uncleared === 'true') where.clearedAt = null;
   const method = choice(q.filters.method, PaymentMethod, 'Method');
   if (method) where.method = method;
+  // The company card's statement (2026-11-21): one month's charges, ticked off or not.
+  if (q.filters.statement) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(q.filters.statement)) throw badRequest('Statement month must be like 2026-11');
+    where.statementMonth = q.filters.statement;
+  }
+  const matched = choice(q.filters.matched, ['yes', 'no'] as const, 'On the statement', (v) => (v === 'yes' ? 'Ticked off' : 'Not yet ticked off'));
+  if (matched) where.AND = [...((where.AND as Prisma.PaymentWhereInput[] | undefined) ?? []), { method: 'CREDIT_CARD', statementMatchedAt: matched === 'yes' ? { not: null } : null }];
   // A collection's salesperson and team are its invoices' (`collectionCredit`).
   const invoiceCredit: Prisma.InvoiceWhereInput = {};
   if (q.filters.salespersonId) invoiceCredit.salespersonId = q.filters.salespersonId === 'none' ? null : q.filters.salespersonId;
@@ -5103,6 +5146,33 @@ registerAttachmentGuard(
       return !!row && row.kind === 'RECEIPT' && !!row.customerId && !row.ewtCertificateAt;
     },
   },
+);
+
+/**
+ * Ticking company-card charges off the monthly statement (2026-11-21, the
+ * owner's call): finance lists a month's card charges (`?method=CREDIT_CARD
+ * &statement=2026-11`) and ticks each one it finds on the bank's statement —
+ * or takes the tick off. Card charges only; one audit row per charge.
+ */
+paymentRoutes.post(
+  '/statement-match',
+  requireAny('gfin.ap.create', 'gfin.ap.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ ids: z.array(z.string()).min(1).max(500), matched: z.boolean() }), req.body);
+    const rows = await prisma.payment.findMany({ where: { id: { in: body.ids } }, select: { id: true, number: true, method: true, statementMatchedAt: true } });
+    const notCard = rows.find((r) => r.method !== 'CREDIT_CARD');
+    if (notCard) throw badRequest(`${notCard.number} is not a card charge — only the company card's charges are on its statement`);
+    const moving = rows.filter((r) => !!r.statementMatchedAt !== body.matched);
+    await prisma.payment.updateMany({
+      where: { id: { in: moving.map((r) => r.id) } },
+      data: body.matched ? { statementMatchedAt: new Date(), statementMatchedById: me.id } : { statementMatchedAt: null, statementMatchedById: null },
+    });
+    for (const r of moving) {
+      await audit({ entityType: 'payment', entityId: r.id, action: 'UPDATED', summary: `${r.number} ${body.matched ? 'ticked off' : 'taken off'} the card statement` }, req);
+    }
+    res.json({ changed: moving.length });
+  }),
 );
 
 /**

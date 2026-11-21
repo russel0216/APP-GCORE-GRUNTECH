@@ -11,6 +11,7 @@ import { salesOrderSpend } from './orderStock';
 import { visibleOwners } from './team';
 import type { ResolvedUser } from '../permissions/resolve';
 import { OFFICE_LINE_SELECT, officeLineFor } from './officeBudget';
+import { REQUEST_MONEY, requestMoney } from './requestMoney';
 
 /**
  * WHAT A BUDGET REQUEST IS FOR (2026-10-26, the owner's call: "valid not only
@@ -259,14 +260,16 @@ export interface PoolLine {
 }
 
 /** A request's weight on the money it draws: released cash out is committed, a liquidated one's spend incurred. */
-function weigh(r: { amountReleased: Prisma.Decimal; amountRefunded: Prisma.Decimal; amountSpent: Prisma.Decimal; liquidatedAt: Date | null; status: string }) {
-  if (!['RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(r.status)) return { committed: 0, incurred: 0 };
-  return r.liquidatedAt
-    ? { committed: 0, incurred: num(r.amountSpent) }
-    : { committed: Math.max(0, num(r.amountReleased) - num(r.amountRefunded)), incurred: 0 };
+function weigh(r: Parameters<typeof requestMoney>[0]) {
+  // An approved request not yet released asks; it weighs nothing until money
+  // moves — cash out is committed, what was spent (finance's bookings at once,
+  // the cash once liquidated) incurred.
+  if (!['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(r.status)) return { committed: 0, incurred: 0 };
+  const m = requestMoney(r);
+  return { committed: m.cashOut, incurred: m.spent };
 }
 
-const REQUEST_WEIGHT = { id: true, costCategoryId: true, amountReleased: true, amountRefunded: true, amountSpent: true, liquidatedAt: true, status: true } as const;
+const REQUEST_WEIGHT = { id: true, costCategoryId: true, ...REQUEST_MONEY } as const;
 
 /** The costings the quotation's value revision was costed from (none when it has no costing). */
 async function quotationCostings(quotationId: string, db: Db = prisma) {

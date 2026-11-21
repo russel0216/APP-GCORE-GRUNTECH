@@ -1,3 +1,4 @@
+import { REQUEST_MONEY, requestMoney } from './requestMoney';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
@@ -188,10 +189,11 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
       where: {
         salesOrderId,
         jobId: null,
-        status: { in: ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] },
+        // Approved too (2026-11-21): a travel request's bookings are spent before any cash goes out.
+        status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'] },
         ...(opts.excludeBudgetRequestId ? { id: { not: opts.excludeBudgetRequestId } } : {}),
       },
-      select: { amountReleased: true, amountRefunded: true, amountSpent: true, liquidatedAt: true },
+      select: REQUEST_MONEY,
     }),
   ]);
   if (!order) return null;
@@ -214,8 +216,10 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
   }
   let incurred = received.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0);
   for (const r of cash) {
-    if (r.liquidatedAt) incurred += num(r.amountSpent);
-    else committed += Math.max(0, num(r.amountReleased) - num(r.amountRefunded));
+    // Cash out is committed; what was spent (bookings at once, cash once liquidated) incurred.
+    const m = requestMoney(r);
+    committed += m.cashOut;
+    incurred += m.spent;
   }
   return {
     salesOrderId: order.id,

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
+import { REQUEST_MONEY, requestMoney } from './requestMoney';
 
 /**
  * OFFICE BUDGETS (2026-11-10, the owner's call: "on Budget Request and
@@ -71,9 +72,10 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
       select: { officeBudgetLineId: true, status: true, subtotal: true },
     }),
     prisma.budgetRequest.findMany({
-      // A request finance paid directly (a travel booking) is spent with no claim behind it.
-      where: { ...on, OR: [{ status: { in: [...ASKED, 'RELEASED'] } }, { status: 'LIQUIDATED', paidDirect: true }], ...not(own.budgetRequestId) },
-      select: { officeBudgetLineId: true, status: true, amount: true, amountReleased: true, amountSpent: true },
+      // What finance booked itself (a travel booking) is spent with no claim
+      // behind it, at any stage after approval; the cash part's spend is its claim's.
+      where: { ...on, OR: [{ status: { in: [...ASKED, 'RELEASED'] } }, { status: { in: ['REFUND_DUE', 'LIQUIDATED'] }, amountBooked: { gt: 0 } }], ...not(own.budgetRequestId) },
+      select: { officeBudgetLineId: true, ...REQUEST_MONEY },
     }),
     prisma.cashAdvance.findMany({
       where: { ...on, status: { in: [...ASKED, 'RELEASED'] }, ...not(own.cashAdvanceId) },
@@ -95,9 +97,11 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
   }
   for (const r of requests) {
     const f = at(r.officeBudgetLineId);
-    if (r.status === 'LIQUIDATED') f.spent += num(r.amountSpent);
-    else if (r.status === 'RELEASED') f.released += num(r.amountReleased);
-    else f.requested += num(r.amount);
+    const m = requestMoney(r);
+    f.requested += m.waiting;
+    f.released += m.cashOut;
+    // Its bookings only: the cash part's spend is counted on its liquidation claim above.
+    f.spent += m.booked;
   }
   for (const a of advances) {
     const f = at(a.officeBudgetLineId);
@@ -112,7 +116,7 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
     }),
     prisma.budgetRequestItem.findMany({
       where: { ...on, request: { split: true, status: { in: [...ASKED, 'RELEASED'] }, ...not(own.budgetRequestId) } },
-      select: { officeBudgetLineId: true, amount: true, request: { select: { status: true, amount: true, amountReleased: true } } },
+      select: { officeBudgetLineId: true, amount: true, request: { select: REQUEST_MONEY } },
     }),
   ]);
   for (const l of claimLines) {
@@ -123,9 +127,12 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
   }
   for (const i of items) {
     const f = at(i.officeBudgetLineId);
+    // Its share of what the request stands for (a split request is never a travel request, so never booked).
     const asked = num(i.request.amount);
-    if (i.request.status === 'RELEASED') f.released += asked > 0 ? (num(i.request.amountReleased) * num(i.amount)) / asked : 0;
-    else f.requested += num(i.amount);
+    const share = asked > 0 ? num(i.amount) / asked : 0;
+    const m = requestMoney(i.request);
+    f.released += m.cashOut * share;
+    f.requested += m.waiting * share;
   }
   for (const f of out.values()) {
     f.requested = cents(f.requested);
@@ -340,15 +347,31 @@ export async function claimOffice(claim: { id: string; officeBudgetLineId: strin
   });
 }
 
-/** A budget request: the amount asked, the cash out once released, nothing more once liquidated. */
-export async function requestOffice(request: { id: string; officeBudgetLineId: string | null; status: string; amount: Money; amountReleased: Money }) {
+/**
+ * A budget request: the amount asked, then what is still waiting, out in cash
+ * or booked by finance while it is released; nothing more once liquidated.
+ */
+export async function requestOffice(request: {
+  id: string;
+  officeBudgetLineId: string | null;
+  status: string;
+  amount: Money;
+  amountReleased: Money;
+  amountRefunded?: Money;
+  amountSpent?: Money;
+  amountBooked?: Money;
+  liquidatedAt?: Date | null;
+}) {
   if (!request.officeBudgetLineId) return null;
   const released = request.status === 'RELEASED';
   const asked = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(request.status);
   const closed = ['REJECTED', 'CANCELLED'].includes(request.status);
+  const m = requestMoney({ ...request, amountRefunded: request.amountRefunded ?? 0, amountSpent: request.amountSpent ?? 0 });
   return chargeAgainstOffice({
     lineId: request.officeBudgetLineId,
-    amount: released ? num(request.amountReleased) : num(request.amount),
+    // Asked, the whole amount (a draft's too); released, what is still waiting,
+    // out in cash or booked — the line's own figures leave this request out.
+    amount: released ? m.total : num(request.amount),
     basis: released ? 'released' : asked ? 'asked' : closed ? 'closed' : 'settled',
     // Settled, the line is read as it stands — a direct payment's own spend with it.
     own: released || asked ? { budgetRequestId: request.id } : {},

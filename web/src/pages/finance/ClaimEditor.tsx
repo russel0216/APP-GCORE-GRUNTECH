@@ -56,6 +56,12 @@ interface Line {
   amount: string;
   /** Its own place (2026-11-11); null takes the claim's "Charge to". */
   charge: LineCharge | null;
+  /** A meal at the company's fixed rate: no receipt needed (2026-11-21). */
+  perDiem: boolean;
+  /** Spent abroad (2026-11-21): the receipt's currency, its figure and the rate taken. */
+  foreignCurrency: string;
+  foreignAmount: string;
+  exchangeRate: string;
 }
 
 interface Header {
@@ -68,7 +74,26 @@ interface Header {
 
 let nextKey = 0;
 const newKey = () => `cl${++nextKey}`;
-const blankLine = (spentOn: string): Line => ({ key: newKey(), spentOn, vendor: '', receiptNo: '', description: '', category: '', amount: '', charge: null });
+const blankLine = (spentOn: string): Line => ({
+  key: newKey(),
+  spentOn,
+  vendor: '',
+  receiptNo: '',
+  description: '',
+  category: '',
+  amount: '',
+  charge: null,
+  perDiem: false,
+  foreignCurrency: '',
+  foreignAmount: '',
+  exchangeRate: '',
+});
+/** Pesos from a foreign figure and its rate, to the centavo. */
+const pesosOf = (foreign: string, rate: string) => {
+  const f = Number(foreign);
+  const r = Number(rate);
+  return f > 0 && r > 0 ? String(Math.round(f * r * 100) / 100) : null;
+};
 const isBlank = (l: Line) => !l.description.trim() && !l.vendor.trim() && !l.receiptNo.trim() && !(Number(l.amount) > 0);
 const cents = (l: Line) => Math.round((Number(l.amount) || 0) * 100);
 const snapshot = (h: Header, lines: Line[]) =>
@@ -137,6 +162,10 @@ export function ClaimEditor() {
                 category: l.category ?? '',
                 amount: String(l.amount),
                 charge: row.split ? chargeOf(l) : null,
+                perDiem: !!l.perDiem,
+                foreignCurrency: l.foreignCurrency ?? '',
+                foreignAmount: l.foreignAmount != null ? String(l.foreignAmount) : '',
+                exchangeRate: l.exchangeRate != null ? String(l.exchangeRate) : '',
               }))
             : [blankLine(today)];
         } else if (advanceId) {
@@ -215,7 +244,7 @@ export function ClaimEditor() {
   const chargedJobIds = [...new Set((perLine ? sent.map(placeOf) : [source?.job ? { jobId: source.job.id } : { jobId: '' }]).map((c) => c.jobId).filter(Boolean))];
   const totalCents = sent.reduce((s, l) => s + cents(l), 0);
   const total = totalCents / 100;
-  const missingReceipts = sent.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
+  const missingReceipts = sent.filter((l) => l.description.trim() && !l.receiptNo.trim() && !l.perDiem).length;
   const difference = source ? (totalCents - Math.round(source.amountReleased * 100)) / 100 : 0;
   const liquidating = !!source;
   const cashWord = source?.kind === 'advance' ? 'advance' : 'budget request';
@@ -289,6 +318,10 @@ export function ClaimEditor() {
         receiptNo: l.receiptNo.trim() || null,
         vendor: l.vendor.trim() || null,
         amount: cents(l) / 100,
+        perDiem: l.perDiem,
+        foreignCurrency: l.foreignCurrency.trim() && Number(l.foreignAmount) > 0 ? l.foreignCurrency.trim().toUpperCase() : null,
+        foreignAmount: l.foreignCurrency.trim() && Number(l.foreignAmount) > 0 ? Number(l.foreignAmount) : null,
+        exchangeRate: l.foreignCurrency.trim() && Number(l.exchangeRate) > 0 ? Number(l.exchangeRate) : null,
         ...(perLine ? chargeBody(placeOf(l)) : {}),
       })),
     };
@@ -524,7 +557,7 @@ export function ClaimEditor() {
                 <tbody>
                   {lines.map((l, i) => {
                     const problem = attempted ? lineProblem(l) : null;
-                    const noReceipt = !isBlank(l) && l.description.trim() && !l.receiptNo.trim();
+                    const noReceipt = !isBlank(l) && l.description.trim() && !l.receiptNo.trim() && !l.perDiem;
                     return (
                       <tr key={l.key}>
                         <td className="mono">{i + 1}</td>
@@ -539,9 +572,12 @@ export function ClaimEditor() {
                               aria-invalid={(attempted && noReceipt) || undefined}
                               value={l.receiptNo}
                               maxLength={100}
-                              placeholder="OR / SI no."
+                              placeholder={l.perDiem ? 'Per diem — no receipt' : 'OR / SI no.'}
                               onChange={(e) => setLine(l.key, { receiptNo: e.target.value })}
                             />
+                            <label className="fin-line-check">
+                              <input type="checkbox" checked={l.perDiem} onChange={(e) => setLine(l.key, { perDiem: e.target.checked })} /> Per diem (fixed rate, no receipt)
+                            </label>
                           </div>
                         </td>
                         <td>
@@ -579,7 +615,40 @@ export function ClaimEditor() {
                           </td>
                         )}
                         <td>
-                          <NumberInput kind="money" min={0} aria-label={`Line ${i + 1} amount`} value={l.amount} onChange={(e) => setLine(l.key, { amount: e.target.value })} />
+                          <div className="fin-line-stack">
+                            <NumberInput kind="money" min={0} aria-label={`Line ${i + 1} amount`} value={l.amount} onChange={(e) => setLine(l.key, { amount: e.target.value })} />
+                            <div className="fin-line-foreign">
+                              <input
+                                aria-label={`Line ${i + 1} foreign currency`}
+                                value={l.foreignCurrency}
+                                maxLength={3}
+                                placeholder="SGD"
+                                onChange={(e) => setLine(l.key, { foreignCurrency: e.target.value.replace(/[^A-Za-z]/g, '').toUpperCase() })}
+                              />
+                              <NumberInput
+                                kind="money"
+                                min={0}
+                                aria-label={`Line ${i + 1} amount in that currency`}
+                                placeholder="Spent in it"
+                                value={l.foreignAmount}
+                                onChange={(e) => {
+                                  const pesos = pesosOf(e.target.value, l.exchangeRate);
+                                  setLine(l.key, { foreignAmount: e.target.value, ...(pesos ? { amount: pesos } : {}) });
+                                }}
+                              />
+                              <NumberInput
+                                kind="decimal"
+                                min={0}
+                                aria-label={`Line ${i + 1} rate to pesos`}
+                                placeholder="Rate"
+                                value={l.exchangeRate}
+                                onChange={(e) => {
+                                  const pesos = pesosOf(l.foreignAmount, e.target.value);
+                                  setLine(l.key, { exchangeRate: e.target.value, ...(pesos ? { amount: pesos } : {}) });
+                                }}
+                              />
+                            </div>
+                          </div>
                         </td>
                         <td>
                           <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
@@ -595,7 +664,7 @@ export function ClaimEditor() {
             {missingReceipts > 0 && (
               <div className="alert warn">
                 {missingReceipts} line{missingReceipts === 1 ? ' has' : 's have'} no receipt number. You can save this as a draft, but it cannot
-                be submitted until every peso has an OR against it.
+                be submitted until every peso has an OR against it — or tick “Per diem” on a meal at the fixed rate.
               </div>
             )}
           </section>

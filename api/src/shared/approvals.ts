@@ -174,10 +174,24 @@ export interface ApprovalContext {
   jobIds?: string[];
   /** The stored request, so a PROJECT_MANAGERS step knows who has already agreed. */
   requestId?: string | null;
+  /** The document's type — a money document's held steps go up (`MONEY_DOCUMENTS`). */
+  documentType?: string | null;
 }
 
+/**
+ * Money documents (2026-11-21, the owner's call): on these a step the
+ * requester holds is NEVER signed by them at submit, whatever the route's
+ * "preparer signs" switch says — it goes to the person they report to
+ * ("Reports to", the first active one up the line), beside anybody else who
+ * holds the step. Before, a Technical Manager who is also the Team Leader
+ * approved two steps of his own ₱88,065.68 travel request by submitting it.
+ */
+export const MONEY_DOCUMENTS: ReadonlySet<string> = new Set(['budget_request', 'travel_request', 'cash_advance', 'expense']);
+const isMoney = (ctx: ApprovalContext) => !!ctx.documentType && MONEY_DOCUMENTS.has(ctx.documentType);
+
 /** The context a stored request carries. */
-export const ctxOf = (r: { id?: string; jobId: string | null; projectManagerId?: string | null; importation?: boolean; teamId?: string | null; jobIds?: string[] }): ApprovalContext => ({
+export const ctxOf = (r: { id?: string; jobId: string | null; projectManagerId?: string | null; importation?: boolean; teamId?: string | null; jobIds?: string[]; documentType?: string }): ApprovalContext => ({
+  documentType: r.documentType ?? null,
   jobId: r.jobId,
   projectManagerId: r.projectManagerId ?? null,
   importation: r.importation ?? false,
@@ -332,6 +346,20 @@ export async function approversForStep(
   requesterId: string,
   tx: Prisma.TransactionClient = prisma,
   ctx: ApprovalContext = {},
+): Promise<string[]> {
+  const ids = await stepHolders(step, requesterId, tx, ctx);
+  // A money document's step the requester holds goes up to the person they
+  // report to as well (`MONEY_DOCUMENTS`, 2026-11-21) — never to nobody.
+  if (!isMoney(ctx) || step.approverType === 'PROJECT_MANAGERS' || !ids.includes(requesterId)) return ids;
+  const up = await activeSupervisor(requesterId, tx);
+  return up && up !== requesterId && !ids.includes(up) ? [...ids, up] : ids;
+}
+
+async function stepHolders(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient,
+  ctx: ApprovalContext,
 ): Promise<string[]> {
   switch (step.approverType) {
     case 'PROJECT_MANAGERS': {
@@ -653,7 +681,7 @@ export async function heldSequences(
   ctx: ApprovalContext = {},
 ): Promise<Set<number>> {
   const held = new Set<number>();
-  if (!workflow.preparerSigns) return held;
+  if (!workflow.preparerSigns || isMoney(ctx)) return held;
   for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx, ctx)) held.add(step.sequence);
   return held;
 }
@@ -768,6 +796,7 @@ export async function routePreview(
 ): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; roleId: string | null; held: boolean; approvers: StepPerson[] }[] } | null> {
   const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null, requesterId });
   if (!workflow) return null;
+  ctx = { ...ctx, documentType };
   // A step the preparer holds on a route that lets them sign is THEIRS: it is
   // signed at submit, so it names them alone (`held`).
   const held = await heldSequences(workflow, requesterId, prisma, ctx);
@@ -916,6 +945,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
   const submitCtx: ApprovalContext = {
+    documentType: input.documentType,
     jobId: input.jobId ?? null,
     projectManagerId: input.projectManagerId ?? null,
     importation: input.importation ?? false,

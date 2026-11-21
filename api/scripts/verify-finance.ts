@@ -21,6 +21,7 @@
  */
 
 import { ordersInvoiced } from '../src/shared/billingInvoice';
+import { sendLiquidationReminders } from '../src/shared/liquidationReminders';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -29,7 +30,7 @@ import { MONEY_IN_ACCESS_MARK, MONEY_IN_KEYS, applyMoneyInAccess } from '../src/
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, ctxOf, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf, heldSequences, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
 import { resolveUser } from '../src/permissions/resolve';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
 import { requestedByLine } from '../src/shared/projectBudget';
@@ -5076,6 +5077,107 @@ async function main() {
           trOffice.status === 201 && officeBooked.status === 200 && money((await actualB()) - beforeB, 3_000),
           `${trOffice.status} ${officeBooked.status} ${beforeB} → ${await actualB()}`,
         );
+
+        // The split (2026-11-21, the owner's call): finance books the air fare
+        // and the hotel on the company card; the rest is cash to the traveller.
+        const sp = await eng('POST', '/budget-requests', {
+          jobId: job.id,
+          costCategoryId: materials.id,
+          reason: `${TAG} split trip`,
+          travel: journey,
+          items: [
+            { name: 'Air fare', quantity: 1, unitCost: 1_000, financePays: true },
+            { name: 'Hotel', quantity: 1, unitCost: 600, financePays: true },
+            { name: 'Meals', quantity: 1, unitCost: 400 },
+          ],
+        });
+        const spId = String(sp.body.id);
+        await prisma.budgetRequest.update({ where: { id: spId }, data: { status: 'APPROVED', approvedAt: new Date() } });
+        const spView = async () => (await fin('GET', `/budget-requests/${spId}`)).body;
+        const spLedger = async (state: 'COMMITTED' | 'INCURRED') =>
+          Number((await prisma.jobCostEntry.aggregate({ where: { jobId: job.id, state, sourceType: 'budget_request', sourceId: spId }, _sum: { amount: true } }))._sum.amount ?? 0);
+        const v0 = await spView();
+        const overFinance = await fin('POST', `/budget-requests/${spId}/book`, { amount: 1_700, method: 'CREDIT_CARD' });
+        const fare = await fin('POST', `/budget-requests/${spId}/book`, { amount: 950, method: 'CREDIT_CARD', reference: `${TAG}PNR2`, cardLast4: '4417', statementMonth: '2027-01' });
+        const v1 = await spView();
+        const linesAfter = await fin('PUT', `/budget-requests/${spId}/finance-lines`, { lineIds: [] });
+        const wholeCash = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: spId, amount: 2_000 }] });
+        const cashPart = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: spId, amount: 400 }] });
+        const v2 = await spView();
+        const hotel = await fin('POST', `/budget-requests/${spId}/book`, { amount: 600, method: 'CREDIT_CARD', reference: `${TAG}HTL2` });
+        const sameRef = await fin('POST', `/budget-requests/${spId}/book`, { amount: 10, method: 'CREDIT_CARD', reference: `${TAG}PNR2` });
+        const v3 = await spView();
+        const card = fare.body.paymentId ? await prisma.payment.findUnique({ where: { id: String(fare.body.paymentId) } }) : null;
+        check(
+          'a split travel request: the lines finance books make its finance part, booked in as many card charges as the trip needs and never past it; only the cash part is released, in one voucher; a booking is spent at once, the cash committed until liquidated',
+          sp.status === 201 && money(v0.financePart, 1_600) && money(v0.cashPart, 400) && money(v0.toRelease, 400) && money(v0.toBook, 1_600) &&
+            v0.canBook === true && v0.canSetFinanceLines === true &&
+            overFinance.status === 400 && fare.status === 200 && v1.status === 'APPROVED' && money(v1.amountBooked, 950) && money(v1.toBook, 650) &&
+            v1.canSetFinanceLines === false && linesAfter.status === 400 &&
+            wholeCash.status === 400 && cashPart.status === 201 && v2.status === 'RELEASED' && money(v2.amountReleased, 400) && !!v2.liquidationDueDate &&
+            hotel.status === 200 && sameRef.status === 400 && money(v3.amountBooked, 1_550) && v3.status === 'RELEASED' && money(v3.toBook, 50) &&
+            money(await spLedger('INCURRED'), 1_550) && money(await spLedger('COMMITTED'), 400) &&
+            card?.cardLast4 === '4417' && card.statementMonth === '2027-01' && card.method === 'CREDIT_CARD',
+          `${sp.status} ${JSON.stringify({ fp: v0.financePart, cp: v0.cashPart, tr: v0.toRelease, tb: v0.toBook, cb: v0.canBook, cs: v0.canSetFinanceLines })} | ${overFinance.status} ${fare.status} ${v1.status} ${v1.amountBooked} ${v1.toBook} ${linesAfter.status} | ${wholeCash.status} ${cashPart.status} ${v2.status} ${v2.amountReleased} | ${hotel.status} ${sameRef.status} ${v3.amountBooked} ${v3.status} ${v3.toBook} | ${await spLedger('INCURRED')} ${await spLedger('COMMITTED')} | ${card?.cardLast4} ${card?.statementMonth}`,
+        );
+        // The same card charge is never reimbursed too.
+        const dupClaim = await eng('POST', '/expense-claims', {
+          purpose: `${TAG} card charge claimed again`,
+          jobId: job.id,
+          costCategoryId: materials.id,
+          lines: [{ spentOn: '2027-01-12', description: 'flight', receiptNo: `${TAG}PNR2`, amount: 950 }],
+        });
+        const dupSubmit = dupClaim.body.id ? await eng('POST', `/expense-claims/${dupClaim.body.id}/submit`) : { status: 0, body: {} };
+        const perDiem = await eng('POST', '/expense-claims', {
+          purpose: `${TAG} per diem and abroad`,
+          jobId: job.id,
+          costCategoryId: materials.id,
+          lines: [
+            { spentOn: '2027-01-12', description: 'breakfast', amount: 500, perDiem: true },
+            { spentOn: '2027-01-12', description: 'taxi in Singapore', receiptNo: `${TAG}SG1`, amount: 840, foreignCurrency: 'sgd', foreignAmount: 20, exchangeRate: 42 },
+          ],
+        });
+        const pdLines = perDiem.body.id ? await prisma.expenseClaimLine.findMany({ where: { claimId: String(perDiem.body.id) }, orderBy: { sortOrder: 'asc' } }) : [];
+        const marked = await fin('POST', '/payments/statement-match', { ids: [String(fare.body.paymentId)], matched: true });
+        const listed = await fin('GET', `/payments?register=other&statement=2027-01&matched=yes&search=${encodeURIComponent(String(card?.number ?? ''))}`);
+        check(
+          'a receipt that is the company card’s booking is refused on a reimbursement; a per diem needs no receipt; a receipt abroad keeps its currency, figure and rate; finance ticks a card charge off its statement month',
+          dupClaim.status === 201 && dupSubmit.status === 400 && String(dupSubmit.body.error ?? '').includes('company card') &&
+            perDiem.status === 201 && pdLines[0]?.perDiem === true && pdLines[1]?.foreignCurrency === 'SGD' && money(Number(pdLines[1]?.foreignAmount), 20) && Number(pdLines[1]?.exchangeRate) === 42 &&
+            marked.status === 200 && marked.body.changed === 1 && listed.body.total === 1,
+          `${dupClaim.status} ${dupSubmit.status} ${JSON.stringify(dupSubmit.body).slice(0, 140)} | ${perDiem.status} ${pdLines[0]?.perDiem} ${pdLines[1]?.foreignCurrency} | ${marked.status} ${JSON.stringify(marked.body)} ${listed.body.total}`,
+        );
+        // Cash out past its deadline (2026-11-21): reminded once, and no new request until it is liquidated.
+        const spNumber = String(sp.body.number);
+        await prisma.budgetRequest.update({ where: { id: spId }, data: { liquidationDueDate: new Date('2026-01-05'), liquidationReminderAt: null, liquidationDueNoticeAt: null } });
+        const blocked = await eng('POST', '/budget-requests', { jobId: job.id, costCategoryId: materials.id, reason: `${TAG} blocked while overdue`, amount: 100 });
+        const tenInManila = new Date(dayKey(new Date()).getTime() + 2 * 3_600_000);
+        await sendLiquidationReminders(tenInManila);
+        await sendLiquidationReminders(tenInManila);
+        const bells = await prisma.notification.count({ where: { userId: engineer.id, title: { contains: `${spNumber} is ` }, AND: [{ title: { contains: 'past its liquidation deadline' } }] } });
+        const stamped = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: spId }, select: { liquidationReminderAt: true, liquidationDueNoticeAt: true } });
+        await prisma.budgetRequest.update({ where: { id: spId }, data: { liquidationDueDate: dayKey(new Date(Date.now() + 30 * 86_400_000)) } });
+        const unblocked = await eng('POST', '/budget-requests', { jobId: job.id, costCategoryId: materials.id, reason: `${TAG} after the deadline moved`, amount: 100 });
+        check(
+          'cash past its liquidation deadline blocks a new request and is reminded once, on the day — never twice',
+          blocked.status === 400 && String(blocked.body.error ?? '').includes('liquidate it first') && bells === 1 && !!stamped.liquidationDueNoticeAt && !!stamped.liquidationReminderAt && unblocked.status === 201,
+          `${blocked.status} ${JSON.stringify(blocked.body).slice(0, 120)} bells=${bells} ${stamped.liquidationReminderAt} ${stamped.liquidationDueNoticeAt} ${unblocked.status}`,
+        );
+        // A money document's step the requester holds goes up to whom they report to (2026-11-21).
+        const checking = await prisma.approvalStep.findFirst({ where: { role: { key: 'finance' }, workflow: { documentType: 'expense', isActive: true } } });
+        if (checking) {
+          await prisma.user.update({ where: { id: finance.id }, data: { supervisorId: engineer.id } });
+          const asMoney = await approversForStep(checking, finance.id, prisma, { documentType: 'expense' });
+          const asOther = await approversForStep(checking, finance.id, prisma, { documentType: 'supplier_bill' });
+          const heldMoney = await heldSequences({ preparerSigns: true, steps: [checking] }, finance.id, prisma, { documentType: 'expense' });
+          const heldOther = await heldSequences({ preparerSigns: true, steps: [checking] }, finance.id, prisma, { documentType: 'supplier_bill' });
+          await prisma.user.update({ where: { id: finance.id }, data: { supervisorId: null } });
+          check(
+            'on a money document a step the requester holds is never signed by them at submit — it goes to the person they report to as well',
+            asMoney.includes(engineer.id) && !asOther.includes(engineer.id) && heldMoney.size === 0 && heldOther.has(checking.sequence),
+            `${asMoney.includes(engineer.id)} ${asOther.includes(engineer.id)} ${heldMoney.size} ${[...heldOther].join()}`,
+          );
+        }
       }
 
       const edited = await obEditor('PUT', `/office-budgets/${obId}`, {

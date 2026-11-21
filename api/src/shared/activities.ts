@@ -7,6 +7,7 @@ import { notify, type NotificationType } from './notifications';
 import { formatDateTime } from './pdf';
 import { manilaDayKey } from './day';
 import { sendDueGreetings } from './celebrations';
+import { sendLiquidationReminders } from './liquidationReminders';
 
 /**
  * The one place that decides which sales activities a query means.
@@ -304,6 +305,11 @@ export function startActivityReminders(): void {
       await sendDueGreetings();
     } catch (err) {
       console.error('Greetings failed:', err);
+    }
+    try {
+      await sendLiquidationReminders();
+    } catch (err) {
+      console.error('Liquidation reminders failed:', err);
     } finally {
       running = false;
     }

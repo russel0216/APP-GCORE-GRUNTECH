@@ -91,6 +91,14 @@ interface Header {
   carrier: string;
 }
 
+/**
+ * A budget request whose purpose reads like a trip (2026-11-21, the owner's
+ * call): the form says so and offers the travel request — its own route, the
+ * journey, finance booking the fare on the company card.
+ */
+export const looksLikeTravel = (text: string) =>
+  /\b(travel|trip|flights?|air ?fare|plane|airline|hotels?|accommodations?|accomodations?|lodging|ferry|boat fare|bus fare|biyahe|byahe)\b/i.test(text);
+
 const NO_JOURNEY = { travelMode: 'AIR' as const, travelFrom: '', travelTo: '', departOn: '', returnOn: '', travellers: '', carrier: '' };
 const TRAVEL_MODES: [Header['travelMode'], string][] = [
   ['AIR', 'Air flight'],
@@ -577,6 +585,12 @@ export function BudgetRequestEditor() {
                   onChange={(e) => setHeader((h) => ({ ...h, reason: e.target.value }))}
                 />
               </Field>
+              {!travel && !editing && looksLikeTravel(`${header.reason} ${lines.map((l) => l.name).join(' ')}`) && (
+                <p className="alert info" role="status">
+                  This looks like a trip. A travel request takes the journey, goes on the travel route, and lets finance book the air fare and the hotel on the
+                  company card — <Link to="/g-ops/travel-requests/new">raise a travel request instead</Link>.
+                </p>
+              )}
             </div>
             <div className="qe-rows">
               <Field label="Notes" hint="Printed on the request">
@@ -590,6 +604,7 @@ export function BudgetRequestEditor() {
             lines={lines}
             onChange={setLines}
             attempted={attempted}
+            paidBy={travel}
             charging={
               perItem
                 ? {
@@ -610,7 +625,7 @@ export function BudgetRequestEditor() {
             }
             hint={
               travel
-                ? 'The fare, fees, baggage, freight — the amount requested is the sum of the lines.'
+                ? 'The fare, hotel, fees, food, pocket money — the amount requested is the sum of the lines. Say who pays each: finance books the air fare and the hotel on the company card; the rest is cash released to you and liquidated with receipts.'
                 : perItem
                   ? `The amount requested is the sum of the lines. Each line is charged to the request's own place unless you change it — one request can spread over several projects and office lines${itemPlaces.size > 1 ? ` (this one: ${itemPlaces.size} places)` : ''}. Receipts for what is actually spent are filed in the liquidation.`
                   : 'The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation.'

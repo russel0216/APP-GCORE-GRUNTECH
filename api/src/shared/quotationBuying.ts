@@ -1,3 +1,4 @@
+import { REQUEST_MONEY, requestMoney } from './requestMoney';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest, notFound } from '../http/kit';
@@ -187,7 +188,7 @@ export async function quotationSpend(quotationId: string, db: Tx | typeof prisma
     }),
     db.budgetRequest.findMany({
       where: { quotationId, jobId: null, salesOrderId: null, officeBudgetLineId: null, status: { in: ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'] } },
-      select: { status: true, amount: true, amountReleased: true, amountRefunded: true, amountSpent: true, liquidatedAt: true },
+      select: REQUEST_MONEY,
     }),
   ]);
   if (!q) return null;
@@ -206,9 +207,11 @@ export async function quotationSpend(quotationId: string, db: Tx | typeof prisma
   }
   let incurred = received.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0);
   for (const r of cash) {
-    if (r.liquidatedAt) incurred += num(r.amountSpent);
-    else if (r.status === 'PENDING_APPROVAL' || r.status === 'APPROVED') requested += num(r.amount);
-    else committed += Math.max(0, num(r.amountReleased) - num(r.amountRefunded));
+    // Waiting is asked, cash out committed, what was spent (bookings at once, cash once liquidated) incurred.
+    const m = requestMoney(r);
+    requested += m.waiting;
+    committed += m.cashOut;
+    incurred += m.spent;
   }
   return {
     quotationId: q.id,
@@ -420,7 +423,7 @@ export async function costsToReallocate(quotationId: string, db: Tx | typeof pri
     db.quotationStock.findMany({ where: { quotationId, quantity: { gt: 0 } }, select: { quantity: true, averageCost: true } }),
     db.budgetRequest.findMany({
       where: { quotationId, jobId: null, salesOrderId: null, officeBudgetLineId: null, status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'] } },
-      select: { id: true, number: true, status: true, amount: true, amountReleased: true, amountRefunded: true, amountSpent: true, liquidatedAt: true, reason: true, isTravel: true },
+      select: { id: true, number: true, reason: true, isTravel: true, ...REQUEST_MONEY },
     }),
   ]);
   return {
@@ -436,7 +439,7 @@ export async function costsToReallocate(quotationId: string, db: Tx | typeof pri
       status: r.status,
       reason: r.reason,
       isTravel: r.isTravel,
-      amount: r.liquidatedAt ? num(r.amountSpent) : r.status === 'APPROVED' ? num(r.amount) : cents(Math.max(0, num(r.amountReleased) - num(r.amountRefunded))),
+      amount: requestMoney(r).total,
     })),
   };
 }
@@ -543,7 +546,7 @@ export async function reallocateBudgetRequest(
   }
   const job = await tx.job.findUnique({ where: { id: to.jobId }, select: { number: true, status: true } });
   if (!job || job.status === 'CANCELLED') throw badRequest('That project cannot be charged');
-  const amount = r.liquidatedAt ? num(r.amountSpent) : r.status === 'APPROVED' ? num(r.amount) : Math.max(0, num(r.amountReleased) - num(r.amountRefunded));
+  const amount = requestMoney(r).total;
   await assertBudgetLeft(to.jobId, to.costCategoryId, amount);
   await tx.budgetRequest.update({ where: { id: r.id }, data: { jobId: to.jobId, costCategoryId: to.costCategoryId } });
   await tx.expenseClaim.updateMany({ where: { budgetRequestId: r.id, jobId: null, status: { in: ['DRAFT', 'PENDING_APPROVAL'] } }, data: { jobId: to.jobId, costCategoryId: to.costCategoryId } });

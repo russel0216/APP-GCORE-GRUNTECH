@@ -118,6 +118,14 @@ export interface BudgetRequest {
   carrier?: string | null;
   paidDirect?: boolean;
   canBook?: boolean;
+  /** Finance may mark which lines it books while no money has gone out (2026-11-21). */
+  canSetFinanceLines?: boolean;
+  /** The split (2026-11-21): the lines finance books on the company card, and the cash part. */
+  financePart?: number;
+  amountBooked?: number;
+  cashPart?: number;
+  toBook?: number;
+  cashSpent?: number;
   approvalType?: 'budget_request' | 'travel_request';
   /** "Against the project budget" (GET /:id) — Budget Monitoring's figures, this request's own commitment left out. */
   budget?: RequestBudget | null;
@@ -128,6 +136,8 @@ export interface BudgetRequest {
   allocations?: {
     id: string;
     amount: number;
+    /** A booking finance paid on the card (2026-11-21), not cash released. */
+    booking?: boolean;
     payment: { id: string; number: string; kind: string; paymentDate: string; method: string; reference: string | null; clearedAt: string | null };
   }[];
 }
@@ -343,7 +353,13 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
           if (travel && !finance)
             return (
               <>
-                <Stat label="Travel requests" value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'} listed`} />
+                <Stat
+                  label="Travel requests"
+                  value={formatMoney(sum.total)}
+                  figure
+                  // Rejected ones are listed but never summed (2026-11-21: "0 listed" read wrong over a rejected row).
+                  sub={`${sum.count} request${sum.count === 1 ? '' : 's'} counted, rejected and cancelled left out`}
+                />
                 <Stat
                   label="Pending approval"
                   value={formatMoney(sum.pending)}
@@ -398,21 +414,31 @@ export function FinanceBudgetRequests() {
 }
 
 /**
- * Finance books and pays an approved travel request itself (2026-11-10, the
- * owner's call: "finance can also pay, particularly the booking of an airline
- * using a credit card"): what the booking cost — never more than approved —
- * the method, the reference. One voucher; nothing to liquidate.
+ * Finance books part of a travel request on the company card (2026-11-10,
+ * split 2026-11-21 — the owner's call: "the air fare and the booking of the
+ * hotel can be paid by finance through the company credit card"): one booking
+ * at a time — the air fare, then the hotel — together never more than the
+ * finance part. Each is spent at once and never liquidated; the cash part is
+ * released to the traveller as usual. The card's last four digits and the
+ * statement month let finance tick it off the bank's statement.
  */
 function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone: () => void; onCancel: () => void }) {
   const toast = useToast();
-  const [amount, setAmount] = useState(String(row.amount));
+  // A request from before the split with no lines is booked whole.
+  const left = row.toBook && row.toBook > 0 ? row.toBook : row.amount;
+  const financeLines = (row.items ?? []).filter((i) => i.financePays);
+  const [amount, setAmount] = useState(String(left));
   const [method, setMethod] = useState('CREDIT_CARD');
   const [paymentDate, setPaymentDate] = useState('');
   const [reference, setReference] = useState('');
+  const [cardLast4, setCardLast4] = useState('');
+  const [statementMonth, setStatementMonth] = useState('');
   const [carrier, setCarrier] = useState(row.carrier ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const over = Number(amount) > row.amount + 0.005;
+  const over = Number(amount) > left + 0.005;
+  const card = method === 'CREDIT_CARD';
+  const badCard = card && cardLast4 !== '' && !/^\d{4}$/.test(cardLast4);
 
   async function book() {
     setBusy(true);
@@ -423,6 +449,8 @@ function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone
         method,
         paymentDate: paymentDate || null,
         reference: reference.trim() || null,
+        cardLast4: card ? cardLast4 || null : null,
+        statementMonth: card ? statementMonth || null : null,
         carrier: carrier.trim() || null,
       });
       toast('ok', `Booked — ${res.paymentNumber}`);
@@ -438,14 +466,17 @@ function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone
     <section className="card" aria-labelledby="br-book">
       <h3 id="br-book" className="card-title">Book and pay directly</h3>
       <p className="muted">
-        Finance pays the carrier itself — nobody holds cash, so there is nothing to liquidate. What is paid is charged at once to what
-        the request is for.
+        Finance pays the airline or the hotel itself. A booking is spent at once — the traveller never liquidates it.{' '}
+        {financeLines.length
+          ? `Finance books: ${financeLines.map((i) => i.name).join(', ')} — ${formatMoney(left)} left to book. Book each one as it is paid.`
+          : `${formatMoney(left)} to book.`}
+        {(row.cashPart ?? 0) > 0.005 && ` The cash part, ${formatMoney(row.cashPart ?? 0)}, is released to the traveller separately.`}
       </p>
       <div className="grid grid-2">
         <label className="field">
           <span>What the booking cost</span>
           <NumberInput kind="money" value={amount} min={0.01} onChange={(e) => setAmount(e.target.value)} />
-          {over && <span className="field-error">More than the {formatMoney(row.amount)} approved</span>}
+          {over && <span className="field-error">More than the {formatMoney(left)} left to book</span>}
         </label>
         <label className="field">
           <span>Paid by</span>
@@ -463,8 +494,22 @@ function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone
         </label>
         <label className="field">
           <span>Booking reference</span>
-          <input value={reference} maxLength={200} placeholder="e.g. the ticket or booking number" onChange={(e) => setReference(e.target.value)} />
+          <input value={reference} maxLength={200} placeholder="The ticket or booking number" onChange={(e) => setReference(e.target.value)} />
         </label>
+        {card && (
+          <>
+            <label className="field">
+              <span>Card — last four digits</span>
+              <input value={cardLast4} inputMode="numeric" maxLength={4} placeholder="e.g. 4417" onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ''))} />
+              {badCard && <span className="field-error">Four digits</span>}
+            </label>
+            <label className="field">
+              <span>Statement month</span>
+              <input type="month" value={statementMonth} onChange={(e) => setStatementMonth(e.target.value)} />
+              <span className="field-hint">The card statement it falls on — the payment's month when left blank</span>
+            </label>
+          </>
+        )}
         <label className="field">
           <span>Carrier</span>
           <input value={carrier} maxLength={200} onChange={(e) => setCarrier(e.target.value)} />
@@ -475,8 +520,71 @@ function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone
         <button type="button" className="btn btn-sm" disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="button" className="btn btn-primary btn-sm" disabled={busy || over || !(Number(amount) > 0)} onClick={() => void book()}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || over || badCard || !(Number(amount) > 0)} onClick={() => void book()}>
           Book and pay
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Which lines finance books, set after approval (2026-11-21): finance
+ * decides how the trip is paid, never what it costs, so while no money has
+ * gone out it may tick the lines it pays on the company card.
+ */
+function FinanceLinesPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone: () => void; onCancel: () => void }) {
+  const toast = useToast();
+  const items = row.items ?? [];
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(items.filter((i) => i.financePays).map((i) => i.id)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const finance = Math.round(items.filter((i) => picked.has(i.id)).reduce((s, i) => s + i.amount * 100, 0)) / 100;
+  const toggle = (id: string) =>
+    setPicked((p) => {
+      const next = new Set(p);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put(`/budget-requests/${row.id}/finance-lines`, { lineIds: [...picked] });
+      toast('ok', 'Saved who pays which line');
+      onDone();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="br-finance-lines">
+      <h3 id="br-finance-lines" className="card-title">Who pays which line</h3>
+      <p className="muted">Tick what finance books on the company card. The rest is cash released to the traveller and liquidated. The amount approved does not change.</p>
+      <div className="stack">
+        {items.map((i) => (
+          <div key={i.id}>
+            <label>
+              <input type="checkbox" checked={picked.has(i.id)} onChange={() => toggle(i.id)} /> {i.name} — {formatMoney(i.amount)}
+            </label>
+          </div>
+        ))}
+      </div>
+      <p>
+        <strong>Finance books:</strong> {formatMoney(finance)} · <strong>Cash to the traveller:</strong> {formatMoney(Math.round((row.amount - finance) * 100) / 100)}
+      </p>
+      <ErrorBox error={error} />
+      <div className="row card-foot">
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void save()}>
+          Save
         </button>
       </div>
     </section>
@@ -855,6 +963,7 @@ export function BudgetRequestDetail() {
   const [reload, setReload] = useState(0);
   const [modal, setModal] = useState<null | 'release' | 'refund'>(null);
   const [booking, setBooking] = useState(false);
+  const [settingLines, setSettingLines] = useState(false);
   // `?act=liquidate|refund` — Budget Liquidations' "Actual entry" and
   // "Process" land here with the form open, read once and dropped.
   const [params, setParams] = useSearchParams();
@@ -986,7 +1095,7 @@ export function BudgetRequestDetail() {
             )}
             {row.status === 'APPROVED' && row.toRelease > 0 && can('gfin.ap.create') && (
               <button className={row.canBook ? 'btn' : 'btn btn-primary'} onClick={() => setModal('release')}>
-                Release cash
+                {row.isTravel && (row.financePart ?? 0) > 0.005 ? `Release cash part (${formatMoney(row.toRelease)})` : 'Release cash'}
               </button>
             )}
             {canLiquidate && (
@@ -1003,6 +1112,11 @@ export function BudgetRequestDetail() {
         }
         print={`/api/budget-requests/${row.id}/pdf`}
         more={[
+          row.canSetFinanceLines && {
+            label: 'Who pays which line…',
+            hint: 'Tick the lines finance books on the company card — before any money goes out',
+            onSelect: () => setSettingLines(true),
+          },
           {
             label: 'Print without attachments',
             hint: 'The request alone, without the files attached to it',
@@ -1057,6 +1171,16 @@ export function BudgetRequestDetail() {
       <DecisionNote documentType={row.approvalType ?? 'budget_request'} documentId={row.id} reloadToken={reload} />
       {row.status !== 'DRAFT' && <DocumentApproval documentType={row.approvalType ?? 'budget_request'} documentId={row.id} reloadToken={reload} />}
       {booking && row.canBook && <BookTravelPanel row={row} onDone={done} onCancel={() => setBooking(false)} />}
+      {settingLines && row.canSetFinanceLines && (
+        <FinanceLinesPanel
+          row={row}
+          onDone={() => {
+            setSettingLines(false);
+            done();
+          }}
+          onCancel={() => setSettingLines(false)}
+        />
+      )}
       {row.isTravel && (
         <div className="card">
           <h3 className="card-title">Journey</h3>
@@ -1099,9 +1223,13 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'APPROVED' && (
         <div className="alert info">
-          {row.isTravel
-            ? `Approved. Finance either books and pays the trip directly (the company card — nothing to liquidate) or releases ${formatMoney(row.toRelease)} in one voucher.`
-            : `Approved. Finance releases ${formatMoney(row.toRelease)} in one voucher. Nothing is charged to the project until the receipts are in.`}
+          {!row.isTravel
+            ? `Approved. Finance releases ${formatMoney(row.toRelease)} in one voucher. Nothing is charged to the project until the receipts are in.`
+            : (row.financePart ?? 0) <= 0.005
+              ? `Approved. Every line is cash to the traveller: finance releases ${formatMoney(row.toRelease)} in one voucher, liquidated with receipts.${row.canSetFinanceLines ? ' To book the air fare or the hotel on the company card, open ⋯ › Who pays which line.' : ''}`
+              : (row.cashPart ?? 0) <= 0.005
+                ? `Approved. Finance books the whole trip on the company card (${formatMoney(row.toBook ?? 0)} left to book) — nothing to liquidate.`
+                : `Approved. Finance books ${formatMoney(row.financePart ?? 0)} on the company card (${formatMoney(row.toBook ?? 0)} left to book) and releases the cash part, ${formatMoney(row.toRelease)}, to the traveller — liquidated with receipts.`}
         </div>
       )}
       {row.status === 'RELEASED' && !row.liquidation && (
@@ -1126,19 +1254,19 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'REFUND_DUE' && (
         <div className="alert warn">
-          Liquidated at {formatMoney(row.spent)}. {formatMoney(row.refundOutstanding)} of unspent cash is owed back to finance.
+          Liquidated at {formatMoney(row.cashSpent ?? row.spent)}. {formatMoney(row.refundOutstanding)} of unspent cash is owed back to finance.
         </div>
       )}
       {row.status === 'LIQUIDATED' && (
         <div className="alert ok">
-          {row.paidDirect ? 'Booked and paid directly by finance — nothing to liquidate.' : 'Liquidated.'} {formatMoney(row.spent)} spent{row.job ? <> and charged to {row.job.number}</> : <> against {row.for?.label}</>}
+          {row.paidDirect && row.amountReleased <= 0.005 ? 'Booked and paid directly by finance — nothing to liquidate.' : row.paidDirect ? 'Booked by finance and liquidated.' : 'Liquidated.'} {formatMoney(row.spent)} spent{row.job ? <> and charged to {row.job.number}</> : <> against {row.for?.label}</>}
           {row.excessDue > 0 && <>; the {formatMoney(row.excessDue)} over the cash released is reimbursed on the liquidation</>}
           {row.amountRefunded > 0 && <>; {formatMoney(row.amountRefunded)} of unspent cash came back</>}.
         </div>
       )}
       {row.status === 'CANCELLED' && row.cancelReason && <div className="alert warn">Cancelled — {row.cancelReason}</div>}
 
-      <RequestItemsCard items={row.items ?? []} total={row.amount} split={!!row.split} />
+      <RequestItemsCard items={row.items ?? []} total={row.amount} split={!!row.split} paidBy={!!row.isTravel} />
 
       <div className="grid grid-2">
         <div className="card">
@@ -1146,14 +1274,37 @@ export function BudgetRequestDetail() {
           <dl className="kv fin-settlement">
             <dt>Requested</dt>
             <dd className="mono">{formatMoney(row.amount)}</dd>
-            <dt>Released</dt>
-            <dd className="mono">{row.amountReleased > 0 ? formatMoney(row.amountReleased) : <span className="faint">not yet</span>}</dd>
+            {row.isTravel && (row.financePart ?? 0) > 0.005 && (
+              <>
+                <dt>Finance books (company card)</dt>
+                <dd className="mono">{formatMoney(row.financePart ?? 0)}</dd>
+                <dt>Booked so far</dt>
+                <dd className="mono">
+                  {(row.amountBooked ?? 0) > 0 ? formatMoney(row.amountBooked ?? 0) : <span className="faint">not yet</span>}
+                  {(row.toBook ?? 0) > 0.005 && (row.amountBooked ?? 0) > 0 && <span className="faint"> · {formatMoney(row.toBook ?? 0)} left to book</span>}
+                </dd>
+                <dt>Cash to the traveller</dt>
+                <dd className="mono">{formatMoney(row.cashPart ?? 0)}</dd>
+              </>
+            )}
+            <dt>{row.isTravel && (row.financePart ?? 0) > 0.005 ? 'Cash released' : 'Released'}</dt>
+            <dd className="mono">
+              {row.amountReleased > 0 ? formatMoney(row.amountReleased) : (row.cashPart ?? row.amount) <= 0.005 ? <span className="faint">no cash part</span> : <span className="faint">not yet</span>}
+            </dd>
             <dt>Liquidate by</dt>
             <dd>
               <Deadline row={row} />
             </dd>
             <dt>Spent</dt>
-            <dd className="mono">{row.liquidatedAt ? formatMoney(row.spent) : <span className="faint">not yet liquidated</span>}</dd>
+            <dd className="mono">
+              {row.liquidatedAt || (row.amountBooked ?? 0) > 0 ? formatMoney(row.spent) : <span className="faint">not yet liquidated</span>}
+              {(row.amountBooked ?? 0) > 0 && (row.cashSpent ?? 0) > 0 && (
+                <span className="faint">
+                  {' '}
+                  · {formatMoney(row.amountBooked ?? 0)} booked, {formatMoney(row.cashSpent ?? 0)} in cash
+                </span>
+              )}
+            </dd>
             {row.liquidatedAt && row.excessDue > 0 && (
               <>
                 <dt>Over the cash released — owed to {row.requestedBy.name}</dt>

@@ -18,6 +18,12 @@ export interface RequestLine {
   unitCost: string;
   /** Its own place (2026-11-11, a budget request charged item by item); null takes the request's own. */
   charge?: LineCharge | null;
+  /**
+   * A travel request's line finance books on the company card (2026-11-21);
+   * false, cash to the traveller. Undefined until somebody chooses: an air
+   * fare or a hotel line then starts as finance's (`financeLikely`).
+   */
+  financePays?: boolean;
 }
 
 /** A stored line, as the API sends it. */
@@ -33,7 +39,12 @@ export interface RequestItem {
   job?: { id: string; number: string; name: string } | null;
   costCategory?: { id: string; name: string } | null;
   officeBudgetLine?: { id: string; code: string; name: string } | null;
+  /** A travel request's line finance books (2026-11-21). */
+  financePays?: boolean;
 }
+
+/** An air fare, a flight or a hotel — what finance usually books on the company card. */
+export const financeLikely = (name: string) => /\b(air ?fare|flights?|plane|airlines?|air tickets?|plane tickets?|hotels?|accommodations?|accomodations?|lodging)\b/i.test(name);
 
 let nextKey = 0;
 const newKey = () => `rl${++nextKey}`;
@@ -50,6 +61,7 @@ export function linesFromItems(items: RequestItem[] | undefined, fallbackName: s
       unit: i.unit,
       unitCost: String(i.unitCost),
       charge: split ? chargeOf(i) : null,
+      financePays: !!i.financePays,
     }));
   }
   return fallbackAmount > 0 ? [{ ...blankRequestLine(), name: fallbackName, unitCost: String(fallbackAmount) }] : [blankRequestLine()];
@@ -105,7 +117,15 @@ export const linesPayload = (lines: RequestLine[], placeOf?: (l: RequestLine) =>
       unit: l.unit.trim() || 'pcs',
       unitCost: Number(l.unitCost) || 0,
       ...(placeOf ? chargeBody(placeOf(l)) : {}),
+      ...(l.financePays ? { financePays: true } : {}),
     }));
+
+/** A travel request's two parts, as the page shows them: finance books, the rest is cash. */
+export function paidByTotals(lines: RequestLine[]): { finance: number; cash: number } {
+  const sent = lines.filter((l) => !isBlankLine(l));
+  const finance = Math.round(sent.filter((l) => l.financePays).reduce((s, l) => s + lineAmount(l) * 100, 0)) / 100;
+  return { finance, cash: Math.round((linesTotal(lines) - finance) * 100) / 100 };
+}
 
 /** A budget request's lines charged item by item: where they go, and the request's own place each takes by default. */
 export interface LineCharging {
@@ -125,6 +145,7 @@ export function RequestLinesCard({
   attempted,
   hint,
   charging,
+  paidBy = false,
 }: {
   id: string;
   lines: RequestLine[];
@@ -133,8 +154,20 @@ export function RequestLinesCard({
   hint: string;
   /** Each line names its own place (2026-11-11, the budget request). */
   charging?: LineCharging;
+  /** A travel request (2026-11-21): each line says who pays it — finance on the company card, or cash to the traveller. */
+  paidBy?: boolean;
 }) {
-  const setLine = (key: string, patch: Partial<RequestLine>) => onChange(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const setLine = (key: string, patch: Partial<RequestLine>) =>
+    onChange(
+      lines.map((l) => {
+        if (l.key !== key) return l;
+        const next = { ...l, ...patch };
+        // Until somebody chooses, an air fare or a hotel line starts as finance's to book.
+        if (paidBy && patch.name !== undefined && l.financePays === undefined) return { ...next, financePays: financeLikely(patch.name) ? true : undefined };
+        return next;
+      }),
+    );
+  const parts = paidBy ? paidByTotals(lines) : null;
   const removeLine = (key: string) => {
     const rest = lines.filter((l) => l.key !== key);
     onChange(rest.length ? rest : [blankRequestLine()]);
@@ -163,6 +196,7 @@ export function RequestLinesCard({
             <col className="prq-col-qty" />
             <col className="prq-col-cost" />
             {charging && <col className="prq-col-charge" />}
+            {paidBy && <col className="prq-col-charge" />}
             <col className="prq-col-amount" />
             <col className="prq-col-remove" />
           </colgroup>
@@ -174,6 +208,7 @@ export function RequestLinesCard({
               <th className="right">Qty</th>
               <th className="right">Unit cost</th>
               {charging && <th>Charged to</th>}
+              {paidBy && <th>Paid by</th>}
               <th className="right">Amount</th>
               <th aria-label="Remove" />
             </tr>
@@ -236,6 +271,18 @@ export function RequestLinesCard({
                       />
                     </td>
                   )}
+                  {paidBy && (
+                    <td>
+                      <select
+                        aria-label={`Line ${i + 1} paid by`}
+                        value={l.financePays ? 'finance' : 'cash'}
+                        onChange={(e) => setLine(l.key, { financePays: e.target.value === 'finance' })}
+                      >
+                        <option value="cash">Cash to traveller</option>
+                        <option value="finance">Finance books (company card)</option>
+                      </select>
+                    </td>
+                  )}
                   <td className="right mono">{formatMoney(lineAmount(l))}</td>
                   <td>
                     <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
@@ -248,13 +295,19 @@ export function RequestLinesCard({
           </tbody>
         </table>
       </div>
+      {parts && (parts.finance > 0 || parts.cash > 0) && (
+        <p className="prq-hint">
+          <strong>Finance books:</strong> {formatMoney(parts.finance)} on the company card · <strong>Cash to the traveller:</strong> {formatMoney(parts.cash)}
+          {parts.cash > 0 ? ' — released in one voucher and liquidated with receipts.' : ' — nothing to liquidate.'}
+        </p>
+      )}
       <p className="prq-hint">{hint}</p>
     </section>
   );
 }
 
 /** The Breakdown card on a record page: the lines read-only, with their total. */
-export function RequestItemsCard({ items, total, split = false }: { items: RequestItem[]; total: number; split?: boolean }) {
+export function RequestItemsCard({ items, total, split = false, paidBy = false }: { items: RequestItem[]; total: number; split?: boolean; paidBy?: boolean }) {
   if (!items.length) return null;
   return (
     <div className="card">
@@ -268,6 +321,7 @@ export function RequestItemsCard({ items, total, split = false }: { items: Reque
               <th className="right">Qty</th>
               <th>Unit</th>
               <th className="right">Unit cost</th>
+              {paidBy && <th>Paid by</th>}
               <th className="right">Amount</th>
             </tr>
           </thead>
@@ -292,11 +346,12 @@ export function RequestItemsCard({ items, total, split = false }: { items: Reque
                 <td className="right mono">{i.quantity.toLocaleString('en-PH', { maximumFractionDigits: 3 })}</td>
                 <td>{i.unit}</td>
                 <td className="right mono">{formatMoney(i.unitCost)}</td>
+                {paidBy && <td>{i.financePays ? 'Finance (company card)' : 'Cash to traveller'}</td>}
                 <td className="right mono">{formatMoney(i.amount)}</td>
               </tr>
             ))}
             <tr>
-              <td colSpan={5} className="right">
+              <td colSpan={paidBy ? 6 : 5} className="right">
                 <strong>Total</strong>
               </td>
               <td className="right mono">

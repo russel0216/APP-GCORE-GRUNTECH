@@ -1,3 +1,4 @@
+import { REQUEST_MONEY, requestMoney } from './requestMoney';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 
@@ -80,7 +81,7 @@ export async function requestedByLine(jobId: string, own: OwnDocument = {}): Pro
     }),
     prisma.budgetRequest.findMany({
       where: { jobId, status: { in: [...REQUEST_IN_FLIGHT] }, ...(own.budgetRequestId ? { id: { not: own.budgetRequestId } } : {}) },
-      select: { costCategoryId: true, amount: true },
+      select: { costCategoryId: true, ...REQUEST_MONEY },
     }),
     // Charged line by line (2026-11-11): the receipts and items on this project.
     prisma.expenseClaimLine.findMany({
@@ -102,7 +103,8 @@ export async function requestedByLine(jobId: string, own: OwnDocument = {}): Pro
     if (liquidating.has(a.id)) continue;
     add(a.costCategoryId!, a.status === 'RELEASED' ? num(a.amountReleased) : num(a.amount));
   }
-  for (const r of requests) add(r.costCategoryId, num(r.amount));
+  // What is still waiting: a travel request's bookings are already on the ledger (INCURRED).
+  for (const r of requests) add(r.costCategoryId, requestMoney(r).waiting);
   for (const l of splitClaimLines) add(l.costCategoryId!, num(l.amount));
   for (const i of splitItems) add(i.costCategoryId!, num(i.amount));
   return out;

@@ -117,6 +117,20 @@
   min-width: 12rem;
 }
 
+/* A receipt's per diem tick and its foreign figure (2026-11-21): small, under the line's own boxes. */
+.fin-line-check {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.fin-line-foreign {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr 1fr;
+  gap: var(--s-1);
+}
+
 /* Office Budget (2026-11-10): the line's code is a short box beside its name. */
 .ob-code {
   width: 6rem;
