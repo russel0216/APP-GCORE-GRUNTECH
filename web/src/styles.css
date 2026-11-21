@@ -5986,3 +5986,17 @@ a.icon-row:hover {
   text-transform: uppercase;
   color: var(--faint);
 }
+
+/* The company's logo beside the G-CORE wordmark (2026-11-19). */
+.topbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-4);
+}
+
+.topbar-logo {
+  height: calc(var(--topbar-h) - var(--s-3));
+  width: auto;
+  max-width: 9rem;
+  object-fit: contain;
+}

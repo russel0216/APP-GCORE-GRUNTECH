@@ -21,6 +21,30 @@ interface Notification {
 
 export function Shell() {
   const { me, signOut } = useAuth();
+  // The company's logo beside the wordmark (2026-11-19), so it is plain whose
+  // G-CORE this is. Fetched with the bearer token; none set draws nothing.
+  const logoPath = me?.company?.logoPath ?? null;
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!logoPath) {
+      setLogoUrl(null);
+      return;
+    }
+    let live = true;
+    let made: string | null = null;
+    api
+      .getBlob('/company/logo')
+      .then((blob) => {
+        if (!live) return;
+        made = URL.createObjectURL(blob);
+        setLogoUrl(made);
+      })
+      .catch(() => live && setLogoUrl(null));
+    return () => {
+      live = false;
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [logoPath]);
   const location = useLocation();
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -354,6 +378,7 @@ export function Shell() {
       <header className="topbar">
         <Link to="/" className="topbar-brand">
           G-CORE
+          {logoUrl && <img className="topbar-logo" src={logoUrl} alt={me?.company?.name ?? 'Company logo'} />}
         </Link>
         {activeModule && (
           <span className="badge" style={{ letterSpacing: '0.06em' }}>
