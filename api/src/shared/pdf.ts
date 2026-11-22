@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { prisma } from '../prisma';
 import { isWorkingDay, workingDayDate } from './day';
 import { layoutSankey, type SankeyInput } from './sankey';
+import { printLogoPath } from './companyLogo';
 
 /**
  * The document engine (model §7).
@@ -277,7 +278,7 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   // into Settings and which print on every page of every document.
   const spec = safeSpec(input);
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
-  const company = row && safeCompany(row);
+  const company = row && safeCompany({ ...row, logoPath: await printLogoPath(row.logoPath) });
   pageLandscape = !!spec.landscape || !!spec.appendixOnly;
   const doc = new PDFDocument({
     size: 'A4',
@@ -1755,7 +1756,7 @@ export async function renderSchedule(input: PdfScheduleSpec): Promise<Buffer> {
     band: input.band.map((b) => ({ ...b, label: pdfSafe(b.label), value: pdfSafe(b.value), sub: t(b.sub) })),
   };
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
-  const company = row && safeCompany(row);
+  const company = row && safeCompany({ ...row, logoPath: await printLogoPath(row.logoPath) });
   pageLandscape = true;
   const size = spec.size ?? 'A3';
   const doc = new PDFDocument({
@@ -2294,7 +2295,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     },
   };
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
-  const company = row && safeCompany(row);
+  const company = row && safeCompany({ ...row, logoPath: await printLogoPath(row.logoPath) });
   const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 }, info: { Title: spec.title, Author: company?.name ?? 'G-CORE' } });
   const chunks: Buffer[] = [];
   doc.on('data', (c: Buffer) => chunks.push(c));

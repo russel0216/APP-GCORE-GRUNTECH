@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { logoImage } from '../shared/companyLogo';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -172,14 +171,11 @@ companyRoutes.get(
   '/logo',
   handler(async (_req, res) => {
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { logoPath: true } });
-    // The path is stored whole. On a copy of another install's database it
-    // names that machine's folder, so the same file name is tried in this
-    // install's upload folder before giving up.
-    const stored = company?.logoPath ?? null;
-    const here = stored ? attachmentPath(path.win32.basename(stored)) : null;
-    const file = stored && fs.existsSync(stored) ? stored : here && fs.existsSync(here) ? here : null;
-    if (!file) throw notFound('No logo is set in Company Settings');
-    res.sendFile(path.resolve(file));
+    // The top bar draws it about 40 px tall, while an uploaded logo may be
+    // print-sized (an 11.7 MB PNG took twenty seconds to arrive): a small copy.
+    const bytes = await logoImage(company?.logoPath, 160);
+    if (!bytes) throw notFound('No logo is set in Company Settings');
+    res.type('png').set('Cache-Control', 'private, max-age=300').send(bytes);
   }),
 );
 

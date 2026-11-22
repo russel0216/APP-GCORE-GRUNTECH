@@ -5999,4 +5999,8 @@ a.icon-row:hover {
   width: auto;
   max-width: 9rem;
   object-fit: contain;
+  /* The logo is a round emblem on a white square (a JPG keeps no
+     transparency): show the circle alone, so no white box sits on the
+     dark bar. */
+  clip-path: circle(47% at 50% 50%);
 }

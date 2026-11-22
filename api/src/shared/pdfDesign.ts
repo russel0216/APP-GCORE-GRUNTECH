@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import { prisma } from '../prisma';
 import { NOTHING_TO_LIST, breakPoint, formatDateTime, signoffColumns, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, type Signatory } from './pdf';
+import { printLogoPath } from './companyLogo';
 
 /**
  * Designed documents — a PDF laid out by an administrator.
@@ -1332,7 +1333,7 @@ export async function renderDesigned(design: PdfDesign, data: DesignData): Promi
   const company = await prisma.company.findUnique({ where: { id: 'company' } });
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries({ ...companyValues(company), ...data.fields })) values[k] = pdfSafe(v ?? '');
-  const logo = company?.logoPath && fs.existsSync(company.logoPath) ? company.logoPath : null;
+  const logo = await printLogoPath(company?.logoPath);
 
   const first = new Renderer(design, data, values, logo, 1);
   const pdf = await first.render();
