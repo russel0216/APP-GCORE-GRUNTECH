@@ -210,3 +210,44 @@ function splitInside(item: Prisma.ItemGetPayload<object>, groups: OrderLine[][])
     { timeout: 60000 },
   );
 }
+
+const DESC_MARK = 'seed.typedItemDescriptions20261123';
+
+/**
+ * Items filed from typed order lines before 2026-11-23 kept the line's name
+ * and dropped its description — the McGill fittings' model numbers, the
+ * XB4BS8445's "EMERGENCY STOP" — so a pull-out slip showed less than the
+ * order said. Once: an item filed that way with no description takes its
+ * order lines' description where they agree on one that says more than the
+ * name. The name is left as it is (it prints on documents already issued).
+ */
+export async function fillTypedItemDescriptions(): Promise<string[] | null> {
+  if (await prisma.setting.findUnique({ where: { key: DESC_MARK } })) return null;
+  const filed = await prisma.auditLog.findMany({
+    where: { entityType: 'item', action: 'CREATED', summary: { endsWith: 'added on receiving a purchase order line' } },
+    select: { entityId: true },
+  });
+  const filled: string[] = [];
+  for (const { entityId } of filed) {
+    const item = await prisma.item.findUnique({ where: { id: entityId }, select: { id: true, code: true, name: true, description: true } });
+    if (!item || item.description) continue;
+    const lines = await prisma.purchaseOrderItem.findMany({ where: { itemId: item.id }, select: { name: true, description: true } });
+    const details = new Set(lines.map((l) => typedIdentity(l).description).filter((d): d is string => !!d));
+    if (details.size !== 1) continue;
+    const [description] = details;
+    if (item.name.toLowerCase().includes(description.toLowerCase())) continue;
+    await prisma.$transaction([
+      prisma.item.update({ where: { id: item.id }, data: { description } }),
+      prisma.auditLog.create({
+        data: { entityType: 'item', entityId: item.id, action: 'UPDATED', summary: `${item.code}: description "${description}" taken from its purchase order line`, actorId: null },
+      }),
+    ]);
+    filled.push(`${item.code} ${description}`);
+  }
+  await prisma.setting.upsert({
+    where: { key: DESC_MARK },
+    create: { key: DESC_MARK, value: { at: new Date().toISOString(), filled }, description: 'Typed items given their order line description once, 2026-11-23' },
+    update: {},
+  });
+  return filled;
+}

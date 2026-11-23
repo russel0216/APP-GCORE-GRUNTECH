@@ -17,7 +17,7 @@ import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../s
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases, syncBudgetRequestCommitments } from '../src/shared/budgetRequests';
 import { markBookedTravelRequests } from '../src/shared/travelSplit';
-import { splitMergedTypedItems } from '../src/shared/typedItemSplit';
+import { fillTypedItemDescriptions, splitMergedTypedItems } from '../src/shared/typedItemSplit';
 import { fixPartNumbers } from '../src/shared/partNumberFixes';
 import { seedOfficeBudgets } from '../src/shared/officeBudget';
 import { applyDeclaredValueRule } from '../src/shared/declaredValue';
@@ -1184,6 +1184,8 @@ async function main() {
     const typedSplit = await splitMergedTypedItems();
     if (typedSplit?.split.length) console.log(`  · Split ${typedSplit.split.length} item(s) merged by name: ${typedSplit.split.join('; ')}`);
     if (typedSplit?.skipped.length) console.log(`  · Left for a hand repair — item(s) merged by name: ${typedSplit.skipped.join('; ')}`);
+    const typedDescs = await fillTypedItemDescriptions();
+    if (typedDescs?.length) console.log(`  · Gave ${typedDescs.length} item(s) the description of their order line`);
     const partFixes = await fixPartNumbers();
     if (partFixes) console.log(`  · Corrected ${partFixes} part number(s) typed wrong on an approved request`);
     const committedRequests = await syncBudgetRequestCommitments();
