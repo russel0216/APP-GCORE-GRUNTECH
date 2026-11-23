@@ -58,6 +58,7 @@ import {
   formatAmount,
   formatDate,
   formatShortDate,
+  formatQuantity,
   statusLabel,
   companyCurrency,
   type PdfSection,
@@ -220,7 +221,7 @@ export function cashRequestSections(input: {
  * carries the position too. A settled or closed document prints the line
  * as it stands and says it takes nothing more.
  */
-export function budgetSections(b: ChargeBudget | OfficeCharge, lineName: string, noun: 'This claim' | 'This advance' | 'This request', currency: string): PdfSection[] {
+export function budgetSections(b: ChargeBudget | OfficeCharge, lineName: string, noun: 'This claim' | 'This advance' | 'This request' | 'This bill', currency: string): PdfSection[] {
   const money = (n: number) => formatMoney(n, currency);
   const office = b.source === 'office' ? b : null;
   const rows: PdfTotal[] = [
@@ -2487,6 +2488,119 @@ billRoutes.get(
       budget: await billOffice(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
+  }),
+);
+
+/**
+ * The supplier bill's paper is a REQUEST FOR PAYMENT (2026-11-23, the
+ * owner's call: "print supplier bill (request for payment)"): who is to be
+ * paid, against what (the order, the receiving, the project or office line),
+ * the lines, the money down to the net payable, what was paid and what is
+ * left, Prepared by and the bill's approval route — "Pending" until each
+ * step signs. Its files (the supplier's invoice) print behind it unless
+ * `?attachments=0`.
+ */
+billRoutes.get(
+  '/:id/pdf',
+  requireView('gfin', 'ap'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await prisma.supplierBill.findUnique({
+      where: { id: req.params.id },
+      include: { ...billInclude, createdBy: { select: { id: true, name: true } }, allocations: { include: { payment: { select: { number: true, paymentDate: true, method: true, reference: true } } }, orderBy: { createdAt: 'asc' } } },
+    });
+    if (!row) throw notFound('Supplier bill not found');
+    assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
+    const bill = presentBill(row);
+    const currency = await companyCurrency();
+    const money = (n: number) => formatMoney(n, currency);
+
+    const chargedTo = row.job
+      ? `${row.job.number} — ${row.job.name}${row.costCategory ? ` · ${row.costCategory.name}` : ''}`
+      : row.officeBudgetLine
+        ? `${row.officeBudgetLine.budget.name} — ${row.officeBudgetLine.code} ${row.officeBudgetLine.name}`
+        : row.order
+          ? `Against ${row.order.number}`
+          : 'Overheads';
+    const totals: PdfTotal[] = [
+      { label: 'Subtotal', value: money(bill.subtotal) },
+      { label: `VAT (${ratePct(bill.vatRate)})`, value: money(bill.vatAmount) },
+      { label: 'Total', value: money(bill.total) },
+    ];
+    if (bill.ewtAmount > 0) totals.push({ label: `Less: EWT (${ratePct(bill.ewtRate)})`, value: money(bill.ewtAmount) });
+    totals.push({ label: 'Net payable', value: money(bill.netPayable) });
+    if (bill.amountPaid > 0) {
+      totals.push({ label: 'Less: paid', value: money(bill.amountPaid) }, { label: 'Amount requested', value: money(Math.max(0, bill.outstanding)) });
+    }
+    totals[totals.length - 1].bold = true;
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 3,
+        fields: [
+          { label: 'Pay to', value: row.supplier.name },
+          { label: 'Supplier invoice no.', value: row.supplierInvoiceNo ?? '—' },
+          { label: 'Bill date', value: formatDate(row.billDate) },
+          { label: 'Date of delivery', value: row.deliveryDate ? formatDate(row.deliveryDate) : '—' },
+          { label: 'Payment terms', value: bill.termsLabel || '—' },
+          { label: 'Due date', value: row.dueDate ? formatDate(row.dueDate) : '—' },
+          { label: 'Purchase order', value: row.order?.number ?? '—' },
+          { label: 'Incoming report', value: row.receiving?.number ?? '—' },
+          { label: 'Purchaser / buyer', value: row.purchaser?.name ?? row.purchaserName ?? '—' },
+          { label: 'Charged to', value: chargedTo },
+          { label: 'Status', value: statusLabel(row.status) },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Particulars',
+        head: ['No.', 'Description', 'Qty', `Unit price (${currency})`, `Amount (${currency})`],
+        align: ['right', 'left', 'right', 'right', 'right'],
+        rows: bill.lines.map((l, n) => [String(n + 1), l.description, formatQuantity(l.quantity), formatAmount(l.unitPrice), formatAmount(l.amount)]),
+      },
+      { kind: 'totals', rows: totals },
+    ];
+    if (row.allocations.length) {
+      sections.push({
+        kind: 'table',
+        title: 'Payments made',
+        head: ['Payment', 'Date', 'Method', 'Reference', `Amount (${currency})`],
+        align: ['left', 'left', 'left', 'left', 'right'],
+        rows: row.allocations.map((a) => [a.payment.number, formatShortDate(a.payment.paymentDate), statusLabel(a.payment.method), a.payment.reference ?? '—', formatAmount(num(a.amount))]),
+      });
+    }
+    const office = await billOffice(row);
+    if (office) sections.push(...budgetSections(office, office.line.name, 'This bill', currency));
+    if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
+
+    const preparer = row.createdBy ?? { id: me.id, name: me.name };
+    const slots = await approvalSlots(
+      'supplier_bill',
+      row.id,
+      row.status === 'DRAFT' ? { amount: bill.total, requesterId: preparer.id, jobId: row.jobId ?? undefined } : undefined,
+    );
+    const bare = await renderDocument({
+      title: 'Request for Payment',
+      documentNumber: row.number,
+      date: row.billDate,
+      reference: `${row.supplier.name}${row.supplierInvoiceNo ? ` — invoice ${row.supplierInvoiceNo}` : ''}`,
+      sections,
+      signatories: [
+        { role: 'Prepared by', name: preparer.name, ...(await contactOf(preparer.id)), at: row.createdAt },
+        ...(slots.length ? slotSignatories(slots) : awaitsApproval(row.status) ? [{ role: 'Approved by' }] : []),
+      ],
+    });
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('supplier_bill', row.id);
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Request for payment', number: row.number, reference: row.supplier.name });
+
+    await audit(
+      { entityType: 'supplier_bill', entityId: row.id, action: 'EXPORTED', summary: `Printed the request for payment ${row.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Request for Payment', number: row.number, author: preparer.name, date: row.billDate })));
+    res.send(pdf);
   }),
 );
 

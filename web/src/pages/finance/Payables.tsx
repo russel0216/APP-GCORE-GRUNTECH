@@ -1165,6 +1165,8 @@ export function BillDetail() {
             )}
           </>
         }
+        // The bill's paper is the Request for Payment, its files behind it (2026-11-23).
+        print={`/api/supplier-bills/${row.id}/pdf`}
         more={[
           canCancel && {
             label: 'Cancel bill',

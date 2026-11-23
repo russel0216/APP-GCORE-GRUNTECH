@@ -1035,12 +1035,25 @@ clockRoutes.get(
  * a prepared one unlikely to match. The photo kept with every entry is what
  * HR checks a doubtful one against.
  */
+/** A form field that is a number, or nothing — an empty field is nothing, never 0. */
+const formNumber = (min: number, max: number) =>
+  z.preprocess((v) => (v === '' || v == null ? undefined : Number(v)), z.number().min(min).max(max).optional());
+
 const clockSchema = z.object({
   action: z.enum(['IN', 'OUT']),
-  method: z.enum(['FACE', 'PIN', 'BIOMETRIC']).default('FACE'),
+  /**
+   * TAP is the one-tap clock-out (2026-11-23, the owner's call: "remove
+   * clock out capture") — no camera, no reason asked; refused on a clock-in,
+   * which keeps its face check.
+   */
+  method: z.enum(['FACE', 'PIN', 'BIOMETRIC', 'TAP']).default('FACE'),
   fallbackReason: z.string().optional(),
   /** The liveness challenge token the burst of `frames` answers. */
   challenge: z.string().optional(),
+  /** Where the punch was made: the phone's GPS, when the browser gave it. */
+  lat: formNumber(-90, 90),
+  lng: formNumber(-180, 180),
+  accuracy: formNumber(0, 1_000_000),
 });
 
 const CLOCK_MESSAGES: Record<FaceRefusal | 'replay', string> = {
@@ -1126,7 +1139,9 @@ clockRoutes.post(
     try {
       const me = currentUser(req);
       const body = parseBody(clockSchema, req.body);
+      if (body.method === 'TAP' && body.action !== 'OUT') throw badRequest('A clock-in is made with your face, or the fallback with a reason');
       const settings = await hrSettings();
+      const place = body.lat != null && body.lng != null ? { lat: D(body.lat.toFixed(6)), lng: D(body.lng.toFixed(6)), accuracy: body.accuracy != null ? Math.round(body.accuracy) : null } : null;
 
       // Somebody separated yesterday is still flagged active until a sweep runs,
       // and nothing else guarantees one ran today. Narrowed to the caller: this
@@ -1255,13 +1270,13 @@ clockRoutes.post(
         });
         if (!decision.ok) throw await refuse(decision.reason, CLOCK_MESSAGES[decision.reason], detail);
         matchedScore = fourPlaces(match.own);
-      } else if (!body.fallbackReason?.trim()) {
+      } else if (body.method !== 'TAP' && !body.fallbackReason?.trim()) {
         throw badRequest('Say why face recognition was not used — it is recorded against the entry');
       }
 
       const now = new Date();
       const today = dayKey(now);
-      const fallbackNote = body.method === 'FACE' ? null : body.fallbackReason!.trim();
+      const fallbackNote = body.method === 'FACE' || body.method === 'TAP' ? null : body.fallbackReason!.trim();
 
       // The entry is written first, and only if nothing beat this request to
       // it (a double tap, two tabs): IN claims a day with no time in, OUT a
@@ -1279,6 +1294,7 @@ clockRoutes.post(
           status: arrival.status,
           lateMinutes: arrival.lateMinutes,
           ...(fallbackNote ? { notes: fallbackNote } : {}),
+          ...(place ? { timeInLat: place.lat, timeInLng: place.lng, timeInAccuracy: place.accuracy } : {}),
         };
         // A new day's row, unless one is there already (a correction, or the
         // other tap) — then only a row with no time in yet is claimed.
@@ -1316,6 +1332,7 @@ clockRoutes.post(
             timeOutMethod: body.method,
             timeOutScore: matchedScore != null ? D(matchedScore) : null,
             timeOutNotes: fallbackNote,
+            ...(place ? { timeOutLat: place.lat, timeOutLng: place.lng, timeOutAccuracy: place.accuracy } : {}),
             workedMinutes: worked,
             undertimeMinutes: early,
           },
@@ -1477,11 +1494,73 @@ attendanceRoutes.get(
           timeOutPhoto: mayOpen(r.employeeId) ? r.timeOutPhoto : null,
           timeInScore: r.timeInScore ? num(r.timeInScore) : null,
           timeOutScore: r.timeOutScore ? num(r.timeOutScore) : null,
+          ...placeOf(r),
           workedHours: Math.round((r.workedMinutes / 60) * 100) / 100,
         })),
         total,
         q,
       ),
+    });
+  }),
+);
+
+/** A punch's position as numbers (null where none was given). */
+function placeOf(r: { timeInLat: Prisma.Decimal | null; timeInLng: Prisma.Decimal | null; timeOutLat: Prisma.Decimal | null; timeOutLng: Prisma.Decimal | null }) {
+  return {
+    timeInLat: r.timeInLat != null ? num(r.timeInLat) : null,
+    timeInLng: r.timeInLng != null ? num(r.timeInLng) : null,
+    timeOutLat: r.timeOutLat != null ? num(r.timeOutLat) : null,
+    timeOutLng: r.timeOutLng != null ? num(r.timeOutLng) : null,
+  };
+}
+
+/** At most this many rows in one Excel report. */
+const REPORT_ROWS = 20_000;
+
+/**
+ * The HR attendance report (2026-11-23, the owner's call: "Excel report for
+ * HR — with location"): every entry the register would list under the same
+ * filters and the same access rule, not paged, with where each punch was
+ * made. The browser writes the .xlsx from it. Audited before it goes out.
+ */
+attendanceRoutes.get(
+  '/report',
+  requireAny('ghr.attendance.view_all', 'ghr.attendance.view_own', 'ghr.dashboard.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const me = currentUser(req);
+    const where = attendanceScoped(me, attendanceListWhere(q));
+    const total = await prisma.attendance.count({ where });
+    if (total > REPORT_ROWS) throw badRequest(`That is ${total.toLocaleString()} entries — narrow the dates to ${REPORT_ROWS.toLocaleString()} or fewer`);
+    const rows = await prisma.attendance.findMany({
+      where,
+      include: { employee: { select: { employeeNo: true, firstName: true, lastName: true, position: true, industry: { select: { code: true } } } } },
+      orderBy: [{ date: 'asc' }, { employee: { lastName: 'asc' } }],
+    });
+    await audit(
+      { entityType: 'attendance', entityId: 'list', action: 'EXPORTED', summary: `Exported the attendance report with locations (${rows.length} entr${rows.length === 1 ? 'y' : 'ies'})` },
+      req,
+    );
+    res.json({
+      rows: rows.map((r) => ({
+        date: r.date.toISOString().slice(0, 10),
+        employeeNo: r.employee.employeeNo,
+        name: `${r.employee.lastName}, ${r.employee.firstName}`,
+        position: r.employee.position,
+        team: r.employee.industry?.code ?? null,
+        status: r.status,
+        timeIn: r.timeIn,
+        timeInMethod: r.timeInMethod,
+        timeInAccuracy: r.timeInAccuracy,
+        timeOut: r.timeOut,
+        timeOutMethod: r.timeOutMethod,
+        timeOutAccuracy: r.timeOutAccuracy,
+        ...placeOf(r),
+        workedHours: Math.round((r.workedMinutes / 60) * 100) / 100,
+        lateMinutes: r.lateMinutes,
+        undertimeMinutes: r.undertimeMinutes,
+        notes: [r.notes, r.timeOutNotes].filter(Boolean).join(' · ') || null,
+      })),
     });
   }),
 );

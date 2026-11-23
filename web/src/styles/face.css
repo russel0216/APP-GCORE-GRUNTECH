@@ -239,3 +239,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The one-tap clock-out puts the camera away (2026-11-23): the frame stays
+   mounted for the camera hook, and its own display rule must not show it. */
+.camera-frame[hidden] {
+  display: none;
+}

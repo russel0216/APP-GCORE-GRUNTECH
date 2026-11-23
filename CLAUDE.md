@@ -977,6 +977,46 @@ create one, popup window so it will retain on the page".
   source scan, and this database's role holders) — compare with the last
   commit before reading a failure there as a regression.
 
+## The owner's batch of 2026-11-23
+
+- **The clock-out is ONE TAP, with no camera** (the owner's call: "remove
+  clock out capture"; his answer: one tap, the location kept). `ClockMethod.TAP`
+  on `POST /clock` — a clock-OUT only (a clock-in by tap is a 400: it keeps its
+  face check or the fallback with a reason), no face, no liveness, no reason
+  asked, no photo. The Clock page puts the camera away (`tapOut`: clocked in
+  and not out, enrolled or not — the frame stays mounted, `hidden`) and shows
+  a single Clock Out button. The register shows the method as "tap".
+- **Every punch carries where it was made**: `Attendance.timeInLat/Lng/
+  Accuracy` and `timeOutLat/Lng/Accuracy` (6 decimals; metres), sent by the
+  page as `lat`, `lng`, `accuracy` from the phone's GPS (`web/src/lib/geo.ts`,
+  asked only at the button, never watched; a refusal or a timeout never stops
+  the punch — the record has no location and the toast says why). No outside
+  service names the place: the register's "Map" link and the report open
+  Google Maps on the coordinates. Days before have none.
+- **The HR Excel report**: Attendance › ⋯ › "Excel report (with location)" —
+  `GET /attendance/report` (the register's own where-builder and access rule,
+  not paged, 20,000 rows at most, audited EXPORTED) and the .xlsx written in
+  the browser by `lib/spreadsheetWrite.ts`, a dynamic import so the main
+  bundle never carries SheetJS. One row per day: employee, team, status, time
+  in / out with how each was made, each punch's coordinates, accuracy and a
+  map link, hours, late, undertime, notes. The register gained a Dates filter
+  (`from` / `to`, which the API already read).
+- **A purchase order takes its request's files**: `POST /purchase-orders`
+  copies the `purchase_request` attachments (each request of a batch) onto
+  the order after the commit (`copyAttachments`, "From purchase request …";
+  a failed copy never fails the order). A file added to the request later
+  stays there.
+- **The supplier bill prints as a REQUEST FOR PAYMENT**: `GET
+  /supplier-bills/:id/pdf` (the bill's view rule) — Pay to, the supplier's
+  invoice, dates, terms, the order and incoming report, the purchaser, what it
+  is charged to, the particulars, the money down to Net payable (less what was
+  paid: "Amount requested"), the payments made, the office budget block where
+  one is charged, Prepared by and the bill's route ("Pending" until signed),
+  its files behind it (`?attachments=0` bare). Print on the bill's page.
+- **The canvass sheet prints every remark**: each supplier's remarks and the
+  remark typed on a quoted line ("Supplier, <line description>: …") join the
+  canvass's notes under Remarks.
+
 ## Verification
 
 ```bash

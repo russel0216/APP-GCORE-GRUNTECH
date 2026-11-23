@@ -7,7 +7,7 @@ import { prisma } from '../prisma';
 import { termsSections } from '../shared/procurementTerms';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
-import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -2914,9 +2914,24 @@ canvassRoutes.get(
     }
 
     const recommended = view.suppliers.find((s) => s.id === view.recommendedRowId);
+    // Each supplier's remarks, and a remark typed on one of its quoted lines
+    // (2026-11-23, the owner's report: the remarks were missing on the paper).
+    const supplierRemarks = view.suppliers.flatMap((s) => {
+      const out: string[] = [];
+      if (s.remarks?.trim()) out.push(`${s.supplier.name}: ${s.remarks.trim()}`);
+      for (const q of s.quotes as { requestItemId: string; remarks?: string | null }[]) {
+        if (!q.remarks?.trim()) continue;
+        const l = lines.find((x) => x.id === q.requestItemId);
+        // The line's full description, so four "THHN WIRE" lines are told apart.
+        const what = l ? [l.partNumber, l.description || l.name].filter(Boolean).join(' — ') : 'a line';
+        out.push(`${s.supplier.name}, ${what}: ${q.remarks.trim()}`);
+      }
+      return out;
+    });
     const remarks = [
       recommended && !recommended.isSelected ? `Recommended: ${recommended.supplier.name}.` : null,
       canvass.notes,
+      ...supplierRemarks,
     ].filter(Boolean);
     if (remarks.length) sections.push({ kind: 'text', title: 'Remarks', body: remarks.join('\n') });
     if (orders.length) {
@@ -4043,6 +4058,16 @@ purchaseOrderRoutes.post(
       );
       return totals ?? created;
     });
+
+    // The request's files go with it to the order (2026-11-23, the owner's
+    // call: "PR attachment till purchase order, same") — copies, captioned,
+    // after the commit; a failed copy never fails the order.
+    const fromRequests = batch ? batch.prs : pr ? [pr] : [];
+    for (const r of fromRequests) {
+      await copyAttachments({ entityType: 'purchase_request', entityId: r.id }, { entityType: 'purchase_order', entityId: po.id }, `From purchase request ${r.number}`, me.id).catch((err) =>
+        console.error('[procurement] request files not copied', err),
+      );
+    }
 
     res.status(201).json({ ...po, total: num(po.total), subtotal: num(po.subtotal), discountPct: num(po.discountPct), discountAmount: num(po.discountAmount) });
   }),

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, downloadBlob, qs } from '../../lib/api';
 import { useAuth, mayEditPage } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -362,6 +362,11 @@ interface AttendanceRow {
   notes: string | null;
   /** The clock-out fallback's reason. */
   timeOutNotes: string | null;
+  /** Where each punch was made (2026-11-23), when the phone gave it. */
+  timeInLat?: number | null;
+  timeInLng?: number | null;
+  timeOutLat?: number | null;
+  timeOutLng?: number | null;
   employee: {
     id: string;
     employeeNo: string;
@@ -389,12 +394,17 @@ function PunchMethod({
   score,
   photoId,
   notes,
+  lat,
+  lng,
 }: {
   which: 'In' | 'Out';
   method: string | null;
   score: number | null;
   photoId: string | null;
   notes: string | null;
+  /** Where the punch was made (2026-11-23), when the phone gave it. */
+  lat?: number | null;
+  lng?: number | null;
 }) {
   const toast = useToast();
   if (!method) return null;
@@ -434,14 +444,113 @@ function PunchMethod({
           Photo
         </button>
       )}
+      {lat != null && lng != null && (
+        <a
+          className="btn btn-sm btn-ghost"
+          href={`https://www.google.com/maps?q=${lat},${lng}`}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Where the clock-${which.toLowerCase()} was made, on Google Maps`}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          Map
+        </a>
+      )}
     </span>
   );
 }
 
+/** "8:05 AM" in Manila, for the report's cells. */
+const reportTime = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true }) : '';
+
+type ReportRow = {
+  date: string;
+  employeeNo: string | null;
+  name: string;
+  position: string | null;
+  team: string | null;
+  status: string;
+  timeIn: string | null;
+  timeInMethod: string | null;
+  timeInAccuracy: number | null;
+  timeInLat: number | null;
+  timeInLng: number | null;
+  timeOut: string | null;
+  timeOutMethod: string | null;
+  timeOutAccuracy: number | null;
+  timeOutLat: number | null;
+  timeOutLng: number | null;
+  workedHours: number;
+  lateMinutes: number;
+  undertimeMinutes: number;
+  notes: string | null;
+};
+
+/** A punch's place as the sheet's cells: the coordinates, how near, and a Google Maps link. */
+function placeCells(lat: number | null, lng: number | null, accuracy: number | null) {
+  if (lat == null || lng == null) return ['no location given', '', ''];
+  return [`${lat.toFixed(6)}, ${lng.toFixed(6)}`, accuracy ?? '', { text: 'Open map', link: `https://www.google.com/maps?q=${lat},${lng}` }];
+}
+
+const METHOD_WORD: Record<string, string> = { FACE: 'Face', PIN: 'PIN', BIOMETRIC: 'Biometric', MANUAL: 'Correction', TAP: 'Tap' };
+
 export function AttendanceRegister() {
   const { can } = useAuth();
+  const toast = useToast();
+  const [params] = useSearchParams();
   const [editing, setEditing] = useState<AttendanceRow | null>(null);
   const [reload, setReload] = useState(0);
+
+  /**
+   * The Excel report (2026-11-23, the owner's call): every entry the list's
+   * filters name — the same query, read off the address — with where each
+   * punch was made, written in the browser.
+   */
+  async function excelReport() {
+    try {
+      const query: Record<string, string> = {};
+      for (const key of ['from', 'to', 'status', 'missingOut', 'employeeId']) {
+        const v = params.get(key);
+        if (v) query[key] = v;
+      }
+      const search = params.get('q');
+      if (search) query.search = search;
+      const { rows } = await api.get<{ rows: ReportRow[] }>(`/attendance/report${qs(query)}`);
+      if (!rows.length) {
+        toast('error', 'Nothing to report for these filters');
+        return;
+      }
+      const { downloadWorkbook } = await import('../../lib/spreadsheetWrite');
+      downloadWorkbook(
+        `Attendance ${query.from ?? rows[0].date} to ${query.to ?? rows[rows.length - 1].date}.xlsx`,
+        'Attendance',
+        ['Date', 'Employee no.', 'Employee', 'Position', 'Team', 'Status', 'Time in', 'In by', 'In location', 'In accuracy (m)', 'In map', 'Time out', 'Out by', 'Out location', 'Out accuracy (m)', 'Out map', 'Hours', 'Late (min)', 'Undertime (min)', 'Notes'],
+        rows.map((r) => [
+          r.date,
+          r.employeeNo ?? '',
+          r.name,
+          r.position ?? '',
+          r.team ?? '',
+          label(r.status),
+          reportTime(r.timeIn),
+          r.timeInMethod ? (METHOD_WORD[r.timeInMethod] ?? r.timeInMethod) : '',
+          ...(r.timeIn ? placeCells(r.timeInLat, r.timeInLng, r.timeInAccuracy) : ['', '', '']),
+          reportTime(r.timeOut),
+          r.timeOutMethod ? (METHOD_WORD[r.timeOutMethod] ?? r.timeOutMethod) : '',
+          ...(r.timeOut ? placeCells(r.timeOutLat, r.timeOutLng, r.timeOutAccuracy) : ['', '', '']),
+          r.workedHours,
+          r.lateMinutes,
+          r.undertimeMinutes,
+          r.notes ?? '',
+        ]),
+        [11, 13, 26, 22, 7, 10, 10, 9, 22, 9, 10, 10, 9, 22, 9, 10, 7, 9, 11, 30],
+      );
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'The report could not be made');
+    }
+  }
 
   const columns: Column<AttendanceRow>[] = [
     {
@@ -507,13 +616,15 @@ export function AttendanceRegister() {
       render: (r) =>
         r.timeInMethod || r.timeOutMethod ? (
           <span className="att-method">
-            <PunchMethod which="In" method={r.timeInMethod} score={r.timeInScore} photoId={r.timeInPhoto} notes={r.notes} />
+            <PunchMethod which="In" method={r.timeInMethod} score={r.timeInScore} photoId={r.timeInPhoto} notes={r.notes} lat={r.timeInLat} lng={r.timeInLng} />
             <PunchMethod
               which="Out"
               method={r.timeOutMethod}
               score={r.timeOutScore}
               photoId={r.timeOutPhoto}
               notes={r.timeOutNotes}
+              lat={r.timeOutLat}
+              lng={r.timeOutLng}
             />
           </span>
         ) : (
@@ -543,6 +654,7 @@ export function AttendanceRegister() {
         searchPlaceholder="Search employee name or number…"
         onRowClick={mayEditPage(can, 'ghr', 'attendance') ? (r) => r.canEdit && setEditing(r) : undefined}
         emptyTitle="No attendance recorded for this range"
+        menuItems={[{ label: 'Excel report (with location)', hint: 'Every entry under these filters, with where each punch was made', onSelect: excelReport }]}
         summary={(raw) => {
           const sum = raw as unknown as { missingOut: number } | undefined;
           if (!sum) return null;
@@ -557,6 +669,7 @@ export function AttendanceRegister() {
           );
         }}
         filters={[
+          { key: 'from', toKey: 'to', label: 'Dates', type: 'dateRange' },
           {
             key: 'missingOut',
             label: 'Clock-out',

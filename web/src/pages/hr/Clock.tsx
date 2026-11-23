@@ -7,6 +7,7 @@ import { ErrorBox, Field, Loading, StatusBadge, formatDateTime, formatTime, useT
 import { FaceSamplesPanel } from './FaceSamples';
 import { AttendanceIssues } from './AttendanceIssues';
 import { ATTENDANCE_TONES } from './Dashboard';
+import { addPosition, currentPosition } from '../../lib/geo';
 
 /**
  * The time clock.
@@ -403,12 +404,23 @@ export function Clock() {
     return () => clearInterval(t);
   }, []);
 
+  /**
+   * Clocked in and not out: the next punch is a one-tap clock-out with no
+   * camera (2026-11-23, the owner's call: "remove clock out capture") — the
+   * phone's location is kept instead. It needs no face, so it is offered
+   * whether or not the person is enrolled; enrolling waits for the next day.
+   */
+  const tapOut = !!state?.today?.timeIn && !state?.today?.timeOut && !adding;
+
   useEffect(() => {
     // The camera is for clocking in AND for enrolling, so it starts once we
-    // know there is someone to recognise or to enrol.
-    if (state?.employee) camera.start();
+    // know there is someone to recognise or to enrol — and is put away while
+    // all that is left is the one-tap clock-out.
+    if (!state?.employee) return;
+    if (tapOut) camera.stop();
+    else camera.start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.employee?.id]);
+  }, [state?.employee?.id, tapOut]);
 
   const liveness = !!state?.liveness;
 
@@ -463,6 +475,27 @@ export function Clock() {
     }
   }
 
+  /** The one-tap clock-out: no camera, the phone's location kept. */
+  async function tapClockOut() {
+    setError(null);
+    setBusy('sending');
+    try {
+      const form = new FormData();
+      form.set('action', 'OUT');
+      form.set('method', 'TAP');
+      const { position, problem } = await currentPosition();
+      addPosition(form, position);
+      const result = await api.post<{ message: string }>('/clock', form);
+      toast('ok', problem ? `${result.message}. ${problem}` : result.message);
+      await load();
+    } catch (err) {
+      setError(err);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function punch(action: 'IN' | 'OUT', method: 'FACE' | 'PIN' | 'BIOMETRIC') {
     setError(null);
     try {
@@ -470,10 +503,14 @@ export function Clock() {
       form.set('action', action);
       form.set('method', method);
       if (method !== 'FACE') form.set('fallbackReason', fallbackForm.reason);
+      // Where the punch was made — asked as the button is pressed, read while
+      // the camera takes its capture.
+      const where = currentPosition();
 
       // A fallback entry keeps its photo too, as evidence, but answers no
       // challenge: the liveness gate is the face clock's.
       const captured = camera.mode === 'live' ? await takeCapture(form, 'clock', method === 'FACE' && liveness) : false;
+      addPosition(form, (await where).position);
       setBusy('sending');
       if (!captured && method === 'FACE') {
         throw new Error('The camera has not started yet — give it a moment, or use the fallback.');
@@ -648,6 +685,9 @@ export function Clock() {
 
           <div
             className="camera-frame"
+            // Kept mounted (the camera hook holds its video), hidden while the
+            // one-tap clock-out is all that is left.
+            hidden={tapOut}
             style={
               camera.shape
                 ? ({ '--cam-w': camera.shape.w, '--cam-h': camera.shape.h } as React.CSSProperties)
@@ -695,7 +735,7 @@ export function Clock() {
               </div>
             )}
           </div>
-          {camera.mode === 'live' && (
+          {camera.mode === 'live' && !tapOut && (
             <p className="faint camera-hint">
               {liveness
                 ? 'Put your face inside the oval, in good light. The clock will ask you to blink or turn your head.'
@@ -703,13 +743,13 @@ export function Clock() {
             </p>
           )}
           {/* Read out as it changes: the sample to take, then what the ring asks for. */}
-          {(enrolling || prompt) && (
+          {(enrolling || prompt) && !tapOut && (
             <p className="face-prompt" aria-live="polite">
               {prompt}
             </p>
           )}
 
-          {enrolling ? (
+          {enrolling && !tapOut ? (
             <>
               {!adding && (
                 <div className="alert info">
@@ -754,6 +794,16 @@ export function Clock() {
                   </button>
                 )
               )}
+            </>
+          ) : tapOut ? (
+            <>
+              <p className="faint">
+                Clocked in at {formatDateTime(today!.timeIn)}. Clocking out needs no camera — your phone's
+                location is recorded with it.
+              </p>
+              <button className="btn btn-primary btn-block clock-btn" onClick={tapClockOut} disabled={busy !== null}>
+                {busy === 'sending' ? 'Clocking out…' : 'Clock Out'}
+              </button>
             </>
           ) : done ? (
             <div className="alert ok hraud-flush">

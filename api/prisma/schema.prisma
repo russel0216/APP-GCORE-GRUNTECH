@@ -3885,6 +3885,8 @@ enum ClockMethod {
   PIN
   BIOMETRIC
   MANUAL
+  /// A one-tap clock-out with no camera (2026-11-23) — its location is the record.
+  TAP
 }
 
 enum AttendanceStatus {
@@ -3909,11 +3911,19 @@ model Attendance {
   timeInPhoto  String?
   /// Match distance at clock-in, kept so a questionable match can be reviewed.
   timeInScore  Decimal?     @db.Decimal(6, 4)
+  /// Where the punch was made: the phone's GPS and how far off it may be,
+  /// in metres (2026-11-23). Null where the browser gave none.
+  timeInLat      Decimal? @db.Decimal(9, 6)
+  timeInLng      Decimal? @db.Decimal(9, 6)
+  timeInAccuracy Int?
 
   timeOut       DateTime?
   timeOutMethod ClockMethod?
   timeOutPhoto  String?
   timeOutScore  Decimal?     @db.Decimal(6, 4)
+  timeOutLat      Decimal? @db.Decimal(9, 6)
+  timeOutLng      Decimal? @db.Decimal(9, 6)
+  timeOutAccuracy Int?
 
   status           AttendanceStatus @default(PRESENT)
   lateMinutes      Int              @default(0)
