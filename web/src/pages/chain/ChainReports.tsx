@@ -15,6 +15,8 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   { key: 'rfq', label: 'RFQ', list: '/g-chain/rfq' },
   { key: 'canvass', label: 'Canvass', list: '/g-chain/canvass' },
   { key: 'purchase-orders', label: 'Purchase orders', list: '/g-chain/purchase-orders' },
+  // The purchasers' own report (2026-11-23): savings, turnaround, what is pending.
+  { key: 'purchasers', label: 'Purchaser performance', list: '/g-chain/purchase-orders' },
   { key: 'incoming', label: 'Incoming', list: '/g-chain/incoming' },
   { key: 'inventory', label: 'Inventory', list: '/g-chain/inventory' },
   { key: 'outgoing', label: 'Outgoing', list: '/g-chain/outgoing' },

@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticate } from '../auth/middleware';
 import { type Range } from '../shared/insights';
-import { manilaDate, manilaMonthKey } from '../shared/day';
+import { daysBetween, manilaDate, manilaMonthKey } from '../shared/day';
 import { availableOf, belowReorder } from '../shared/chain';
 import { statusLabel } from '../shared/pdf';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, pct, round3, table, tally, type Report, type Table } from '../shared/reportKit';
@@ -287,6 +287,236 @@ async function purchaseOrders(range: Range): Promise<Report> {
   };
 }
 
+/**
+ * The PURCHASER PERFORMANCE report (2026-11-23, the owner's call: "savings;
+ * turnaround — average delivery date from PR; pending order; list of pending
+ * PR"). The purchaser is whoever raised the purchase order (its buyer).
+ *
+ * - **Savings**, on the orders placed in the range: each line raised from a
+ *   request, against the request's declared value — the estimate × the
+ *   quantity ordered less what was ordered, in pesos (a foreign order at its
+ *   own rate, after its discount). Lines with no request behind them are
+ *   left out and said. The canvass savings of the canvasses each purchaser
+ *   awarded in the range are a column of their own.
+ * - **Turnaround**, in days: the request's approval to the order (to order),
+ *   the request's approval to the first goods received (to delivery — the
+ *   owner's "average delivery date from PR"), and the order to the first
+ *   goods received (the supplier's own lead).
+ * - **Pending orders** and **pending purchase requests** are as of TODAY,
+ *   whatever the range: orders placed and not fully received, oldest first;
+ *   approved requests with lines still to order, oldest first.
+ *
+ * Read off the documents; no table of its own.
+ */
+async function purchasers(range: Range): Promise<Report> {
+  const today = manilaDate(new Date());
+  const PLACED = ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] as const;
+  const [orders, canvasses, pendingOrders, pendingPrs] = await Promise.all([
+    prisma.purchaseOrder.findMany({
+      where: { status: { in: [...PLACED] }, orderDate: { gte: range.from, lte: range.to } },
+      select: {
+        id: true,
+        number: true,
+        orderDate: true,
+        currency: true,
+        exchangeRate: true,
+        discountPct: true,
+        total: true,
+        createdBy: { select: { id: true, name: true } },
+        items: { select: { quantity: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true, request: { select: { approvedAt: true } } } } } },
+        receivings: { where: { status: 'RECEIVED' }, select: { receivedDate: true }, orderBy: { receivedDate: 'asc' }, take: 1 },
+      },
+    }),
+    prisma.canvass.findMany({
+      where: { status: 'AWARDED', awardedAt: { gte: range.fromAt, lte: range.toAt } },
+      include: {
+        awardedBy: { select: { id: true, name: true } },
+        request: { select: { items: { select: { id: true, quantity: true, estimatedCost: true, estimatedAmount: true } } } },
+        suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true, awarded: true } } } },
+      },
+    }),
+    prisma.purchaseOrder.findMany({
+      where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } },
+      select: { id: true, number: true, status: true, orderDate: true, deliveryDate: true, total: true, currency: true, supplier: { select: { name: true } }, createdBy: { select: { name: true } } },
+      orderBy: { orderDate: 'asc' },
+    }),
+    prisma.purchaseRequest.findMany({
+      where: { status: { in: ['APPROVED', 'PARTIALLY_ORDERED'] } },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        approvedAt: true,
+        createdAt: true,
+        neededBy: true,
+        requestedBy: { select: { name: true } },
+        job: { select: { number: true } },
+        salesOrder: { select: { number: true } },
+        quotation: { select: { number: true } },
+        warehouse: { select: { name: true } },
+        items: { select: { quantity: true, orderedQty: true, pulledQty: true, estimatedCost: true } },
+      },
+    }),
+  ]);
+
+  type Acc = { orders: number; value: number; estimate: number; ordered: number; noRequest: number; toOrder: number[]; toDelivery: number[]; lead: number[]; canvassSavings: number };
+  const per = new Map<string, Acc>();
+  const acc = (name: string) => {
+    let a = per.get(name);
+    if (!a) per.set(name, (a = { orders: 0, value: 0, estimate: 0, ordered: 0, noRequest: 0, toOrder: [], toDelivery: [], lead: [], canvassSavings: 0 }));
+    return a;
+  };
+  const avg = (xs: number[]) => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : null);
+  const series = new Series('By month', [{ label: 'Orders placed' }, { label: 'Ordered (PHP)', money: true }, { label: 'Savings vs PR', money: true }], monthsOf(range));
+
+  let noRate = 0;
+  for (const o of orders) {
+    const a = acc(o.createdBy.name);
+    // Pesos a unit: a foreign order at its OWN rate; with none on file it
+    // cannot be compared and is left out of the money, and said.
+    const rate = o.currency === 'PHP' || o.currency == null ? 1 : o.exchangeRate != null ? num(o.exchangeRate) : null;
+    const factor = 1 - num(o.discountPct) / 100;
+    a.orders += 1;
+    if (rate == null) noRate += 1;
+    else a.value = cents(a.value + num(o.total) * rate);
+    let est = 0;
+    let ord = 0;
+    let approved: Date | null = null;
+    for (const l of o.items) {
+      if (!l.requestItem) {
+        a.noRequest += 1;
+        continue;
+      }
+      const at = l.requestItem.request.approvedAt;
+      if (at && (!approved || at < approved)) approved = at;
+      // The landed cost in pesos comes first (receiptUnitCost's rule), else the price after the discount at the order's rate.
+      const pesos = l.landedUnitCost != null ? num(l.landedUnitCost) : rate != null ? num(l.unitPrice) * factor * rate : null;
+      if (pesos == null) continue;
+      est += num(l.quantity) * num(l.requestItem.estimatedCost);
+      ord += num(l.quantity) * pesos;
+    }
+    a.estimate = cents(a.estimate + est);
+    a.ordered = cents(a.ordered + ord);
+    const received = o.receivings[0]?.receivedDate ?? null;
+    if (approved) a.toOrder.push(Math.max(0, daysBetween(manilaDate(approved), o.orderDate)));
+    if (approved && received) a.toDelivery.push(Math.max(0, daysBetween(manilaDate(approved), received)));
+    if (received) a.lead.push(Math.max(0, daysBetween(o.orderDate, received)));
+    series.add(o.orderDate, 0, 1);
+    if (rate != null) series.add(o.orderDate, 1, cents(num(o.total) * rate));
+    series.add(o.orderDate, 2, cents(est - ord));
+  }
+  for (const c of canvasses) {
+    const name = c.awardedBy?.name;
+    if (!name) continue;
+    acc(name).canvassSavings = cents(acc(name).canvassSavings + awardOf(c, c.request.items, c.suppliers).summary.savings);
+  }
+
+  const all = [...per.values()];
+  const sum = (f: (a: Acc) => number) => cents(all.reduce((s, a) => s + f(a), 0));
+  const flat = (f: (a: Acc) => number[]) => all.flatMap(f);
+  const estimate = sum((a) => a.estimate);
+  const savings = cents(estimate - sum((a) => a.ordered));
+  const noRequest = all.reduce((s, a) => s + a.noRequest, 0);
+  const daysOr = (v: number | null) => (v == null ? '—' : `${v} day${v === 1 ? '' : 's'}`);
+
+  const prLeft = (r: (typeof pendingPrs)[number]) => {
+    let lines = 0;
+    let value = 0;
+    for (const i of r.items) {
+      const left = num(i.quantity) - num(i.orderedQty) - num(i.pulledQty);
+      if (left <= 0) continue;
+      lines += 1;
+      value += left * num(i.estimatedCost);
+    }
+    return { lines, value: cents(value) };
+  };
+  const prs = pendingPrs
+    .map((r) => ({ r, left: prLeft(r), since: r.approvedAt ?? r.createdAt }))
+    .filter((x) => x.left.lines > 0)
+    .sort((a, b) => a.since.getTime() - b.since.getTime());
+  const forOf = (r: (typeof pendingPrs)[number]) =>
+    r.job ? r.job.number : r.salesOrder ? `Sales order ${r.salesOrder.number}` : r.quotation ? `Quotation ${r.quotation.number}` : r.warehouse ? `Stock — ${r.warehouse.name}` : 'Stock';
+  const lateOrders = pendingOrders.filter((o) => o.deliveryDate && o.deliveryDate < today);
+  const pendingByBuyer = tally(pendingOrders, (o) => o.createdBy.name, () => [1]);
+
+  const names = [...per.keys()].sort((a, b) => per.get(b)!.value - per.get(a)!.value);
+  return {
+    kind: 'purchasers',
+    title: 'Purchaser Performance',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    cards: [
+      { label: 'Savings vs purchase requests', value: savings, money: true, sub: `${pct(savings, estimate)}% of the requests' declared value on the orders placed` },
+      { label: 'Canvass savings', value: sum((a) => a.canvassSavings), money: true, sub: 'on the canvasses awarded in the period' },
+      { label: 'Approved PR to delivery', value: avg(flat((a) => a.toDelivery)) ?? 0, sub: `average days · ${daysOr(avg(flat((a) => a.toOrder)))} to order, ${daysOr(avg(flat((a) => a.lead)))} supplier lead` },
+      { label: 'Pending orders', value: pendingOrders.length, sub: lateOrders.length ? `${lateOrders.length} past their delivery date` : 'none past its delivery date' },
+      { label: 'Pending purchase requests', value: prs.length, sub: `approved, PHP ${cents(prs.reduce((s, x) => s + x.left.value, 0)).toLocaleString('en-PH', { minimumFractionDigits: 2 })} still to order` },
+    ],
+    series: series.done(),
+    tables: [
+      table(
+        'By purchaser',
+        [
+          { label: 'Purchaser' },
+          { label: 'Orders', align: 'right' },
+          { label: 'Ordered (PHP)', money: true },
+          { label: 'PR declared value', money: true },
+          { label: 'Savings vs PR', money: true },
+          { label: 'Savings %', align: 'right' },
+          { label: 'Canvass savings', money: true },
+          { label: 'PR to order (days)', align: 'right' },
+          { label: 'PR to delivery (days)', align: 'right' },
+          { label: 'Supplier lead (days)', align: 'right' },
+          { label: 'Pending orders', align: 'right' },
+        ],
+        names.map((n) => {
+          const a = per.get(n)!;
+          const s = cents(a.estimate - a.ordered);
+          return [n, a.orders, a.value, a.estimate, s, a.estimate ? `${pct(s, a.estimate)}%` : '—', a.canvassSavings, avg(a.toOrder) ?? '—', avg(a.toDelivery) ?? '—', avg(a.lead) ?? '—', pendingByBuyer.get(n)?.[0] ?? 0];
+        }),
+      ),
+      table(
+        'Pending orders — placed, not fully received',
+        [{ label: 'Order' }, { label: 'Supplier' }, { label: 'Purchaser' }, { label: 'Ordered' }, { label: 'Days open', align: 'right' }, { label: 'Expected' }, { label: 'Status' }, { label: 'Total' , align: 'right' }],
+        pendingOrders.map((o) => [
+          o.number,
+          o.supplier.name,
+          o.createdBy.name,
+          dayOf(o.orderDate),
+          Math.max(0, daysBetween(o.orderDate, today)),
+          o.deliveryDate ? `${dayOf(o.deliveryDate)}${o.deliveryDate < today ? ' (late)' : ''}` : '—',
+          statusLabel(o.status),
+          `${o.currency} ${num(o.total).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`,
+        ]),
+        pendingOrders.map((o) => `/g-chain/purchase-orders/${o.id}`),
+      ),
+      table(
+        'Pending purchase requests — approved, still to order',
+        [{ label: 'Request' }, { label: 'Requester' }, { label: 'For' }, { label: 'Approved' }, { label: 'Days waiting', align: 'right' }, { label: 'Needed by' }, { label: 'Lines left', align: 'right' }, { label: 'Value left', money: true }],
+        prs.map(({ r, left, since }) => [
+          r.number,
+          r.requestedBy.name,
+          forOf(r),
+          dayOf(manilaDate(since)),
+          Math.max(0, daysBetween(manilaDate(since), today)),
+          r.neededBy ? `${dayOf(r.neededBy)}${r.neededBy < today ? ' (past)' : ''}` : '—',
+          left.lines,
+          left.value,
+        ]),
+        prs.map(({ r }) => `/g-chain/purchase-requests/${r.id}`),
+      ),
+    ],
+    notes: [
+      'The purchaser is whoever raised the purchase order. Savings compare each line ordered from a request with that request\'s declared value; a foreign order is in pesos at its own rate, after its discount.',
+      ...(noRate
+        ? [`${noRate} foreign-currency order${noRate === 1 ? ' has' : 's have'} no exchange rate on file: ${noRate === 1 ? 'its' : 'their'} value is left out, and so are ${noRate === 1 ? 'its' : 'their'} lines without a landed cost — set the rate on the order.`]
+        : []),
+      ...(noRequest ? [`${noRequest} order line${noRequest === 1 ? '' : 's'} with no purchase request behind ${noRequest === 1 ? 'it are' : 'them are'} left out of the savings and the turnaround.`] : []),
+      'Pending orders and pending purchase requests are as of today, whatever the period chosen.',
+    ],
+  };
+}
+
 async function incoming(range: Range): Promise<Report> {
   const rows = await prisma.receiving.findMany({
     where: { receivedDate: { gte: range.from, lte: range.to } },
@@ -552,6 +782,7 @@ const KINDS: Record<string, (range: Range) => Promise<Report>> = {
   overview,
   'purchase-requests': purchaseRequests,
   rfq,
+  purchasers,
   canvass,
   'purchase-orders': purchaseOrders,
   incoming,

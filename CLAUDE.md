@@ -1016,6 +1016,19 @@ create one, popup window so it will retain on the page".
 - **The canvass sheet prints every remark**: each supplier's remarks and the
   remark typed on a quoted line ("Supplier, <line description>: …") join the
   canvass's notes under Remarks.
+- **Purchaser Performance** is a kind of G-CHAIN › Reports (`purchasers` in
+  `routes/chainReports.ts`; the owner's call: "savings; turnaround — average
+  delivery date from PR; pending order; list of pending PR"). The purchaser is
+  whoever raised the purchase order. On the orders PLACED in the range:
+  savings = each request line's declared value × the quantity ordered less
+  the price paid in pesos (the landed cost first, else the price after the
+  discount at the order's own rate; a foreign order with no rate is left out
+  and said; lines with no request are left out and said), the canvass
+  savings of the canvasses each awarded, and the turnaround in days —
+  approved request to order, approved request to the first goods received,
+  order to first goods received. As of TODAY whatever the range: pending
+  orders (placed, not fully received, late ones marked) and pending purchase
+  requests (approved, lines still to order, oldest first), each row a link.
 
 ## Verification
 
