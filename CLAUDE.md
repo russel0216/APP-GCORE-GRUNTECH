@@ -1005,7 +1005,17 @@ create one, popup window so it will retain on the page".
   copies the `purchase_request` attachments (each request of a batch) onto
   the order after the commit (`copyAttachments`, "From purchase request …";
   a failed copy never fails the order). A file added to the request later
-  stays there.
+  stays there. **The order page takes files before it is sent** (the owner's
+  call the same day: "P.O. before submittal include attachment"): its
+  Attachments card files them on Save, BEFORE Submit for approval (the
+  budget request editor's rule; the `purchase_order` write guard — whoever
+  may change it, not cancelled).
+- **More requests on a new order** ("on Purchase Order can we have multiple
+  Purchase Request batch"): the batch of 2026-11-10 stays the list's "From
+  purchase requests…"; a NEW order opened from one or more requests now has
+  "+ Add another purchase request" — the same panel (`BatchRequestsPanel`,
+  exported from `Orders.tsx`, `startWith` ticking the order's own), leading
+  to `?fromRequests=`. A saved draft keeps the requests it was raised from.
 - **The supplier bill prints as a REQUEST FOR PAYMENT**: `GET
   /supplier-bills/:id/pdf` (the bill's view rule) — Pay to, the supplier's
   invoice, dates, terms, the order and incoming report, the purchaser, what it

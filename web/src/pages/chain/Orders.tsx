@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdf } from '../../lib/api';
 import { Attachments } from '../../components/Attachments';
@@ -183,19 +183,32 @@ interface Batchable {
   amountLeft: number;
 }
 
-function BatchRequestsPanel({ onClose }: { onClose: () => void }) {
+/**
+ * `startWith` (2026-11-23, the owner's call: "on Purchase Order can we have
+ * multiple Purchase Request batch"): opened from the new order page, the
+ * requests already on the order start ticked, and another is added to them.
+ */
+export function BatchRequestsPanel({ onClose, startWith }: { onClose: () => void; startWith?: string[] }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<Batchable[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [q, setQ] = useState('');
   const [picked, setPicked] = useState<Batchable[]>([]);
+  const started = useRef(false);
 
   useEffect(() => {
     let live = true;
     const timer = window.setTimeout(() => {
       api
         .get<Batchable[]>(`/purchase-orders/batchable?q=${encodeURIComponent(q.trim())}`)
-        .then((r) => live && setRows(r))
+        .then((r) => {
+          if (!live) return;
+          setRows(r);
+          if (!started.current && startWith?.length) {
+            started.current = true;
+            setPicked(r.filter((x) => startWith.includes(x.id)));
+          }
+        })
         .catch((e) => live && setError(e));
     }, 250);
     return () => {

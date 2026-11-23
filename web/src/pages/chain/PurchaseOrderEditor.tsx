@@ -12,6 +12,7 @@ import { orderTotals, parseDelimited, prLineAmount, rowsToPrLines } from '../../
 import { DiscountCalculator } from '../sales/editorParts';
 import { ItemCell, type BudgetLine, type Category, type Route, type Suggestion } from './PurchaseRequisitionEditor';
 import { SearchSelect } from '../../components/SearchSelect';
+import { BatchRequestsPanel } from './Orders';
 
 /**
  * The purchase order as a PAGE (2026-10-13, the owner's call after the
@@ -268,6 +269,10 @@ export function PurchaseOrderEditor() {
   });
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
   const [saved, setSaved] = useState<string | null>(null);
+  /** Files picked before the first save or a submit (2026-11-23) — filed with the save, before it goes for approval. */
+  const [files, setFiles] = useState<File[]>([]);
+  /** "+ Add another purchase request" on a new order from requests (2026-11-23). */
+  const [addingRequest, setAddingRequest] = useState(false);
 
   // ── Loading ────────────────────────────────────────────────────────────────
 
@@ -429,7 +434,7 @@ export function PurchaseOrderEditor() {
     return () => window.clearTimeout(timer);
   }, [money.total, id, header.applyVat]);
 
-  const dirty = saved !== null && snapshot(header, lines) !== saved;
+  const dirty = saved !== null && (snapshot(header, lines) !== saved || files.length > 0);
   useUnsavedChanges(dirty && !busy);
   useBackLink(
     existing ? `/g-chain/purchase-orders/${existing.id}` : request ? `/g-chain/purchase-requests/${request.id}` : canvass ? `/g-chain/canvass/${canvass.id}` : null,
@@ -566,6 +571,17 @@ export function PurchaseOrderEditor() {
         ? (await api.put<{ id: string }>(`/purchase-orders/${existing.id}/sheet`, body())).id
         : (await api.post<{ id: string }>('/purchase-orders', body())).id;
       setSaved(snapshot(header, lines));
+      // Filed before a submit, so the approvers see them from the first step.
+      if (files.length) {
+        const form = new FormData();
+        for (const f of files) form.append('files', f);
+        try {
+          await api.post(`/attachments/purchase_order/${savedId}`, form);
+          setFiles([]);
+        } catch {
+          toast('error', 'Saved, but the attachments could not be filed — add them on the purchase order');
+        }
+      }
       if (submit) {
         try {
           await api.post(`/purchase-orders/${savedId}/submit`);
@@ -659,6 +675,12 @@ export function PurchaseOrderEditor() {
                 ? 'Change what you need and Save — the header and the lines are saved together.'
                 : 'The header and the lines are saved together; the number is issued on the first save.'}
             </p>
+            {/* Another request on this order (2026-11-23): before the first save, from a request. */}
+            {!existing && !fromCanvass && (fromRequest || fromRequests.length > 0) && !addingRequest && (
+              <button type="button" className="btn btn-sm" onClick={() => setAddingRequest(true)}>
+                + Add another purchase request
+              </button>
+            )}
           </div>
           <div className="row qe-actions">{actions}</div>
         </div>
@@ -669,6 +691,13 @@ export function PurchaseOrderEditor() {
           </div>
         )}
       </section>
+
+      {addingRequest && (
+        <BatchRequestsPanel
+          onClose={() => setAddingRequest(false)}
+          startWith={fromRequests.length ? fromRequests : fromRequest ? [fromRequest] : []}
+        />
+      )}
 
       <div className={`prq-grid${direct && job ? '' : ' prq-grid-solo'}`}>
         <div className="prq-main">
@@ -1107,6 +1136,38 @@ export function PurchaseOrderEditor() {
                 }}
                 onClose={() => setCalcOpen(false)}
               />
+            )}
+          </section>
+
+          {/* ── Attachments, filed with the save (2026-11-23) ──────────────────── */}
+          <section className="card" aria-labelledby="poe-files">
+            <h2 id="poe-files" className="card-title">Attachments</h2>
+            <p className="prq-hint">
+              The supplier's quotation, a drawing or anything the approvers should see — filed when you save, before it goes for
+              approval. {existing ? 'Files already on the order stay; add more here or on its page.' : "The purchase request's files come with it on its own."}
+            </p>
+            <input
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.xlsx,.xls,.csv,.docx,.doc"
+              aria-label="Attach files to the purchase order"
+              onChange={(e) => {
+                const picked = Array.from(e.target.files ?? []);
+                setFiles((cur) => [...cur, ...picked]);
+                e.target.value = '';
+              }}
+            />
+            {files.length > 0 && (
+              <ul className="fin-files">
+                {files.map((f, i) => (
+                  <li key={`${f.name}-${i}`}>
+                    <span>{f.name}</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
 
