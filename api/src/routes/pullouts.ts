@@ -872,7 +872,7 @@ async function loadSlip(id: string) {
       preparedBy: { select: { id: true, name: true } },
       releasedBy: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true, position: true } },
-      items: { include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } } }, orderBy: { sortOrder: 'asc' } },
+      items: { include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, description: true, unit: true } } }, orderBy: { sortOrder: 'asc' } },
     },
   });
 }
@@ -1008,7 +1008,7 @@ pulloutRoutes.get(
           return [
             String(n + 1),
             i.item.partNumber ?? i.item.code,
-            { title: i.item.name, body: [i.item.brand, answers && answers !== i.item.name ? `For: ${answers}` : null].filter(Boolean).join(' · ') || undefined },
+            { title: i.item.name, body: [i.item.description && !i.item.name.toLowerCase().includes(i.item.description.toLowerCase()) ? i.item.description : null, i.item.brand, answers && answers !== i.item.name ? `For: ${answers}` : null].filter(Boolean).join(' · ') || undefined },
             i.serialNo ?? '',
             qty(num(i.quantity)),
             i.item.unit,

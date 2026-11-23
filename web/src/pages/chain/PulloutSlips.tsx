@@ -1241,7 +1241,7 @@ export function PulloutDetail() {
     quantity: number;
     serialNo: string | null;
     condition: string | null;
-    item: { id: string; code: string; partNumber: string | null; brand: string | null; name: string; unit: string };
+    item: { id: string; code: string; partNumber: string | null; brand: string | null; name: string; description?: string | null; unit: string };
     sourceLine: { title: string; unit: string } | null;
   }[];
 
@@ -1459,6 +1459,7 @@ export function PulloutDetail() {
                     <div>
                       <strong>{i.item.name}</strong>
                     </div>
+                    {i.item.description && !i.item.name.toLowerCase().includes(i.item.description.toLowerCase()) && <div className="muted">{i.item.description}</div>}
                     <div className="faint mono">
                       {i.item.partNumber ?? i.item.code}
                       {i.item.brand ? ` · ${i.item.brand}` : ''}

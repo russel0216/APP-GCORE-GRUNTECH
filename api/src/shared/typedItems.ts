@@ -3,7 +3,31 @@ import { prisma } from '../prisma';
 import { nextNumber } from './numbering';
 import { receiveStock } from './inventory';
 
-/** The item a typed order line is: one active match by part number or code, else by name, else filed new. */
+/**
+ * What a typed order line IS (2026-11-23, the owner's report on GT-PS-2026-0010):
+ * GT-PO-2026-0039 carried three lines named "THHN WIRE" told apart only by
+ * their descriptions — RED, YELLOW, BLUE 8.0mm² — and the name alone filed
+ * them as ONE item, so the three wires merged into 51 m of "THHN WIRE" and
+ * the colours reached neither the inventory nor the pull-out slip. A line's
+ * description that says more than its name is part of what the line is:
+ * `detail`, and a short one joins the item's name ("THHN WIRE RED 8.0mm²").
+ */
+export function typedIdentity(line: { name: string | null; description: string }) {
+  const desc = (line.description ?? '').trim();
+  const base = (line.name?.trim() || desc).slice(0, 300);
+  const detail = line.name?.trim() && desc && desc.toLowerCase() !== base.toLowerCase() ? desc : null;
+  const short = !!detail && detail.length <= 80 && !detail.includes('\n');
+  return {
+    /** The item's name: the line's, with a short description after it. */
+    name: (short ? `${base} ${detail}` : base).slice(0, 300),
+    base,
+    detail,
+    /** The item's description when it is filed new. */
+    description: detail ?? (desc && desc.toLowerCase() !== base.toLowerCase() ? desc : null),
+  };
+}
+
+/** The item a typed order line is: one active match by part number or code, else by name and description, else filed new. */
 export async function itemForTypedLine(
   tx: Prisma.TransactionClient,
   line: { name: string | null; partNumber: string | null; description: string; unit: string },
@@ -17,28 +41,46 @@ export async function itemForTypedLine(
     return matched;
   }
   const part = line.partNumber?.trim() || null;
-  const name = (line.name?.trim() || line.description.trim()).slice(0, 300);
+  const who = typedIdentity(line);
   const code = await nextNumber('item', tx);
-  const created = await tx.item.create({ data: { code, name, partNumber: part, unit: line.unit || 'pcs', categoryId, createdById: actorId || null } });
+  const created = await tx.item.create({
+    data: { code, name: who.name, description: who.description, partNumber: part, unit: line.unit || 'pcs', categoryId, createdById: actorId || null },
+  });
   await tx.auditLog.create({
-    data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${name} added on receiving a purchase order line`, actorId: actorId || null },
+    data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${who.name} added on receiving a purchase order line`, actorId: actorId || null },
   });
   return created.id;
 }
 
-/** The one active item a typed line is — by part number or code, else by name — or null when it would be filed new. */
+/**
+ * The one active item a typed line is — by part number or code, else by its
+ * name and description (`typedIdentity`) — or null when it would be filed new.
+ * A line whose description tells it apart never matches the bare name.
+ */
 export async function matchTypedItem(
   db: Prisma.TransactionClient | typeof prisma,
   line: { name: string | null; partNumber: string | null; description: string },
 ): Promise<string | null> {
   const part = line.partNumber?.trim() || null;
-  const name = (line.name?.trim() || line.description.trim()).slice(0, 300);
+  const who = typedIdentity(line);
   const found = part
     ? await db.item.findMany({ where: { isActive: true, OR: [{ partNumber: { equals: part, mode: 'insensitive' } }, { code: { equals: part, mode: 'insensitive' } }] }, select: { id: true }, take: 2 })
     : [];
   if (found.length === 1) return found[0].id;
   if (!found.length) {
-    const byName = await db.item.findMany({ where: { isActive: true, name: { equals: name, mode: 'insensitive' } }, select: { id: true }, take: 2 });
+    const byName = await db.item.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { name: { equals: who.name, mode: 'insensitive' } },
+          ...(who.detail
+            ? [{ name: { equals: who.base, mode: 'insensitive' as const }, description: { equals: who.detail, mode: 'insensitive' as const } }]
+            : []),
+        ],
+      },
+      select: { id: true },
+      take: 2,
+    });
     if (byName.length === 1) return byName[0].id;
   }
   return null;
