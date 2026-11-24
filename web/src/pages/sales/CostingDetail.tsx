@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../../lib/api';
 import { parseDay } from '../../lib/day';
 import { useAuth } from '../../lib/auth';
-import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
@@ -100,6 +100,10 @@ export interface CostingDetail extends Omit<CostingRow, 'status'> {
   plannedStart?: string | null;
   plannedFinish?: string | null;
   systemUnit: string | null;
+  /** The team handling the work; its managers approve the costing (null: the author's own). */
+  team?: { id: string; code: string; name: string } | null;
+  /** The route a draft would take if submitted now. */
+  approvalRoute?: PreviewRoute | null;
   notes: string | null;
   terms: string | null;
   canEdit: boolean;
@@ -403,6 +407,19 @@ export function CostingDetailPage() {
       </div>
 
       <DecisionNote documentType="costing" documentId={costing.id} reloadToken={reload} />
+      {isDraft && costing.approvalConfigured && costing.approvalRoute && (
+        <section className="card">
+          <h2 className="card-title">Approval route</h2>
+          {allHeld(costing.approvalRoute) ? (
+            <p className="muted">No one else's approval needed — you hold every step of the route.</p>
+          ) : (
+            <>
+              <p className="muted">Submit for approval sends it to:</p>
+              <ApprovalStepper steps={previewSteps(costing.approvalRoute)} />
+            </>
+          )}
+        </section>
+      )}
       {(costing.approvalConfigured || !isDraft) && <DocumentApproval documentType="costing" documentId={costing.id} reloadToken={reload} />}
 
       <section className="card" aria-labelledby="cs-details">
@@ -433,6 +450,7 @@ export function CostingDetailPage() {
           <Fact label="System / unit" value={costing.systemUnit} />
           <Fact label="Location" value={location} />
           <Fact label="Prepared by" value={costing.owner.name} />
+          {costing.team && <Fact label="Team handling it" value={`${costing.team.code} — ${costing.team.name}`} />}
           {costing.lead && (
             <Fact
               label="From lead"

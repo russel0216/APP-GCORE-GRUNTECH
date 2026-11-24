@@ -95,6 +95,8 @@ interface Header {
   siteId: string;
   leadId: string;
   systemUnit: string;
+  /** The team that will handle the work ('' = the author's own); its managers approve the costing. */
+  teamId: string;
   validUntil: string;
   /** The day the scope of work starts ('' = not yet known); the finish date is derived from the plan. */
   plannedStart: string;
@@ -309,6 +311,7 @@ export function CostingSheet() {
   const [lists, setLists] = useState<Lists>({ units: [], systemUnits: [], phases: [], tasks: [], terms: null, companyVatRate: 0.12 });
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
   const [loaded, setLoaded] = useState(!editing);
   const [costing, setCosting] = useState<CostingDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -321,6 +324,7 @@ export function CostingSheet() {
     siteId: '',
     leadId: params.get('leadId') ?? '',
     systemUnit: '',
+    teamId: '',
     validUntil: addDays(todayLocal(), 30),
     plannedStart: '',
     marginPct: '15',
@@ -351,6 +355,10 @@ export function CostingSheet() {
     api.get<Category[]>('/reference/cost-categories').then(setCategories).catch(setError);
     api.get<Lists>('/costings/suggest/lists').then(setLists).catch(() => {});
     api.get<TemplateRow[]>('/costings/templates').then(setTemplates).catch(() => {});
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then(setTeams)
+      .catch(() => {});
   }, []);
 
   // A new sheet: one empty row in the first bucket to start typing in, and your
@@ -396,6 +404,7 @@ export function CostingSheet() {
           siteId: c.site?.id ?? '',
           leadId: c.lead?.id ?? '',
           systemUnit: c.systemUnit ?? '',
+          teamId: c.team?.id ?? '',
           validUntil: c.validUntil ?? '',
           plannedStart: c.plannedStart ?? '',
           marginPct: percentString(c.marginPct),
@@ -845,6 +854,7 @@ export function CostingSheet() {
       customerId: header.customer?.id ?? null,
       siteId: header.siteId || null,
       systemUnit: header.systemUnit.trim() || null,
+      teamId: header.teamId || null,
       validUntil: header.validUntil || null,
       plannedStart: header.plannedStart || null,
       // At a fixed price the margin is what the price amounts to; the server derives it again.
@@ -1051,6 +1061,18 @@ export function CostingSheet() {
                 placeholder="e.g. Booster pump controller"
                 onChange={(e) => setH('systemUnit', e.target.value)}
               />
+            </Field>
+            <Field label="Team handling it" hint="Its Technical Manager and Team Leader approve this costing — your own team unless you pick another">
+              <select value={header.teamId} onChange={(e) => setH('teamId', e.target.value)}>
+                <option value="">— my own team —</option>
+                {teams
+                  .filter((t) => t.isActive || t.id === header.teamId)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.code} — {t.name}
+                    </option>
+                  ))}
+              </select>
             </Field>
             <Field label="Valid until">
               <input type="date" value={header.validUntil} onChange={(e) => setH('validUntil', e.target.value)} />

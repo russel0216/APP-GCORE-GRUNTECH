@@ -22,6 +22,7 @@ import {
   preparedAt,
   slotSignatories,
   submitForApproval,
+  routeBrief,
   type ApprovalSlot,
 } from '../shared/approvals';
 import { scheduleOfValues, costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
@@ -1034,6 +1035,7 @@ async function loadFull(id: string, tx: Tx = prisma) {
       customer: { select: { id: true, name: true, code: true } },
       site: { select: { id: true, name: true, address: true, city: true } },
       owner: { select: { id: true, name: true, position: true } },
+      team: { select: { id: true, code: true, name: true } },
       assignedBy: { select: { id: true, name: true } },
       lead: { select: { id: true, number: true, companyName: true, status: true } },
       lines: {
@@ -1097,10 +1099,14 @@ costingRoutes.get(
     if (!costing) throw notFound('Costing not found');
     await assertCostingVisible(me, costing, res.locals.deciderOnly === true);
 
-    const [ranks, company, configured] = await Promise.all([
+    const [ranks, company, configured, approvalRoute] = await Promise.all([
       categoryRanks(),
       prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } }),
       approvalConfigured(num(costing.contractValue)),
+      // "Submit for approval sends it to …": the route a draft would take, in its author's name.
+      costing.status === 'DRAFT'
+        ? routeBrief('costing', num(costing.contractValue), costing.ownerId, null, { teamId: costing.teamId ?? null })
+        : Promise.resolve(null),
     ]);
     const canEdit = canEditRecord(me, 'gops', 'costing', costing.ownerId);
     res.json({
@@ -1110,6 +1116,7 @@ costingRoutes.get(
       // With a costing workflow active, FINAL is reached by approval and the
       // page offers "Submit for approval"; without one, "Mark final" as before.
       approvalConfigured: configured,
+      approvalRoute,
     });
   }),
 );
@@ -1183,6 +1190,8 @@ const headerSchema = z.object({
   /** The day the scope of work starts; the finish is derived from the plan. */
   plannedStart: z.string().regex(DAY, 'Use a date').optional().nullable(),
   systemUnit: z.string().trim().max(200).optional().nullable(),
+  /** The team that will handle the work; its managers approve the costing. Null: the author's own team. */
+  teamId: z.string().optional().nullable(),
   durationDays: z.number().int().min(0).optional().nullable(),
   notes: z.string().max(20000).optional().nullable(),
   terms: z.string().max(20000).optional().nullable(),
@@ -1215,6 +1224,10 @@ async function checkVatRate(rate: number | undefined, keep?: number): Promise<nu
 
 /** Refuses ids that are not what they claim, before anything is written. */
 async function checkReferences(body: SheetBody, tx: Tx) {
+  if (body.teamId) {
+    const team = await tx.industry.findUnique({ where: { id: body.teamId }, select: { isActive: true } });
+    if (!team?.isActive) throw badRequest('Choose an active team to handle the work');
+  }
   const catIds = new Set((body.lines ?? []).map((l) => l.costCategoryId));
   if (catIds.size) {
     const found = await tx.costCategory.count({ where: { id: { in: [...catIds] } } });
@@ -1406,6 +1419,7 @@ costingRoutes.post(
           validUntil: asDay(body.validUntil),
           plannedStart: asDay(body.plannedStart),
           systemUnit: body.systemUnit?.trim() || null,
+          teamId: body.teamId || null,
           durationDays: body.durationDays ?? null,
           notes: body.notes || null,
           terms: body.terms || null,
@@ -1631,6 +1645,7 @@ function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number
   if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
   if (body.plannedStart !== undefined) data.plannedStart = asDay(body.plannedStart);
   if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
+  if (body.teamId !== undefined) data.team = body.teamId ? { connect: { id: body.teamId } } : { disconnect: true };
   if (body.customerId !== undefined) {
     data.customer = body.customerId ? { connect: { id: body.customerId } } : { disconnect: true };
   }
@@ -1818,6 +1833,8 @@ costingRoutes.post(
         // The author, not whoever pressed the button: an admin submitting for
         // somebody must not become able to approve a costing they did not make.
         requesterId: costing.ownerId,
+        // The team handling the work: its Technical Manager and Team Leader decide.
+        teamId: costing.teamId ?? null,
       });
     } catch (err) {
       await prisma.costing.update({ where: { id: costing.id }, data: { status: 'DRAFT' } });
@@ -1931,6 +1948,7 @@ costingRoutes.post(
           targetContractValue: source.targetContractValue,
           vatRate: source.vatRate,
           systemUnit: source.systemUnit,
+          teamId: source.teamId,
           durationDays: source.durationDays,
           notes: source.notes,
           terms: source.terms,
@@ -2046,8 +2064,8 @@ costingRoutes.post(
  * draft, or reopened and made final again with the route switched off),
  * because nobody will ever sign that route.
  */
-async function costingRouteSlots(costing: { id: string; status: string; ownerId: string; contractValue: Prisma.Decimal }): Promise<ApprovalSlot[]> {
-  if (costing.status === 'DRAFT') return approvalSlots('costing', costing.id, { amount: num(costing.contractValue), requesterId: costing.ownerId });
+async function costingRouteSlots(costing: { id: string; status: string; ownerId: string; contractValue: Prisma.Decimal; teamId?: string | null }): Promise<ApprovalSlot[]> {
+  if (costing.status === 'DRAFT') return approvalSlots('costing', costing.id, { amount: num(costing.contractValue), requesterId: costing.ownerId, teamId: costing.teamId ?? null });
   if (costing.status === 'FINAL' && !(await approvalStands('costing', costing.id, 'Reopened costing'))) return [];
   return approvalSlots('costing', costing.id);
 }

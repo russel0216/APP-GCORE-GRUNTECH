@@ -809,6 +809,8 @@ model Industry {
   employees          Employee[]
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
   quotationsTagged   Quotation[]         @relation("QuotationTeam")
+  /// Costings whose approval goes to this team's managers (2026-11-24).
+  costingsHandled    Costing[]           @relation("CostingTeam")
   invoicesCredited   Invoice[]           @relation("InvoiceTeam")
   salesOrders        SalesOrder[]        @relation("SalesOrderTeam")
   supporters         UserSupportTeam[]
@@ -1350,6 +1352,14 @@ model Costing {
   /// Record ownership — "View Category (My Costing, all Costing)".
   ownerId String
   owner   User   @relation("CostingOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+
+  /// The TEAM that will handle the work (2026-11-24, the owner's call: a SIT
+  /// engineer's costing for a HIT project is approved by HIT's Technical
+  /// Manager). Null: the author's own team. Passed to the approval engine as
+  /// `ApprovalContext.teamId`, so the Technical Manager and Team Leader steps
+  /// go to this team's holders.
+  teamId String?
+  team   Industry? @relation("CostingTeam", fields: [teamId], references: [id], onDelete: SetNull)
 
   /// The gross margin on the contract value, as a fraction to six decimals
   /// (0.25 = 25%): contract value = project budgeted cost ÷ (1 − margin).
