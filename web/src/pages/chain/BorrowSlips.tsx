@@ -553,9 +553,6 @@ export function BorrowRequestEditor() {
           <h2 id="bs-items" className="card-title">
             Items
           </h2>
-          <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blank()])} disabled={!form.warehouseId}>
-            + Add item
-          </button>
         </div>
         {!form.warehouseId ? (
           <Empty title="Choose the warehouse first" hint="The items it holds, and how many are free to lend, appear here." />
@@ -635,6 +632,13 @@ export function BorrowRequestEditor() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {form.warehouseId && items.length > 0 && (
+          <div className="line-foot">
+            <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blank()])}>
+              + Add item
+            </button>
           </div>
         )}
       </section>

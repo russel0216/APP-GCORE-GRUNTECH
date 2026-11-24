@@ -919,11 +919,6 @@ export function PurchaseOrderEditor() {
                   if (file) void file.text().then((t) => importRows(t)).catch(setError);
                 }}
               />
-              {!batch && (
-                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(lastCategory())])}>
-                  + Add line
-                </button>
-              )}
             </div>
 
             <div className="table-wrap qe-table-wrap">
@@ -1061,6 +1056,13 @@ export function PurchaseOrderEditor() {
                 </tbody>
               </table>
             </div>
+            {!batch && (
+              <div className="line-foot">
+                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(lastCategory())])}>
+                  + Add line
+                </button>
+              </div>
+            )}
             {skipped.length > 0 && (
               <div className="alert info prq-skipped">
                 Skipped from the file: {skipped.join('; ')}.{' '}

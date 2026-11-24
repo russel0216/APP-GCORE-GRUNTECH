@@ -817,9 +817,6 @@ export function PurchaseRequisitionEditor() {
                   if (file) void onFile(file);
                 }}
               />
-              <button type="button" className="btn btn-sm" onClick={() => appendLines([blankLine(lastCategory())])}>
-                + Add line
-              </button>
             </div>
 
             {costingPanel && costing && (
@@ -975,6 +972,11 @@ export function PurchaseRequisitionEditor() {
                   })}
                 </tbody>
               </table>
+            </div>
+            <div className="line-foot">
+              <button type="button" className="btn btn-sm" onClick={() => appendLines([blankLine(lastCategory())])}>
+                + Add line
+              </button>
             </div>
             {skipped.length > 0 && (
               <div className="alert info prq-skipped">

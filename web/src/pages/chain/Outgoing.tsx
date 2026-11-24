@@ -624,9 +624,6 @@ export function OutgoingEditor() {
           <section className="card" aria-labelledby="out-lines">
             <div className="card-head">
               <h2 id="out-lines" className="card-title">Outgoing items</h2>
-              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blankLine()])}>
-                + Add line
-              </button>
             </div>
             {!header.warehouseId ? (
               <p className="muted">Choose the dispatch warehouse — what it holds is offered here.</p>
@@ -713,6 +710,13 @@ export function OutgoingEditor() {
                     <option key={c} value={c} />
                   ))}
                 </datalist>
+              </div>
+            )}
+            {header.warehouseId && (
+              <div className="line-foot">
+                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blankLine()])}>
+                  + Add line
+                </button>
               </div>
             )}
             <p className="prq-hint">

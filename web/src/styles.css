@@ -5821,6 +5821,17 @@ a.icon-row:hover {
   margin-top: var(--card-gap);
 }
 
+/* "+ Add line" under a line table (2026-11-25, the owner's call: on a long
+   list the button in the card's head was a scroll away). Left, where the
+   next line will appear. */
+.line-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
 .modal-foot-question {
   margin-right: auto;
   align-self: center;

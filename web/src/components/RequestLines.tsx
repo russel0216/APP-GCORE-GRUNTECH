@@ -182,9 +182,6 @@ export function RequestLinesCard({
               Apply the default to all lines
             </button>
           )}
-          <button type="button" className="btn btn-sm" onClick={() => onChange([...lines.filter((l) => !isBlankLine(l)), blankRequestLine()])}>
-            + Add line
-          </button>
         </div>
       </div>
       <div className="table-wrap qe-table-wrap">
@@ -294,6 +291,11 @@ export function RequestLinesCard({
             })}
           </tbody>
         </table>
+      </div>
+      <div className="line-foot">
+        <button type="button" className="btn btn-sm" onClick={() => onChange([...lines.filter((l) => !isBlankLine(l)), blankRequestLine()])}>
+          + Add line
+        </button>
       </div>
       {parts && (parts.finance > 0 || parts.cash > 0) && (
         <p className="prq-hint">

@@ -961,11 +961,6 @@ export function PulloutEditor() {
               {data.items.every((it) => ownPick(it).include) ? 'Untick all' : 'Tick all'}
             </button>
           )}
-          {freeMode && form.warehouseId && (
-            <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
-              + Add line
-            </button>
-          )}
         </div>
         {!form.warehouseId ? (
           <Empty
@@ -1038,72 +1033,79 @@ export function PulloutEditor() {
             </div>
           )
         ) : freeMode ? (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Item from the shelf</th>
-                  <th className="right">Available</th>
-                  <th className="right proc-col-input">Quantity</th>
-                  <th>Serial / batch</th>
-                  <th>Condition</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {free.map((l, n) => {
-                  const it = itemById.get(l.itemId);
-                  return (
-                    <tr key={l.key}>
-                      <td>{n + 1}</td>
-                      <td>
-                        <select aria-label={`Item — line ${n + 1}`} value={l.itemId} onChange={(e) => setFreeLine(l.key, { itemId: e.target.value })}>
-                          {itemOptions(l.itemId)}
-                        </select>
-                      </td>
-                      <td className="right mono">
-                        {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
-                        {it?.orderStock && <div className="faint">held for the order</div>}
-                      </td>
-                      <td>
-                        <NumberInput
-                          kind="quantity"
-                          className="mono proc-cell-input"
-                          step="0.001"
-                          aria-label={`Quantity — line ${n + 1}`}
-                          value={l.quantity}
-                          onChange={(e) => setFreeLine(l.key, { quantity: e.target.value })}
-                        />
-                      </td>
-                      <td className="inc-unit-cell">
-                        <input aria-label={`Serial or batch — line ${n + 1}`} value={l.serialNo} maxLength={120} onChange={(e) => setFreeLine(l.key, { serialNo: e.target.value })} />
-                      </td>
-                      <td className="inc-unit-cell">
-                        <input aria-label={`Condition — line ${n + 1}`} list="pullout-conditions" value={l.condition} maxLength={80} onChange={(e) => setFreeLine(l.key, { condition: e.target.value })} />
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-icon"
-                          aria-label={`Remove line ${n + 1}`}
-                          onClick={() => {
-                            setFree((ls) => {
-                              const rest = ls.filter((x) => x.key !== l.key);
-                              return rest.length ? rest : [blankFree()];
-                            });
-                            setDirty(true);
-                          }}
-                        >
-                          ✕
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Item from the shelf</th>
+                    <th className="right">Available</th>
+                    <th className="right proc-col-input">Quantity</th>
+                    <th>Serial / batch</th>
+                    <th>Condition</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {free.map((l, n) => {
+                    const it = itemById.get(l.itemId);
+                    return (
+                      <tr key={l.key}>
+                        <td>{n + 1}</td>
+                        <td>
+                          <select aria-label={`Item — line ${n + 1}`} value={l.itemId} onChange={(e) => setFreeLine(l.key, { itemId: e.target.value })}>
+                            {itemOptions(l.itemId)}
+                          </select>
+                        </td>
+                        <td className="right mono">
+                          {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
+                          {it?.orderStock && <div className="faint">held for the order</div>}
+                        </td>
+                        <td>
+                          <NumberInput
+                            kind="quantity"
+                            className="mono proc-cell-input"
+                            step="0.001"
+                            aria-label={`Quantity — line ${n + 1}`}
+                            value={l.quantity}
+                            onChange={(e) => setFreeLine(l.key, { quantity: e.target.value })}
+                          />
+                        </td>
+                        <td className="inc-unit-cell">
+                          <input aria-label={`Serial or batch — line ${n + 1}`} value={l.serialNo} maxLength={120} onChange={(e) => setFreeLine(l.key, { serialNo: e.target.value })} />
+                        </td>
+                        <td className="inc-unit-cell">
+                          <input aria-label={`Condition — line ${n + 1}`} list="pullout-conditions" value={l.condition} maxLength={80} onChange={(e) => setFreeLine(l.key, { condition: e.target.value })} />
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-icon"
+                            aria-label={`Remove line ${n + 1}`}
+                            onClick={() => {
+                              setFree((ls) => {
+                                const rest = ls.filter((x) => x.key !== l.key);
+                                return rest.length ? rest : [blankFree()];
+                              });
+                              setDirty(true);
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="line-foot">
+              <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
+                + Add line
+              </button>
+            </div>
+          </>
         ) : (
           <div className="table-wrap">
             <table className="data">

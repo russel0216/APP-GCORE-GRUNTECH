@@ -528,9 +528,6 @@ export function ClaimEditor() {
                     Apply the default to all lines
                   </button>
                 )}
-                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(today)])}>
-                  + Add line
-                </button>
               </div>
             </div>
             {perLine && (
@@ -660,6 +657,11 @@ export function ClaimEditor() {
                   })}
                 </tbody>
               </table>
+            </div>
+            <div className="line-foot">
+              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(today)])}>
+                + Add line
+              </button>
             </div>
             {missingReceipts > 0 && (
               <div className="alert warn">

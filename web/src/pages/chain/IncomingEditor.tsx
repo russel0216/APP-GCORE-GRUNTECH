@@ -634,11 +634,6 @@ export function IncomingEditor() {
                   Receive all that is left
                 </button>
               )}
-              {mode === 'none' && (
-                <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
-                  + Add line
-                </button>
-              )}
             </div>
             {mode === 'order' ? (
               !order ? (
@@ -855,6 +850,13 @@ export function IncomingEditor() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {mode === 'none' && (
+              <div className="line-foot">
+                <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
+                  + Add line
+                </button>
               </div>
             )}
             <p className="prq-hint">
