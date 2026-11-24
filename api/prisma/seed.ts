@@ -59,6 +59,7 @@ import { applyChainAccess } from '../src/shared/chainAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { importBuilkTpsc } from '../src/shared/builkTpsc';
 import { importBuilkAjoya } from '../src/shared/builkAjoya';
+import { importBuilkAmherst } from '../src/shared/builkAmherst';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1966,6 +1967,14 @@ async function main() {
     const builk = await importBuilkAjoya();
     if (builk?.done) console.log(`  ✓ Builk Ajoya: ${builk.orders.length} orders on ${builk.job}`);
     else if (builk) console.log(`  · Builk Ajoya import waits: ${builk.reason}`);
+  }
+
+  // ── Builk's purchases for CMG '26 AMHERST LAB, j-26103 (2026-11-24) ───────
+  // Once, onto the project built from quotation 0832610006 (shared/builkAmherst.ts).
+  {
+    const builk = await importBuilkAmherst();
+    if (builk?.done) console.log(`  ✓ Builk Amherst: ${builk.orders.length} orders on ${builk.job}`);
+    else if (builk) console.log(`  · Builk Amherst import waits: ${builk.reason}`);
   }
 
   // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
