@@ -468,6 +468,14 @@ export function PurchaseRequestDetail() {
               hint: 'Take what the warehouse holds instead of buying it',
               onSelect: () => navigate(`/g-chain/pullout-slips/new?request=${pr.id}`),
             },
+          // A warehouse stock request's goods leave the shelf on a "Something else" slip, filled from it (2026-11-24).
+          pr.kind === 'STOCK_REPLENISHMENT' &&
+            ['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'].includes(String(pr.status)) &&
+            can('gchain.pullout_slips.create') && {
+              label: 'Pull out from stock…',
+              hint: 'Release what this request brought into the warehouse',
+              onSelect: () => navigate(`/g-chain/pullout-slips/new?kind=other&fromRequest=${pr.id}`),
+            },
           pr.canWithdraw && {
             label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',

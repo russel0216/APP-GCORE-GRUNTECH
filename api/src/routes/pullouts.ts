@@ -695,6 +695,53 @@ pulloutRoutes.get(
  * "Against" picker: ISSUED sales orders, or APPROVED direct-to-project
  * requests not yet wholly ordered — numbers, customers and projects only.
  */
+/**
+ * A WAREHOUSE STOCK request's goods, to start a "Something else" slip from
+ * (2026-11-24, the owner's call, on GT-PR-2026-0037 / GT-PO-2026-0025: the
+ * request's "Pull out from stock…" refused a stock request). Its warehouse,
+ * who asked, why, and per line the item its order received — the request
+ * line's own item, else the one its order lines were filed under — with the
+ * quantity received. Fills the form; the slip still decides nothing here.
+ */
+pulloutRoutes.get(
+  '/from-request/:requestId',
+  require_('gchain.pullout_slips.create'),
+  handler(async (req, res) => {
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: req.params.requestId },
+      select: {
+        id: true,
+        number: true,
+        kind: true,
+        status: true,
+        purpose: true,
+        warehouseId: true,
+        requestedById: true,
+        items: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            itemId: true,
+            quantity: true,
+            nature: true,
+            orderItems: { where: { order: { status: { not: 'CANCELLED' } } }, select: { itemId: true, receivedQty: true } },
+          },
+        },
+      },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.kind !== 'STOCK_REPLENISHMENT') throw badRequest(`${pr.number} is not a warehouse stock request`);
+    const lines: { itemId: string; quantity: number }[] = [];
+    for (const l of pr.items) {
+      if (l.nature === 'SERVICE') continue;
+      const received = new Map<string, number>();
+      for (const o of l.orderItems) if (o.itemId && Number(o.receivedQty) > 0) received.set(o.itemId, (received.get(o.itemId) ?? 0) + Number(o.receivedQty));
+      if (received.size) for (const [itemId, quantity] of received) lines.push({ itemId, quantity });
+      else if (l.itemId) lines.push({ itemId: l.itemId, quantity: Number(l.quantity) });
+    }
+    res.json({ id: pr.id, number: pr.number, purpose: pr.purpose, warehouseId: pr.warehouseId, requestedById: pr.requestedById, lines });
+  }),
+);
+
 pulloutRoutes.get(
   '/sources',
   require_('gchain.pullout_slips.create'),

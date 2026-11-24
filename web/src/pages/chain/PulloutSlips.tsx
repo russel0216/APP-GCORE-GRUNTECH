@@ -434,6 +434,8 @@ export function PulloutEditor() {
   const salesOrderParam = params.get('salesOrder');
   const requestParam = params.get('request');
   const noneParam = params.get('kind') === 'other';
+  // A warehouse stock request to fill a "Something else" slip from (2026-11-24).
+  const fromRequestParam = noneParam ? params.get('fromRequest') : null;
   // A project's own stock (2026-10-18): `?project=<jobId>`.
   const projectParam = params.get('project');
   const [existing, setExisting] = useState<Record<string, unknown> | null>(null);
@@ -481,6 +483,9 @@ export function PulloutEditor() {
         let none = noneParam;
         let jobId = projectParam;
         let warehouseId = '';
+        type FromRequest = { number: string; purpose: string | null; warehouseId: string | null; requestedById: string; lines: { itemId: string; quantity: number }[] };
+        const fromReq = !editing && fromRequestParam ? await api.get<FromRequest>(`/pullout-slips/from-request/${fromRequestParam}`) : null;
+        if (fromReq?.warehouseId) warehouseId = fromReq.warehouseId;
         if (editing) {
           slip = await api.get<Record<string, unknown>>(`/pullout-slips/${id}`);
           soId = (slip.salesOrderId as string | null) ?? null;
@@ -546,7 +551,17 @@ export function PulloutEditor() {
             requestedById: src.owner?.id ?? me?.user.id ?? '',
             poReference: src.poReference ?? '',
             drReference: src.drReference ?? '',
+            ...(fromReq
+              ? {
+                  requestedById: fromReq.requestedById || me?.user.id || '',
+                  reason: `Bought on ${fromReq.number}${fromReq.purpose ? ` — ${fromReq.purpose}` : ''}`,
+                }
+              : {}),
           });
+          if (fromReq?.lines.length) {
+            setFree(fromReq.lines.map((l) => ({ key: `f${++freeSeq}`, itemId: l.itemId, quantity: String(l.quantity), serialNo: '', condition: 'Brand new' })));
+            setDirty(true);
+          }
           setPicks(
             Object.fromEntries(src.lines.map((l) => [l.id, { include: l.left > 0, itemId: l.itemId ?? '', quantity: String(l.left), serialNo: '', condition: 'Brand new' }])),
           );
@@ -559,7 +574,7 @@ export function PulloutEditor() {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, id, salesOrderParam, requestParam, noneParam, projectParam]);
+  }, [editing, id, salesOrderParam, requestParam, noneParam, projectParam, fromRequestParam]);
 
   // A warehouse chosen: what it holds now.
   async function chooseWarehouse(warehouseId: string) {
