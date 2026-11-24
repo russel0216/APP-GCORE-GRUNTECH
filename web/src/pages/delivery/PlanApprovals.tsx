@@ -42,6 +42,8 @@ export interface PlanRequest {
   drawingNo: string | null;
   revision: string;
   discipline: string | null;
+  /** The team handling the work; its managers decide the request (null: the requester's own). */
+  team?: { id: string; code: string; name: string } | null;
   notes: string | null;
   status: string;
   amount: number | null;
@@ -241,8 +243,16 @@ export function PlanRequestModal({
     drawingNo: existing?.drawingNo ?? '',
     revision: existing && existing.revision !== '0' ? existing.revision : '',
     discipline: existing?.discipline ?? '',
+    teamId: existing?.team?.id ?? '',
     notes: existing?.notes ?? '',
   });
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then(setTeams)
+      .catch(() => {});
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
@@ -258,7 +268,7 @@ export function PlanRequestModal({
     setBusy(true);
     setError(null);
     try {
-      const body = { ...form, title: form.title.trim() || cad?.title || '' };
+      const body = { ...form, teamId: form.teamId || null, title: form.title.trim() || cad?.title || '' };
       const saved = existing
         ? await api.put<PlanRequest>(`/plans/${existing.id}`, body)
         : await api.post<PlanRequest>('/plans', { ...body, jobId, cadJobOrderId: cadId || null });
@@ -314,6 +324,18 @@ export function PlanRequestModal({
       )}
       <Field label="Discipline">
         <input value={form.discipline} onChange={(e) => set('discipline', e.target.value)} placeholder={cad?.drawingType ?? 'Mechanical, electrical, civil…'} maxLength={80} />
+      </Field>
+      <Field label="Team handling it" hint="Its Technical Manager and Team Leader approve this request — your own team unless you pick another">
+        <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
+          <option value="">— my own team —</option>
+          {teams
+            .filter((t) => t.isActive || t.id === form.teamId)
+            .map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+        </select>
       </Field>
       <Field label="Notes">
         <textarea rows={2} value={form.notes} onChange={(e) => set('notes', e.target.value)} />
@@ -501,6 +523,14 @@ export function PlanApprovalPage() {
           <dd>{row.revision && row.revision !== '0' ? row.revision : '—'}</dd>
           <dt>Discipline</dt>
           <dd>{row.discipline ?? '—'}</dd>
+          {row.team && (
+            <>
+              <dt>Team handling it</dt>
+              <dd>
+                {row.team.code} — {row.team.name}
+              </dd>
+            </>
+          )}
           <dt>Customer</dt>
           <dd>{row.job.customer?.name ?? '—'}</dd>
           {row.notes && (

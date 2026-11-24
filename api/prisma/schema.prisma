@@ -811,6 +811,8 @@ model Industry {
   quotationsTagged   Quotation[]         @relation("QuotationTeam")
   /// Costings whose approval goes to this team's managers (2026-11-24).
   costingsHandled    Costing[]           @relation("CostingTeam")
+  /// Requests for Approval whose route goes to this team's managers (2026-11-24).
+  plansHandled       ApprovedPlan[]      @relation("PlanTeam")
   invoicesCredited   Invoice[]           @relation("InvoiceTeam")
   salesOrders        SalesOrder[]        @relation("SalesOrderTeam")
   supporters         UserSupportTeam[]
@@ -2713,6 +2715,11 @@ model ApprovedPlan {
   drawingNo    String?
   revision     String     @default("0")
   discipline   String?
+  /// The team handling the work (2026-11-24): its Technical Manager and Team
+  /// Leader decide the request (`ApprovalContext.teamId`). Null: the
+  /// requester's own team.
+  teamId       String?
+  team         Industry?  @relation("PlanTeam", fields: [teamId], references: [id], onDelete: SetNull)
   status       PlanStatus @default(DRAFT)
   /// The project's contract value, snapshotted at submit — the amount band
   /// that adds the CEO / President above ₱1,000,000.

@@ -55,6 +55,7 @@ const VIEW = ['gops.plans.view_all', 'gops.plans.view_own'];
 export const PLAN_LINK = (id: string) => `/g-ops/plans/${id}`;
 
 const planInclude = {
+  team: { select: { id: true, code: true, name: true } },
   job: {
     select: {
       id: true,
@@ -126,7 +127,7 @@ async function present(me: ResolvedUser, row: PlanRow) {
     customerDecisionLabel: decisionLabel(row.customerDecision),
     // The route a draft WOULD take, by name — the project's contract value
     // picks the band, as the submit will.
-    approvalRoute: editable ? await routeBrief(DOC, contractValue, row.uploadedById, null, { jobId: row.jobId }) : null,
+    approvalRoute: editable ? await routeBrief(DOC, contractValue, row.uploadedById, null, { jobId: row.jobId, teamId: row.teamId ?? null }) : null,
   };
 }
 
@@ -314,12 +315,21 @@ planApprovalRoutes.get(
   }),
 );
 
+/** A team named must be an active one. */
+async function checkTeam(teamId: string | null | undefined) {
+  if (!teamId) return;
+  const team = await prisma.industry.findUnique({ where: { id: teamId }, select: { isActive: true } });
+  if (!team?.isActive) throw badRequest('Choose an active team to handle the work');
+}
+
 const planSchema = z.object({
   title: z.string().trim().min(2, 'Say what is to be approved').max(300),
   description: z.string().trim().max(5000).optional().nullable(),
   drawingNo: z.string().trim().max(80).optional().nullable(),
   revision: z.string().trim().max(20).optional().nullable(),
   discipline: z.string().trim().max(80).optional().nullable(),
+  /** The team handling the work; its managers decide the request. Null: the requester's own. */
+  teamId: z.string().optional().nullable(),
   notes: z.string().trim().max(5000).optional().nullable(),
 });
 
@@ -359,6 +369,7 @@ export async function requestFromCad(
         drawingNo: cad.number,
         revision: `R${latest.sequence}`,
         discipline: fields.discipline?.trim() || cad.drawingType?.name || null,
+        teamId: fields.teamId || null,
         notes: fields.notes?.trim() || `From CAD job order ${cad.number}: ${latest.note}`,
         uploadedById: me.id,
       },
@@ -377,6 +388,7 @@ planApprovalRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(planSchema.extend({ jobId: z.string().min(1, 'Which project?'), cadJobOrderId: z.string().optional().nullable() }), req.body);
+    await checkTeam(body.teamId);
     const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true, number: true, status: true } });
     if (!job) throw notFound('Project not found');
     if (job.status === 'CANCELLED') throw badRequest(`${job.number} is cancelled`);
@@ -397,6 +409,7 @@ planApprovalRoutes.post(
             drawingNo: body.drawingNo || null,
             revision: body.revision || '0',
             discipline: body.discipline || null,
+            teamId: body.teamId || null,
             notes: body.notes || null,
             uploadedById: me.id,
           },
@@ -414,6 +427,7 @@ planApprovalRoutes.put(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(planSchema, req.body);
+    await checkTeam(body.teamId);
     const row = await loadVisible(me, req.params.id);
     if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request can change it');
     if (!EDITABLE.includes(row.status)) throw badRequest('Only a draft can be changed — pull it back first');
@@ -425,6 +439,7 @@ planApprovalRoutes.put(
         drawingNo: body.drawingNo || null,
         revision: body.revision || '0',
         discipline: body.discipline || null,
+        ...(body.teamId !== undefined ? { teamId: body.teamId || null } : {}),
         notes: body.notes || null,
       },
     });
@@ -474,6 +489,8 @@ planApprovalRoutes.post(
         link: PLAN_LINK(row.id),
         requesterId: row.uploadedById,
         jobId: row.jobId,
+        // The team handling the work: its Technical Manager and Team Leader decide.
+        teamId: row.teamId ?? null,
       });
     } catch (err) {
       await prisma.approvedPlan.updateMany({ where: { id: row.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
@@ -721,7 +738,7 @@ planApprovalRoutes.get(
     const currency = await companyCurrency();
     const contractValue = num(row.amount ?? row.job.contractValue);
     const slots = EDITABLE.includes(row.status)
-      ? await approvalSlots(DOC, row.id, { amount: contractValue, requesterId: row.uploadedById, jobId: row.jobId })
+      ? await approvalSlots(DOC, row.id, { amount: contractValue, requesterId: row.uploadedById, jobId: row.jobId, teamId: row.teamId ?? null })
       : await approvalSlots(DOC, row.id);
     const requester = { name: row.uploadedBy.name, ...(await contactOf(row.uploadedById)) };
     const signatories: Signatory[] = [
