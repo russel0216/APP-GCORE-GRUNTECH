@@ -8229,12 +8229,19 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   `shared/outgoingRaisers.ts`: a super admin, or a holder of
   `gchain.stock_issuance.create` who holds the `warehouse_supervisor` role
   (Warehouse Officer — Jeric Gasiong) or is the active "Reports to" of an
-  active holder of it (Dina Gasiong). `POST /stock-issues`, `/:id/submit`
+  active holder of it (Dina Gasiong), or holds `ceo` (CEO / President,
+  Carter Gasiong — added the same day). `POST /stock-issues`, `/:id/submit`
   and `/:id/issue` refuse anyone else (403, `OUTGOING_RAISER_REFUSAL`); the
   list's summary and `/options` send `canRaise`, which shows "+ New
   outgoing" and the editor's Save / Submit; `canSubmit` / `canIssue` on a
   slip read it. Create on Admin › Roles alone no longer raises one; reading,
   confirming receipt and the rest are unchanged. verify-chain pins it.
+- **A pull-out slip shows its COST on its page, never on its paper**
+  (2026-11-24, the owner's call): the record page's Items table adds Unit
+  cost and Amount (the warehouse's average — an estimate until it is pulled
+  out, fixed then) and a Total cost row; the PDF stays cost-free. Expected
+  back must be on or after the pull-out date (a half-typed year read "Dec
+  31, 1").
 - **Outgoing is the requestor's RECEIVE PROOF** (2026-10-15, the owner's
   call: "Outgoing = internal receive proof to the requestor … no customer
   involved"; his "Outgoing Delivery Receipt Slip" as the guide).

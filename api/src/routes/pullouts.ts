@@ -392,6 +392,15 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
     source = { ...NO_SOURCE, jobId: job.id, job: { id: job.id, number: job.number, name: job.name }, label: `No source document — charged to ${job.number}` };
   }
   const free = body.kind === 'OTHER' || body.kind === 'PROJECT_STOCK';
+  // Expected back is a day on or after the slip's own (2026-11-24: a year
+  // typed half-way read "Dec 31, 1" on the page).
+  {
+    const out = asDate(body.pulloutDate) ?? today();
+    const back = asDate(body.returnBy);
+    if (back && (back.getUTCFullYear() < 2000 || back.getTime() < out.getTime() - 86_400_000)) {
+      throw badRequest('Expected back must be on or after the pull-out date');
+    }
+  }
   if (body.requestedById && !(await prisma.user.findUnique({ where: { id: body.requestedById }, select: { id: true } }))) {
     throw badRequest('The person who asked for it is not on file');
   }

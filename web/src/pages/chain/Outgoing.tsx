@@ -54,7 +54,7 @@ interface IssueSummary {
   drafts: number;
   issued: number;
   toConfirm: number;
-  /** Only the Warehouse Officer and whoever they report to raise a slip (the owner's call, 2026-11-24). */
+  /** Only the Warehouse Officer, whoever they report to and the CEO / President raise a slip (the owner's call, 2026-11-24). */
   canRaise?: boolean;
 }
 
@@ -512,8 +512,8 @@ export function OutgoingEditor() {
         {!canRaise && (
           <div className="alert warn" role="status">
             {existing
-              ? 'Only the Warehouse Officer and the person they report to send an outgoing slip for approval or issue it.'
-              : 'Outgoing slips are raised by the Warehouse Officer and the person they report to — ask them to raise this one.'}
+              ? 'Only the Warehouse Officer, the person they report to and the CEO / President send an outgoing slip for approval or issue it.'
+              : 'Outgoing slips are raised by the Warehouse Officer, the person they report to and the CEO / President — ask them to raise this one.'}
           </div>
         )}
         {attempted && problems.length > 0 && (

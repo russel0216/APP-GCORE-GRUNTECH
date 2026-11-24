@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, useToast } from '../../components/ui';
+import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -1241,6 +1241,7 @@ export function PulloutDetail() {
   const number = String(slip.number);
   const status = String(slip.status);
   const isDraft = status === 'DRAFT';
+  const pulledOut = status === 'PULLED_OUT';
   const so = slip.salesOrder as { id: string; number: string; customer: { name: string } } | null;
   const pr = slip.request as { id: string; number: string } | null;
   const job = slip.job as { id: string; number: string; name: string } | null;
@@ -1256,6 +1257,8 @@ export function PulloutDetail() {
     quantity: number;
     serialNo: string | null;
     condition: string | null;
+    unitCost: number;
+    amount: number;
     item: { id: string; code: string; partNumber: string | null; brand: string | null; name: string; description?: string | null; unit: string };
     sourceLine: { title: string; unit: string } | null;
   }[];
@@ -1465,6 +1468,8 @@ export function PulloutDetail() {
                 <th>Condition</th>
                 {!!(so || pr) && <th>Against</th>}
                 <th className="right">Qty</th>
+                <th className="right">{pulledOut ? 'Unit cost' : 'Unit cost (est.)'}</th>
+                <th className="right">Amount</th>
               </tr>
             </thead>
             <tbody>
@@ -1486,11 +1491,28 @@ export function PulloutDetail() {
                   <td className="right mono">
                     {i.quantity} {i.item.unit}
                   </td>
+                  <td className="right mono">{formatMoney(i.unitCost)}</td>
+                  <td className="right mono">{formatMoney(i.amount)}</td>
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr>
+                <th colSpan={(so || pr ? 4 : 3) + 2} className="right">
+                  Total cost
+                </th>
+                <td className="right mono">
+                  <strong>{formatMoney(items.reduce((s, i) => s + Math.round(Number(i.amount) * 100), 0) / 100)}</strong>
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
+        <p className="faint proc-card-note">
+          {pulledOut
+            ? "At the warehouse's average cost when it went out. The cost shows on this page only — never on the printed slip."
+            : "An estimate at the warehouse's average cost today; fixed when it is pulled out. The cost shows on this page only — never on the printed slip."}
+        </p>
         {releasedBy && typeof slip.releasedAt === 'string' && (
           <p className="faint proc-card-note">
             Released from {warehouse.name} by {releasedBy.name} on {formatDate(slip.releasedAt)}
