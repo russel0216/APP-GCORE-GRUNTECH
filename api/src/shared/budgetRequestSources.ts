@@ -203,6 +203,49 @@ export async function projectOfQuotation(quotationId: string, db: Db = prisma): 
   });
 }
 
+/**
+ * `projectOfQuotation()` for many quotations at once (2026-11-24, the picker):
+ * each quotation whose cost a project holds, with that project. Three queries
+ * whatever the count.
+ */
+export async function projectsOfQuotations(quotationIds: string[], db: Db = prisma): Promise<Map<string, { id: string; number: string }>> {
+  const out = new Map<string, { id: string; number: string }>();
+  if (!quotationIds.length) return out;
+  const revisions = await db.quotationRevision.findMany({
+    where: { quotationId: { in: quotationIds } },
+    select: { id: true, quotationId: true, costingId: true, otherCostings: { select: { costingId: true } } },
+  });
+  if (!revisions.length) return out;
+  const byRevision = new Map(revisions.map((r) => [r.id, r.quotationId]));
+  const byCosting = new Map<string, Set<string>>();
+  for (const r of revisions) {
+    for (const c of [r.costingId, ...r.otherCostings.map((o) => o.costingId)]) {
+      if (!c) continue;
+      if (!byCosting.has(c)) byCosting.set(c, new Set());
+      byCosting.get(c)!.add(r.quotationId);
+    }
+  }
+  const costingIds = [...byCosting.keys()];
+  const jobs = await db.job.findMany({
+    where: {
+      status: { not: 'CANCELLED' },
+      OR: [
+        { quotationRevisionId: { in: [...byRevision.keys()] } },
+        ...(costingIds.length ? [{ costingId: { in: costingIds } }, { otherCostings: { some: { costingId: { in: costingIds } } } }] : []),
+      ],
+    },
+    select: { id: true, number: true, quotationRevisionId: true, costingId: true, otherCostings: { select: { costingId: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  for (const j of jobs) {
+    const quotations = new Set<string>();
+    if (j.quotationRevisionId && byRevision.has(j.quotationRevisionId)) quotations.add(byRevision.get(j.quotationRevisionId)!);
+    for (const c of [j.costingId, ...j.otherCostings.map((o) => o.costingId)]) for (const q of (c && byCosting.get(c)) || []) quotations.add(q);
+    for (const q of quotations) if (!out.has(q)) out.set(q, { id: j.id, number: j.number });
+  }
+  return out;
+}
+
 /** Once a project holds the budget, a new request is the project's — never the sales order's or the quotation's. */
 async function refuseOncePulled(number: string, quotationId: string) {
   const job = await projectOfQuotation(quotationId);

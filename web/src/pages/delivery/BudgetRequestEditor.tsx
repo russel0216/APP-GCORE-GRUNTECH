@@ -121,7 +121,10 @@ export function BudgetRequestEditor() {
   const presetId = preset ? params.get(preset[1]) : null;
 
   const [existing, setExisting] = useState<BudgetRequest | null>(null);
-  const [choices, setChoices] = useState<{ id: string; number: string; name: string; sub?: string }[]>([]);
+  const [choices, setChoices] = useState<{ id: string; number: string; name: string; sub?: string; project?: { id: string; number: string } | null }[]>([]);
+  // A quotation or sales order whose cost a project already holds moves the
+  // request onto that project (2026-11-24): the number it was picked by.
+  const [movedFrom, setMovedFrom] = useState<{ number: string; project: string } | null>(null);
   const [search, setSearch] = useState('');
   const [budget, setBudget] = useState<Budget | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
@@ -233,7 +236,7 @@ export function BudgetRequestEditor() {
   const onTravelPath = useLocation().pathname.includes('/travel-requests/');
   const travel = existing ? !!existing.isTravel : params.get('kind') === 'travel' || onTravelPath;
   const word = travel ? 'travel request' : 'budget request';
-  const kindChoices = travel ? SOURCE_CHOICES.filter((c) => TRAVEL_KINDS.includes(c.kind)) : SOURCE_CHOICES;
+  const kindChoices = travel ? SOURCE_CHOICES.filter((c) => TRAVEL_KINDS.includes(c.kind) || (c.kind === 'project' && header.kind === 'project')) : SOURCE_CHOICES;
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);
   // Each item's place (2026-11-11): a project's or the office's request may
@@ -488,6 +491,7 @@ export function BudgetRequestEditor() {
                       onChange={(e) => {
                         setSearch('');
                         setChoices([]);
+                        setMovedFrom(null);
                         setHeader((h) => ({ ...h, kind: e.target.value as SourceKind, sourceId: '', costCategoryId: '' }));
                       }}
                     >
@@ -501,19 +505,40 @@ export function BudgetRequestEditor() {
                   <Field
                     label={kindWord.label.replace(/^An? /, '').replace(/^./, (c) => c.toUpperCase())}
                     required
-                    hint={header.kind === 'project' ? 'Running projects' : 'Type to search by number, name or customer'}
+                    hint={
+                      movedFrom && header.kind === 'project'
+                        ? `${movedFrom.number}'s cost is already in ${movedFrom.project}'s budget, so this ${word} is charged to the project`
+                        : header.kind === 'project'
+                          ? 'Running projects'
+                          : 'Type to search by number, name or customer — one already in a project is charged to the project'
+                    }
                     error={attempted && !header.sourceId ? problems[0] : null}
                   >
                     <div className="br-source-pick">
                       {header.kind !== 'project' && (
                         <input type="search" value={search} placeholder="Search…" aria-label="Search" onChange={(e) => setSearch(e.target.value)} />
                       )}
-                      <SearchSelect value={header.sourceId} onChange={(e) => setHeader((h) => ({ ...h, sourceId: e.target.value, costCategoryId: '' }))}>
+                      <SearchSelect
+                        value={header.sourceId}
+                        onChange={(e) => {
+                          const picked = choices.find((c) => c.id === e.target.value);
+                          if (picked?.project && header.kind !== 'project') {
+                            // Its cost is the project's now: the request goes there.
+                            setMovedFrom({ number: picked.number, project: picked.project.number });
+                            setSearch('');
+                            setChoices([{ id: picked.project.id, number: picked.project.number, name: picked.name, sub: picked.sub }]);
+                            setHeader((h) => ({ ...h, kind: 'project', sourceId: picked.project!.id, costCategoryId: '' }));
+                            return;
+                          }
+                          setHeader((h) => ({ ...h, sourceId: e.target.value, costCategoryId: '' }));
+                        }}
+                      >
                         <option value="">— choose —</option>
                         {choices.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.number} — {p.name}
                             {p.sub ? ` · ${p.sub}` : ''}
+                            {p.project ? ` · in ${p.project.number}` : ''}
                           </option>
                         ))}
                       </SearchSelect>

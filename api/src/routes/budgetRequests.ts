@@ -36,6 +36,7 @@ import { projectBudgetByLine } from '../shared/projectBudget';
 import {
   SOURCE_INCLUDE,
   checkSource,
+  projectsOfQuotations,
   raisedOn,
   recordBudget,
   sourceFilter,
@@ -593,24 +594,27 @@ budgetRequestRoutes.get(
     if (kind === 'sales_order') {
       const ids = await owners('sales_orders');
       const rows = await prisma.salesOrder.findMany({
-        // Never one whose cost a project already holds (2026-11-14) — the request is the project's then.
-        where: { status: 'ISSUED', quotation: { revisions: { none: { jobs: { some: { status: { not: 'CANCELLED' } } } } } }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { quotation: { subject: like } }, { customer: { name: like } }] } : {}) },
-        select: { id: true, number: true, quotation: { select: { subject: true } }, customer: { select: { name: true } } },
+        where: { status: 'ISSUED', ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { quotation: { subject: like } }, { customer: { name: like } }] } : {}) },
+        select: { id: true, number: true, quotationId: true, quotation: { select: { subject: true } }, customer: { select: { name: true } } },
         orderBy: { createdAt: 'desc' },
         take: 50,
       });
-      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.quotation.subject, sub: r.customer.name })));
+      // One whose cost a project already holds (2026-11-14) is listed with
+      // that project: the page charges the request to the project instead.
+      const pulled = await projectsOfQuotations([...new Set(rows.map((r) => r.quotationId))]);
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.quotation.subject, sub: r.customer.name, project: pulled.get(r.quotationId) ?? null })));
       return;
     }
     if (kind === 'quotation') {
       const ids = await owners('quotations');
       const rows = await prisma.quotation.findMany({
-        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] }, revisions: { none: { jobs: { some: { status: { not: 'CANCELLED' } } } } }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { subject: like }, { customer: { name: like } }] } : {}) },
+        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { subject: like }, { customer: { name: like } }] } : {}) },
         select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
         orderBy: { createdAt: 'desc' },
         take: 50,
       });
-      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.subject, sub: r.customer.name })));
+      const pulled = await projectsOfQuotations(rows.map((r) => r.id));
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.subject, sub: r.customer.name, project: pulled.get(r.id) ?? null })));
       return;
     }
     if (kind === 'costing') {
