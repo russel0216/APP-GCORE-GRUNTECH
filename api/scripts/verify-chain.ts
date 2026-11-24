@@ -3503,6 +3503,22 @@ async function main() {
     const keeper = await mkUser('Verify Keeper', 'keeper@verifyc.local', storeRole.id);
     const keeperToken = signToken(keeper.id, keeper.email);
 
+    // Outgoing is raised only by the Warehouse Officer and the person they
+    // report to (2026-11-24, the owner's call): Create on Admin › Roles is
+    // not enough. The keeper is made an officer's "Reports to".
+    {
+      const outsider = await mkUser('Verify Outsider', 'outsider@verifyc.local', storeRole.id);
+      const refused = await api(signToken(outsider.id, outsider.email), 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} not theirs to raise` });
+      check('Outgoing: Create alone does not raise a slip (403)', refused.status === 403, `${refused.status} ${JSON.stringify(refused.body).slice(0, 120)}`);
+      const before = await api(keeperToken, 'GET', '/stock-issues/options');
+      check('Outgoing: nobody reports to the keeper yet, so they raise none', before.status === 200 && before.body.canRaise === false, `${before.status} ${JSON.stringify(before.body.canRaise)}`);
+      const officer = await makeUser('Verify Warehouse Officer', 'whofficer@verifyc.local', ['warehouse_supervisor']);
+      await prisma.user.update({ where: { id: officer.id }, data: { supervisorId: keeper.id } });
+      const officerMay = await api(signToken(officer.id, officer.email), 'GET', '/stock-issues/options');
+      const keeperMay = await api(keeperToken, 'GET', '/stock-issues/options');
+      check('Outgoing: the Warehouse Officer and the person they report to may raise one', officerMay.body.canRaise === true && keeperMay.body.canRaise === true, `${officerMay.body.canRaise} ${keeperMay.body.canRaise}`);
+    }
+
     let day = manilaDayKey(new Date());
     const issueRes = await api(keeperToken, 'POST', '/stock-issues', {
       warehouseId: warehouse.id,

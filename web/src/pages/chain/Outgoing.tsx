@@ -54,11 +54,13 @@ interface IssueSummary {
   drafts: number;
   issued: number;
   toConfirm: number;
+  /** Only the Warehouse Officer and whoever they report to raise a slip (the owner's call, 2026-11-24). */
+  canRaise?: boolean;
 }
 
 export function StockIssues() {
-  const { can } = useAuth();
   const navigate = useNavigate();
+  const [canRaise, setCanRaise] = useState(false);
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
     api.get<{ id: string; name: string }[]>('/warehouses/lookup').then(setWarehouses).catch(() => {});
@@ -115,6 +117,7 @@ export function StockIssues() {
         onRowClick={(i) => navigate(`/g-chain/outgoing/${i.id}`)}
         emptyTitle="Nothing issued yet"
         emptyHint="An outgoing slip takes stock out of a warehouse for the person who asked for it, who confirms receiving it."
+        onSummary={(raw) => setCanRaise(!!(raw as unknown as IssueSummary | null)?.canRaise)}
         summary={(raw) => {
           const s = raw as unknown as IssueSummary;
           return (
@@ -159,7 +162,7 @@ export function StockIssues() {
           { key: 'warehouseId', label: 'Warehouse', options: warehouses.map((w) => ({ value: w.id, label: w.name })) },
         ]}
         actions={
-          can('gchain.stock_issuance.create') ? (
+          canRaise ? (
             <Link className="btn btn-primary btn-sm" to="/g-chain/outgoing/new">
               + New outgoing
             </Link>
@@ -239,7 +242,7 @@ export function OutgoingEditor() {
   const editing = !!id;
   const navigate = useNavigate();
   const toast = useToast();
-  const { can, me } = useAuth();
+  const { me } = useAuth();
   const { people } = usePeople();
 
   const [loaded, setLoaded] = useState(false);
@@ -271,6 +274,7 @@ export function OutgoingEditor() {
   const [lines, setLines] = useState<Line[]>([blankLine()]);
   const [saved, setSaved] = useState<string | null>(null);
   const [route, setRoute] = useState<PreviewRoute | null>(null);
+  const [canRaise, setCanRaise] = useState(true);
 
   const snapshot = (h = header, ls = lines) => JSON.stringify({ h, ls: ls.map(({ key: _k, ...rest }) => rest) });
 
@@ -278,10 +282,11 @@ export function OutgoingEditor() {
     let live = true;
     (async () => {
       try {
-        const opts = await api.get<{ warehouses: { id: string; name: string }[]; terms: string; salesOrders?: { id: string; number: string; customer: string }[] }>(
+        const opts = await api.get<{ warehouses: { id: string; name: string }[]; terms: string; canRaise?: boolean; salesOrders?: { id: string; number: string; customer: string }[] }>(
           '/stock-issues/options',
         );
         if (!live) return;
+        setCanRaise(!!opts.canRaise);
         setWarehouses(opts.warehouses);
         setSalesOrders(opts.salesOrders ?? []);
         setTerms(opts.terms);
@@ -476,10 +481,10 @@ export function OutgoingEditor() {
 
   const actions = (
     <>
-      <button type="button" className={routed ? 'btn' : 'btn btn-primary'} onClick={() => void save(false)} disabled={busy}>
+      <button type="button" className={routed ? 'btn' : 'btn btn-primary'} onClick={() => void save(false)} disabled={busy || (!existing && !canRaise)}>
         {busy ? 'Saving…' : 'Save'}
       </button>
-      {routed && can('gchain.stock_issuance.create') && (
+      {routed && canRaise && (
         <button type="button" className="btn btn-primary" onClick={() => void save(true)} disabled={busy}>
           Submit for approval
         </button>
@@ -504,6 +509,13 @@ export function OutgoingEditor() {
           <div className="row qe-actions">{actions}</div>
         </div>
         <ErrorBox error={error} />
+        {!canRaise && (
+          <div className="alert warn" role="status">
+            {existing
+              ? 'Only the Warehouse Officer and the person they report to send an outgoing slip for approval or issue it.'
+              : 'Outgoing slips are raised by the Warehouse Officer and the person they report to — ask them to raise this one.'}
+          </div>
+        )}
         {attempted && problems.length > 0 && (
           <div className="alert error" role="alert">
             Not saved yet — {problems.join('; ')}.

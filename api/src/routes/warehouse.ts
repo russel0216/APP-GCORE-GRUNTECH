@@ -17,6 +17,7 @@ import { receiveQuoteStock, unreceiveQuoteStock } from '../shared/quotationBuyin
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { noRateMessage, orderInPesos, receiptUnitCost, restateReceiptLine, RESTATE_SELECT } from '../shared/receiptCost';
 import { notify } from '../shared/notifications';
+import { mayRaiseOutgoing, OUTGOING_RAISER_REFUSAL } from '../shared/outgoingRaisers';
 import {
   contactOf,
   submitForApproval,
@@ -2022,7 +2023,7 @@ stockIssueRoutes.get(
         total,
         q,
       ),
-      summary: { waiting, drafts, issued, toConfirm },
+      summary: { waiting, drafts, issued, toConfirm, canRaise: await mayRaiseOutgoing(currentUser(req)) },
     });
   }),
 );
@@ -2200,6 +2201,7 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
   // OUTGOING goes for approval while its route is active; without one the
   // slip is issued at once, as it was before (the sales order's rule).
   const route = draft ? await pickWorkflow(ISSUE_DOC, view.value, { requesterId: issue.issuedById }) : null;
+  const raises = draft ? await mayRaiseOutgoing(me) : false;
   return {
     ...view,
     // A DRAFT is changed by whoever may raise one (or edit_all) and deleted
@@ -2209,8 +2211,8 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
     canDelete: (draft || issue.status === 'CANCELLED') && mayDeleteDocument(me, issue.issuedById) && can(me, 'gchain.stock_issuance.delete'),
     canCancel: (draft || issue.status === 'PENDING_APPROVAL') && raiser,
     needsApproval: draft ? !!route : null,
-    canSubmit: draft && !!route && raiser && issue.items.length > 0,
-    canIssue: draft && !route && can(me, 'gchain.stock_issuance.create') && issue.items.length > 0,
+    canSubmit: draft && !!route && raiser && raises && issue.items.length > 0,
+    canIssue: draft && !route && raises && issue.items.length > 0,
     canWithdraw: issue.status === 'PENDING_APPROVAL' && raiser,
     approvalRoute: draft && route ? await routeBrief(ISSUE_DOC, view.value, issue.issuedById) : null,
     // The receive proof: the person it went to confirms it arrived; the
@@ -2263,6 +2265,7 @@ stockIssueRoutes.get(
     ]);
     res.json({
       warehouses,
+      canRaise: await mayRaiseOutgoing(currentUser(req)),
       salesOrders: salesOrders.map((o) => ({ id: o.id, number: o.number, customer: o.customer.name })),
       orderStock: [...orderStock.values()].map((r) => ({
         itemId: r.itemId,
@@ -2454,6 +2457,7 @@ stockIssueRoutes.post(
   require_('gchain.stock_issuance.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    if (!(await mayRaiseOutgoing(me))) throw forbidden(OUTGOING_RAISER_REFUSAL);
     const body = parseBody(issueSchema.extend({ lines: z.array(issueLineSchema).max(300).optional() }), req.body);
     await checkIssueHeader(body);
     const rows = body.lines?.length ? await checkIssueLines(body.lines, body.warehouseId, body.jobId || null, body.salesOrderId || null) : [];
@@ -3022,6 +3026,7 @@ stockIssueRoutes.post(
   require_('gchain.stock_issuance.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    if (!(await mayRaiseOutgoing(me))) throw forbidden(OUTGOING_RAISER_REFUSAL);
     const issue = await prisma.stockIssue.findUnique({
       where: { id: req.params.id },
       include: { items: { select: { id: true, amount: true } } },
@@ -3082,6 +3087,7 @@ stockIssueRoutes.post(
     if (!issue) throw notFound('Stock issue not found');
     assertChangeIssue(me, issue);
     if (issue.status !== 'DRAFT') throw badRequest(`${issue.number} is ${statusLabel(issue.status).toLowerCase()}`);
+    if (!(await mayRaiseOutgoing(me))) throw forbidden(OUTGOING_RAISER_REFUSAL);
     if (!issue.items.length) throw badRequest('Add at least one line before submitting');
     // What the warehouse holds now — a slip the shelf cannot fill is not sent up.
     const balances = await prisma.inventoryBalance.findMany({

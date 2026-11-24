@@ -8223,6 +8223,18 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   the supervisor own-scope purchase-request rights and delete) — is told
   (`reorder.raised`) and checks and submits it. With neither role held,
   nothing is raised and the trail says why. verify-chain pins it.
+- **Only the Warehouse Officer and the person they report to RAISE an
+  Outgoing slip** (2026-11-24, the owner's call: "make this outgoing creation
+  only for Jeric and where he reports to"). `mayRaiseOutgoing(me)` in
+  `shared/outgoingRaisers.ts`: a super admin, or a holder of
+  `gchain.stock_issuance.create` who holds the `warehouse_supervisor` role
+  (Warehouse Officer — Jeric Gasiong) or is the active "Reports to" of an
+  active holder of it (Dina Gasiong). `POST /stock-issues`, `/:id/submit`
+  and `/:id/issue` refuse anyone else (403, `OUTGOING_RAISER_REFUSAL`); the
+  list's summary and `/options` send `canRaise`, which shows "+ New
+  outgoing" and the editor's Save / Submit; `canSubmit` / `canIssue` on a
+  slip read it. Create on Admin › Roles alone no longer raises one; reading,
+  confirming receipt and the rest are unchanged. verify-chain pins it.
 - **Outgoing is the requestor's RECEIVE PROOF** (2026-10-15, the owner's
   call: "Outgoing = internal receive proof to the requestor … no customer
   involved"; his "Outgoing Delivery Receipt Slip" as the guide).
