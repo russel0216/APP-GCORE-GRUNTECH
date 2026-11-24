@@ -238,6 +238,13 @@ export function CostingDetailPage() {
     await load();
   }
 
+  async function pullBack() {
+    await api.post(`/costings/${costing!.id}/withdraw`);
+    toast('ok', 'Pulled back to draft');
+    setReload((r) => r + 1);
+    await load();
+  }
+
   async function saveTemplate(name: string, description: string, withPrices: boolean) {
     await api.post('/costings/templates', { name, description, withPrices, costingId: costing!.id });
     toast('ok', `Saved as template “${name}”`);
@@ -362,6 +369,17 @@ export function CostingDetailPage() {
                 onConfirm: reopen,
               },
             },
+          costing.canEdit &&
+            costing.status === 'PENDING_APPROVAL' && {
+              label: 'Pull back to draft',
+              confirm: {
+                title: `Pull ${costing.number} back to draft?`,
+                body: 'The approval request is withdrawn and the approver is told. Submit it again once it is changed.',
+                confirmLabel: 'Pull back',
+                tone: 'primary',
+                onConfirm: pullBack,
+              },
+            },
           mayDelete(costing.owner.id) &&
             can('gops.costing.delete') &&
             isDraft && {
@@ -395,7 +413,7 @@ export function CostingDetailPage() {
         </div>
       )}
       {costing.status === 'PENDING_APPROVAL' && (
-        <div className="alert info">With the approver. It holds still until they decide; a rejection brings it back to draft to rework.</div>
+        <div className="alert info">With the approver. It holds still until they decide — or pull it back to draft (⋯) to change it.</div>
       )}
 
       {/* The headline numbers, always visible — this is what the page is for. */}

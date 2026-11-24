@@ -14,6 +14,7 @@ import { nextNumber } from '../shared/numbering';
 import {
   approvalSlots,
   approvalStands,
+  cancelOpenRequest,
   contactOf,
   onApprovalSettled,
   onApprovalReopened,
@@ -2049,6 +2050,41 @@ costingRoutes.post(
 
     const full = await loadFull(req.params.id);
     res.json(present(full as unknown as Record<string, unknown>, await categoryRanks()));
+  }),
+);
+
+/**
+ * A costing waiting on its approver is PULLED BACK to draft (2026-11-24) by
+ * its author or `edit_all` — claimed on PENDING_APPROVAL, its open request
+ * withdrawn in the same transaction (the approvers are told), the purchase
+ * request's rule. A decision that landed first stands.
+ */
+costingRoutes.post(
+  '/:id/withdraw',
+  require_('gops.costing.edit_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const costing = await prisma.costing.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, status: true, ownerId: true } });
+    if (!costing) throw notFound('Costing not found');
+    if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) throw forbidden('Only the author pulls this costing back');
+    if (costing.status !== 'PENDING_APPROVAL') throw badRequest('This costing is not with the approver — nothing to pull back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.costing.updateMany({ where: { id: costing.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      const withdrawn = await cancelOpenRequest('costing', costing.id, tx, `pulled back to draft by ${me.name}`, me.id);
+      if (!withdrawn.length) {
+        const last = await tx.approvalRequest.findFirst({
+          where: { documentType: 'costing', documentId: costing.id },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, actions: { where: { action: 'RETURNED' }, select: { id: true }, take: 1 } },
+        });
+        if (last && (last.status === 'APPROVED' || last.status === 'REJECTED' || last.actions.length)) {
+          throw badRequest('It was decided a moment ago — reload to see where it stands');
+        }
+      }
+    });
+    await audit({ entityType: 'costing', entityId: costing.id, action: 'UPDATED', summary: `Pulled ${costing.number} back to draft` }, req);
+    res.json({ ok: true, status: 'DRAFT' });
   }),
 );
 
