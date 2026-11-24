@@ -60,6 +60,7 @@ import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { importBuilkTpsc } from '../src/shared/builkTpsc';
 import { importBuilkAjoya } from '../src/shared/builkAjoya';
 import { importBuilkAmherst } from '../src/shared/builkAmherst';
+import { AMHERST_ENCLOSURE, moveStockPurchaseToProject } from '../src/shared/stockToProject';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1975,6 +1976,15 @@ async function main() {
     const builk = await importBuilkAmherst();
     if (builk?.done) console.log(`  ✓ Builk Amherst: ${builk.orders.length} orders on ${builk.job}`);
     else if (builk) console.log(`  · Builk Amherst import waits: ${builk.reason}`);
+  }
+
+  // ── GT-PR-2026-0037's enclosure, bought for Amherst, moved onto its project (2026-11-24) ──
+  // Once (shared/stockToProject.ts): the request and order become the project's, the enclosure
+  // its own stock, and draft pull-out GT-PS-2026-0011 is split into project stock and company stock.
+  {
+    const moved = await moveStockPurchaseToProject(AMHERST_ENCLOSURE);
+    if (moved?.done) console.log(`  ✓ Amherst enclosure moved onto its project: ${moved.moved.join(', ')}`);
+    else if (moved) console.log(`  · Amherst enclosure move waits: ${moved.reason}`);
   }
 
   // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
