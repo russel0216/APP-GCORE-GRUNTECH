@@ -83,7 +83,8 @@ const APPROVED_BY = 'Approved by';
 /** How many sign-offs are headed "APPROVED BY" — the heading is a run of its own. */
 const approvedByCount = (t: string) => t.split('\n').filter((l) => l === APPROVED_BY.toUpperCase()).length;
 /** The step's name printed in capitals, as a sign-off heading used to be. */
-const headedByStep = (t: string, step: string) => flat(t).includes(step.toUpperCase());
+const headedByStep = (t: string, step: string) =>
+  step.trim().toLowerCase() !== APPROVED_BY.toLowerCase() && flat(t).includes(step.toUpperCase());
 /** The slot is an approval's: headed "APPROVED BY", dated when signed, "Pending" when not. */
 const approvalSlot = (slot: Slot | undefined, signed: boolean) => !!slot && slot.text.startsWith('APPROVED BY ') && slot.signed === signed;
 /** A signed approval: "APPROVED BY", this person straight under it, dated. */
@@ -202,35 +203,65 @@ async function cleanupOdoo() {
 }
 
 /**
- * The SEEDED requisition route alone, for the run: an administrator's own
- * purchase-request route (the laptop's "cost controller, technical manager,
- * team leader") is switched off while the script runs and switched back on by
- * `cleanup()` — the ids parked in a Setting, so a run that dies leaves them
- * for the next run's cleanup to restore. A check never leans on what the
- * install's routes are.
+ * The SEEDED routes, for the run (2026-11-25): an install's own routes take no
+ * part in a check. An administrator's own purchase-request route (the
+ * laptop's "cost controller, technical manager, team leader") is switched off,
+ * and where the pull-out slip's route is not the seeded shape (the laptop's
+ * was edited to two named people) it is switched off too and a throwaway
+ * route of the seeded shape stands in. `cleanup()` switches them back on and
+ * deletes the stand-in — the ids parked in a Setting, so a run that dies is
+ * put right by the next run's cleanup. A request on a deleted route only
+ * loses its link (SetNull).
  */
 const SEEDED_PR_ROUTE = 'Purchase Request — technical manager, team leader';
-const PR_ROUTES_STASH = 'approvalWorkflows.purchase_request.__verify__';
-async function setAsideOwnPrRoutes() {
-  const own = await prisma.approvalWorkflow.findMany({
+const ROUTES_STASH = 'approvalWorkflows.__verify_chain__';
+async function setAsideOwnRoutes() {
+  const off: string[] = [];
+  const made: string[] = [];
+  const ownPr = await prisma.approvalWorkflow.findMany({
     where: { documentType: 'purchase_request', isActive: true, name: { not: SEEDED_PR_ROUTE } },
     select: { id: true },
   });
-  if (!own.length) return;
-  const ids = own.map((r) => r.id);
-  await prisma.setting.upsert({ where: { key: PR_ROUTES_STASH }, create: { key: PR_ROUTES_STASH, value: { ids } }, update: { value: { ids } } });
-  await prisma.approvalWorkflow.updateMany({ where: { id: { in: ids } }, data: { isActive: false } });
+  off.push(...ownPr.map((r) => r.id));
+  // The pull-out slip: one SUPERVISOR step falling back to the Warehouse Supervisor (prisma/seed.ts).
+  const supervisorRole = await prisma.role.findUniqueOrThrow({ where: { key: 'warehouse_supervisor' } });
+  const pullRoutes = await prisma.approvalWorkflow.findMany({ where: { documentType: 'pullout_slip', isActive: true }, include: { steps: true } });
+  const seededShape =
+    pullRoutes.length === 1 &&
+    pullRoutes[0].steps.length === 1 &&
+    pullRoutes[0].steps[0].approverType === 'SUPERVISOR' &&
+    pullRoutes[0].steps[0].roleId === supervisorRole.id &&
+    pullRoutes[0].minAmount === null &&
+    pullRoutes[0].maxAmount === null;
+  if (!seededShape) {
+    off.push(...pullRoutes.map((r) => r.id));
+    const stand = await prisma.approvalWorkflow.create({
+      data: {
+        documentType: 'pullout_slip',
+        name: `${TAG} Pull-out slip — seeded shape`,
+        isActive: true,
+        steps: { create: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleId: supervisorRole.id }] },
+      },
+    });
+    made.push(stand.id);
+  }
+  if (!off.length && !made.length) return;
+  await prisma.setting.upsert({ where: { key: ROUTES_STASH }, create: { key: ROUTES_STASH, value: { off, made } }, update: { value: { off, made } } });
+  await prisma.approvalWorkflow.updateMany({ where: { id: { in: off } }, data: { isActive: false } });
 }
-async function restoreOwnPrRoutes() {
-  const stash = await prisma.setting.findUnique({ where: { key: PR_ROUTES_STASH } });
-  if (!stash) return;
-  const ids = ((stash.value as { ids?: string[] }).ids ?? []).filter((v) => typeof v === 'string');
-  await prisma.approvalWorkflow.updateMany({ where: { id: { in: ids } }, data: { isActive: true } });
-  await prisma.setting.delete({ where: { key: PR_ROUTES_STASH } });
+async function restoreOwnRoutes() {
+  const stash = await prisma.setting.findUnique({ where: { key: ROUTES_STASH } });
+  if (stash) {
+    const v = stash.value as { off?: string[]; made?: string[] };
+    await prisma.approvalWorkflow.updateMany({ where: { id: { in: (v.off ?? []).filter((x) => typeof x === 'string') } }, data: { isActive: true } });
+    await prisma.setting.delete({ where: { key: ROUTES_STASH } });
+  }
+  // Every stand-in this script ever made, whatever became of the stash.
+  await prisma.approvalWorkflow.deleteMany({ where: { name: { startsWith: `${TAG} ` } } });
 }
 
 async function cleanup() {
-  await restoreOwnPrRoutes();
+  await restoreOwnRoutes();
   await cleanupOdoo();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
@@ -359,7 +390,7 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
 async function main() {
   console.log('\nG-CORE supply chain verification\n');
   await cleanup();
-  await setAsideOwnPrRoutes();
+  await setAsideOwnRoutes();
 
   const engineer = await makeUser('Verify Engineer', 'eng@verifyc.local', ['project_engineer']);
   // The routing sheet of 2026-10-13: a requisition goes to the Technical

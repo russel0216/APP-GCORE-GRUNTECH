@@ -1009,19 +1009,20 @@ this".
   `SUPPLIER_PICKER_KEYS`: any create / edit key in either module, or a
   supplier View key) — it needed Suppliers › View All, so a warehouse hand
   raising an Incoming without a PO read "Suppliers could not be listed".
-- verify-chain pins all three. **It sets the install's OWN purchase-request
-  routes aside for its run** (2026-11-25: the laptop's administrator-made
-  "cost controller, technical manager, team leader" route was picked over the
-  seeded one, and the script crashed at its first approval): every active
-  `purchase_request` route but the seeded one is switched off at the start
-  and back on by `cleanup()`, the ids parked in
-  `approvalWorkflows.purchase_request.__verify__` so a run that dies is put
-  right by the next. Its requisition submits pass the request's project
-  (`jobId`), as the route does since 2026-11-19, and the purchase order's
-  route is checked by role key, not step name. Twelve checks still fail on
-  the laptop for its own data — the pull-out slip route edited to two named
-  people, and real Purchasing Manager / CEO holders named beside the
-  script's.
+- verify-chain pins all three. **It runs on the SEEDED routes, whatever the
+  install's are** (2026-11-25): `setAsideOwnRoutes()` switches off every
+  active `purchase_request` route but the seeded one (the laptop's
+  administrator-made "cost controller, technical manager, team leader" was
+  picked over it and the script crashed at its first approval), and where the
+  pull-out slip's route is not the seeded shape (the laptop's was edited to
+  two named people) switches it off and adds a throwaway `ZZCHAIN …` route of
+  the seeded shape; `cleanup()` switches them back on and deletes the
+  stand-in, the ids parked in `approvalWorkflows.__verify_chain__` so a run
+  that dies is put right by the next. Its requisition submits pass the
+  request's project (`jobId`), as the route does since 2026-11-19; the
+  purchase order's route is checked by role key, and a step an install
+  renamed "Approved By" is not read as a step heading on the paper. 458
+  pass on the laptop.
 
 ## The owner's batch of 2026-11-23
 
