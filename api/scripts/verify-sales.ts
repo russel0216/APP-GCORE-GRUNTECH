@@ -2858,8 +2858,8 @@ async function main() {
       check('no collection figure counts it: the live-money rule leaves it out', !!scoroPay && scoroCounted === 0);
       const paidSource = paidOrder ? await commissionSource(paidOrder.id) : null;
       check(
-        'a deal paid in SCORO raises no commission — commissions start with deals booked in G-CORE',
-        !!paidSource && paidSource.fully && (paidSource.problem ?? '').includes('invoiced in SCORO'),
+        'a deal collected in SCORO raises no commission — it was settled there (a SCORO invoice collected in G-CORE does, since 2026-11-26)',
+        !!paidSource && paidSource.fully && (paidSource.problem ?? '').includes('collected in SCORO'),
         paidSource?.problem ?? 'no source',
       );
       const cancelled = await importInvoices([invRow({ doc_no: `${TAG}4899.1`, status_name: 'Cancelled', owner_name: sales.name })], true);

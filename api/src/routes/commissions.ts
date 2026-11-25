@@ -135,7 +135,7 @@ export async function orderSource(salesOrderId: string) {
           invoiceTotal: true,
           ewtAmount: true,
           amountCollected: true,
-          allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true } } } },
+          allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true, importedFrom: true } } } },
         },
       })
     : [];
@@ -167,12 +167,15 @@ export async function orderSource(salesOrderId: string) {
   const collectedOn = collections.reduce<Date | null>((d, c) => (!d || c.paymentDate > d ? c.paymentDate : d), null);
   const unpaid = invoices.filter((i) => i.status !== 'PAID');
   const fully = invoices.length > 0 && invoiced + 0.005 >= net && unpaid.length === 0;
-  // A deal invoiced in SCORO was paid — and its commission settled — there
-  // (2026-10-17, the owner's call): commissions start with deals G-CORE booked.
-  const fromScoro = invoices.some((i) => i.importedFrom === 'SCORO');
+  // A deal invoiced in SCORO takes a commission too (2026-11-26, the owner's
+  // call on GT-HT-2026-0035 / 0036, reversing the rule of 2026-10-17) — once
+  // its customer's money is collected IN G-CORE. One SCORO's own payment
+  // history settles (`Payment.importedFrom` 'SCORO') was paid, and its
+  // commission settled, in SCORO, and stays out: never paid twice.
+  const paidInScoro = invoices.some((i) => i.allocations.some((a) => a.payment.importedFrom === 'SCORO'));
   const problem =
-    fromScoro
-      ? `${order.number} was invoiced in SCORO — commissions are raised on deals booked in G-CORE`
+    paidInScoro
+      ? `${order.number} was collected in SCORO — its commission was settled there`
       : order.status !== 'ISSUED'
       ? `${order.number} is ${statusLabel(order.status).toLowerCase()} — a commission is raised on an issued sales order`
       : !invoices.length
@@ -199,7 +202,7 @@ export async function orderSource(salesOrderId: string) {
       invoiced,
     },
     fully,
-    problem: fully && !fromScoro ? null : problem,
+    problem: fully && !paidInScoro ? null : problem,
     orNumbers,
     collectedOn,
     collections,
@@ -584,7 +587,7 @@ commissionRoutes.get(
     });
     const out = [];
     for (const o of candidates) {
-      // Fully invoiced, every invoice paid, none of SCORO's — the one reading.
+      // Fully invoiced, every invoice paid, none collected in SCORO — the one reading.
       if ((await orderSource(o.id)).problem) continue;
       if (!(await mayRaiseCommission(me, o.id))) continue;
       out.push({ id: o.id, number: o.number, orderDate: o.orderDate, customer: o.customer.name, total: num(o.total) });
