@@ -1,260 +1,259 @@
-# Graph Report - APP-GCORE GRUNTECH  (2026-11-25)
+# Graph Report - APP-GCORE GRUNTECH  (2026-11-26)
 
 ## Corpus Check
-- 515 files · ~1,728,409 words
+- 526 files · ~1,752,808 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 40 file(s) not represented in the graph (top: .css 32, (none) 2, .pptx 2)
 
 ## Summary
-- 8285 nodes · 30936 edges · 280 communities (240 shown, 40 thin omitted)
-- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 414 edges (avg confidence: 0.85)
+- 8431 nodes · 31378 edges · 279 communities (241 shown, 38 thin omitted)
+- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 417 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `8a39f41e`
+- Built from commit: `481362a3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- verify-hr.ts / main() / liveness.ts
-- seed.ts
+- invoiceRequests.ts
+- prisma.ts
 - sales.ts / pipelineStages.ts / activityTypes.ts
-- routes/hr.ts / myEmployee() / checkLeave()
-- notFound
-- verify-finance.ts
+- routes/hr.ts
+- planApprovals.ts
+- verify-aftermarket.ts
 - scoroQuotes.ts / scoroInvoices.ts / seed-sample-
 - shared/insights.ts
-- nextNumber
-- routes/partners.ts
-- verify-academy.ts
-- index.ts
-- StatusBadge
-- verify-cad.ts
-- ExamQuestions.tsx
-- clampToPage
-- paper.ts
-- clearance.ts
-- shared/finance.ts
-- routes/academy.ts
-- badRequest
-- routes/peopleFlow.ts / shared/peopleFlow.ts / ad
-- verify-pipeline.ts
-- ModalFoot
-- forecast.ts
-- odoo.ts / odooMigration.ts / tidy()
-- audit.ts
-- verify-evaluations.ts / manilaDate() / main()
-- jobOrders.ts
-- receiptCost.ts
-- orgChart.ts
-- progress.ts
+- pdfTemplates.ts
+- can
+- lib/costingMath.ts
+- masters.ts
 - routes/hiring.ts
+- routes/aftermarket.ts
+- verify-sales.ts
+- Canvas
+- paper.ts
+- pullouts.ts
+- formatDateTime
+- routes/academy.ts
+- verify-chain.ts
+- shared/day.ts
+- ui.tsx
+- Field
+- forecast.ts
+- NumberInput
+- qs
+- verify-evaluations.ts / manilaDate() / main()
+- idsFilter
+- receiptCost.ts
+- exhibitionVisitors.ts
+- progress.ts
+- cadJobOrders.ts
 - verify-foundation.ts
 - finance/Reports.tsx
-- shared/costingMath.ts
+- costing.ts
 - builkImport.ts
-- env.ts
+- verify-pipeline.ts
 - CostingSheet.tsx
-- procurement.ts
+- notFound
 - Chain flow plan 2026-10-14 / Owner's seven plan 
-- env.ts
-- ImportModal.tsx
+- verify-accounts.ts
+- Suppliers.tsx
 - Pipeline.tsx
-- pdfDesign.ts
+- routes/budgetRequests.ts
 - ProjectWorkspace.tsx
-- verify-delivery.ts
-- Assets.tsx
+- middleware.ts
+- QuotationEditor.tsx
 - useAuth
-- verify-sales.ts
-- exhibitionVisitors.ts
-- liveness.ts
-- qrScan.ts
+- BudgetRequests.tsx
+- verify-marketing.ts
+- Stat
+- ScanPanel
 - devDependencies
-- salesOrders.ts
-- officeBudget.ts
+- ClaimEditor.tsx
+- badRequest
 - warehouse.ts
-- ui.tsx
-- Navigation.tsx
-- rfq.ts
-- DocumentApproval
-- PermissionMatrix.tsx
+- charts.tsx
+- inventory.ts
+- nextNumber
+- officeBudget.ts
+- accounts.ts
 - Hiring.tsx
 - myRecords.ts
 - statusLabel
-- salesFigures.ts
+- ui.tsx
 - Reference.tsx / CategoryCard() / activeBadge()
-- memos.ts
+- shared/marketing.ts
 - UI adjustments of 2026-11-18 — summary for another G-Core
 - G-CORE README / Gap Analysis / Business Operatio
-- QuotationEditor.tsx
-- attendanceCorrections.ts
-- Canvass.tsx
+- QuotationEditor
+- index.ts
+- ServiceDocuments.tsx
 - routes/assets.ts
-- Sessions.tsx
-- lib/day.ts
+- react-router-dom
+- parseDay
 - service/Reports.tsx
 - quotationMath.ts / quotationTotals() / spread()
 - PulloutSlips.tsx
-- useConfirm
-- seed-sample-quotation.ts
+- RecordHeader.tsx
+- salesOrders.ts
 - Evaluations.tsx
 - api/package.json
-- face.ts / HttpError / describeFace()
-- shared/hr.ts
+- lib/permissionLevels.ts
+- PurchaseRequests.tsx
 - pdfTemplate.ts
-- Renderer
+- pdfDesign.ts
 - Marketing.tsx / BarList() / Marketing()
 - LayoutEditor.tsx / LayoutEditor() / selector.ts
-- Checkbox
-- imports.ts
+- NumberInput
+- resolve.ts
 - Quotations.tsx
-- ApprovalStepper.tsx
-- Dashboard.tsx
-- pdf.ts
-- projectStock.ts
+- NumberInput.tsx
+- RfqEditor
+- renderSchedule
+- Pipeline.tsx
 - routes/meetings.ts
-- DataList.tsx
+- Attachments.tsx
 - PdfTemplateEditor
-- projectBudget.ts
-- Employees.tsx
+- Column
+- react
 - MyRecords.tsx
-- Orders.tsx
-- resolveTemplate
+- verify-plantilla.ts
+- PdfTemplates.tsx
 - typedItemSplit.ts
-- Progress.tsx
+- useConfirm
 - BudgetRequestEditor.tsx
-- routes/budgetRequests.ts
-- quotationBuying.ts
+- projectBudget.ts
+- formatSpan
 - IncomingEditor.tsx
-- Projects.tsx
+- quotationBuying.ts
 - Checkbox
 - OrgChart.tsx
 - Meetings.tsx
 - Courses.tsx
 - web/package.json / dependencies / devDependencie
 - scripts
-- Clock.tsx
-- verify-insights.ts
-- react-router-dom
+- SalesOrderReports.tsx
+- finAccess.ts
+- Navigation.tsx
 - SessionDetail
 - JobOrders.tsx
-- verify-insights-brief.ts
+- verify-finance.ts
 - humanise
-- Misc.tsx
-- RecordHeader
+- Payables.tsx
+- JobOrderDetail
 - MeetingDetail
 - OfficeBudgets.tsx
 - Receivables.tsx
-- routes/insights.ts
+- SupplierPicker
 - db / healthcheck / environment
-- SearchSelect
-- VisitSheet
+- jobOrders.ts
+- Schedule.tsx
 - Partners.tsx
-- CourseModal
-- prisma.ts
+- approvals.ts
+- employmentExams.ts
 - CostingSheet
 - Forecast.tsx
-- Payables.tsx
+- FaceHealthPanel.tsx
 - EvaluationRuns.tsx
 - Approval engine (shared/approvals.ts) / Permissi
 - Warehouse.tsx
-- Schedule.tsx
+- Calendar.tsx
 - ProjectGantt.tsx
-- shared/canvassMath.ts
+- procurement.ts
 - Customer360.tsx
-- RecordHeader.tsx
-- notify
+- Passport.tsx
+- Leave.tsx
 - todayLocal
 - Appearance.tsx
 - SalesOrders.tsx
 - ServiceJobOrders.tsx
-- FaceHealthPanel.tsx
+- CustomerPicker
 - dependencies
-- resolve.ts
-- Roles.tsx
-- registry.ts
+- Pipeline
+- PublicExam.tsx
+- helpTickets.ts
 - BorrowSlips.tsx
-- shared/gops.ts
-- qs
-- Customers.tsx
-- prLines.ts
+- salesReports.ts
+- PurchaseRequisitionEditor.tsx
+- shared/holidays.ts
+- helpReceivers.ts
 - db / healthcheck / environment
 - Costing, pipeline, provider plan 2026-10-13 / De
 - quotation.ts
 - lib/appearance.ts
 - FileViewer.tsx
-- EmployeeForm
+- createLoginNow
 - sCurve.ts
-- orderStock.ts
+- SalesOrders
 - compilerOptions / web/tsconfig.json / allowImpor
-- frameSharpness.ts
-- Users.tsx
-- InvoiceModal
+- recordVisitor
+- usePeople
+- ExamQuestions.tsx
 - Company.tsx
 - compilerOptions / api/tsconfig.json / declaratio
 - SCORO-style quotations (key Q) / docs/notes READ
-- PublicExam.tsx
-- Loading
+- sandbox.ts
 - CadJobOrders.tsx
-- requestMoney
-- num
+- CadJobOrders.tsx
+- StockMovements.tsx
+- Clearances.tsx
 - scoro_convert.py / re / repair()
-- jobOrders.ts
-- routes/appearance.ts
+- jobs.ts
 - QuotationBuying.tsx
-- Attachments.tsx
-- shared/holidays.ts
-- roleSeeds.ts
-- PurchaseRequisitionEditor.tsx
+- CourseModal
+- IssueBatchModal
+- SalesCalendar
+- presentCanvass
+- Rfq.tsx
 - G-FIN AR, AP, collections, EWT / G-CHAIN procure
-- NumberInput.tsx
-- RfqEditor
-- SalesOrderReports.tsx
-- collect
+- SearchSelect.tsx
+- Commissions.tsx
+- timeGrid.ts
+- close
 - TextSettings
-- D
+- roleSeeds.ts
 - PeopleFlow.tsx
-- @tensorflow/tfjs-backend-wasm@^4.22.0
-- memory.ts
+- @types/bcryptjs@^2.4.6
+- stockCardHistory.ts
 - QuotationDetailsEditor
-- approvals.ts
-- rolesFromChart.ts
-- AssetSlips.tsx
-- Login.tsx
+- CostPanel
+- Loading
+- formatDate
 - ErrorBox
 - G-CORE user interface style
 - routes/finance.ts
 - ActivityLog.tsx
 - lib/canvassMath.ts / awardSummary() / lowestPerL
-- BudgetRequestDetail
-- WorkflowEditor
-- Field
-- captureScreen() / takeScreenshot() / screenshot.
+- CashAdvances.tsx
+- SearchSelect
 - AccountLinks.tsx
 - Numbering.tsx
-- Rfq.tsx
+- RfqDetail
 - stageLabelFor
-- Warehouses
+- PermissionMatrix.tsx
 - pdfThumb.ts
-- cors
+- StockCardHistory.tsx
 - _this
-- formatDate
-- People.tsx
-- prisma.ts
-- TemplateEditor
+- lib/day.ts
+- celebrations.ts
 - qrCode.ts
 - Plan: owner's six of 2026-10-13 / withAttachment
-- geo.ts
-- @types/bcryptjs@^2.4.6
-- @types/node@^22.10.5
-- charts.tsx
-- BudgetRequests.tsx
+- Clock.tsx
+- Canvass.tsx
+- Overview.tsx
+- cors
 - Purchase order full page editor (built) / Purcha
 - ingress / cloudflared-config.yml / originRequest
 - ProviderLookup
-- HelpTickets.tsx
+- People.tsx
+- @tensorflow/tfjs-backend-wasm@^4.22.0
+- @types/node@^22.10.5
+- DataList.tsx
 - CalendarNav / .goToDay() / .goToWeekOf()
 - FlowPicture.tsx
+- LeadBulkActions
+- Contracts.tsx
 - links.ts / settingLink() / DETAIL
 - Admin PDF Templates (quotation, sales order, cos
 - renderDocument engine / Company letterhead and s
@@ -290,26 +289,26 @@
 - Web app HTML entry (main.tsx)
 
 ## God Nodes (most connected - your core abstractions)
-1. `ErrorBox()` - 420 edges
-2. `useToast()` - 352 edges
-3. `badRequest()` - 336 edges
-4. `useAuth()` - 336 edges
-5. `Loading()` - 289 edges
+1. `ErrorBox()` - 421 edges
+2. `useToast()` - 355 edges
+3. `badRequest()` - 337 edges
+4. `useAuth()` - 335 edges
+5. `Loading()` - 288 edges
 6. `Field()` - 263 edges
-7. `formatDate()` - 253 edges
-8. `formatMoney()` - 231 edges
+7. `formatDate()` - 252 edges
+8. `formatMoney()` - 234 edges
 9. `StatusBadge()` - 221 edges
-10. `prisma` - 207 edges
+10. `prisma` - 213 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `2. Pickers you type in` --references--> `PersonSelect()`  [INFERRED]
-  docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/components/People.tsx
 - `7. Forms and dialogs` --references--> `useConfirm()`  [INFERRED]
   docs/UI-STYLE.md → web/src/components/Confirm.tsx
+- `2. Pickers you type in` --references--> `PersonSelect()`  [INFERRED]
+  docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/components/People.tsx
 - `4. Files to copy or mirror` --references--> `Customer360`  [INFERRED]
   docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/pages/masters/Customer360.tsx
-- `1. What to copy` --references--> `StatusBadge()`  [INFERRED]
-  docs/UI-STYLE.md → web/src/components/ui.tsx
+- `1. What to copy` --references--> `Meter()`  [INFERRED]
+  docs/UI-STYLE.md → web/src/components/charts.tsx
 - `1. What to copy` --references--> `Field()`  [INFERRED]
   docs/UI-STYLE.md → web/src/components/ui.tsx
 
@@ -335,279 +334,279 @@
 - **Procurement papers RFQ, canvass, PO** — docs_mockups_chain_flow_3_rfq, docs_mockups_chain_flow_4_canvass, docs_mockups_purchase_order_paper [INFERRED 0.85]
 - **Warehouse document approval pages** — docs_mockups_chain_flow_incoming_approval, docs_mockups_chain_flow_pullout_approval, docs_mockups_chain_flow_borrow_approval, docs_mockups_chain_flow_outgoing_draft [INFERRED 0.85]
 
-## Communities (280 total, 40 thin omitted)
+## Communities (279 total, 38 thin omitted)
 
-### Community 0 - "verify-hr.ts / main() / liveness.ts"
+### Community 0 - "invoiceRequests.ts"
 Cohesion: 0.06
-Nodes (68): Box, eyesShut(), frameOf(), shearFrames(), stillFrames(), turnFrames(), api(), apiForm() (+60 more)
+Nodes (84): mayDeleteDocument(), advanceListSummary(), presentAdvance(), availableAfterFor(), budgetRequestListSummary(), financePartOf(), moneyOf(), recordOrProjectBudget() (+76 more)
 
-### Community 1 - "seed.ts"
-Cohesion: 0.05
-Nodes (63): main(), prisma, SeedStep, WORKFLOWS, WorkflowSeed, allPermissions(), splitBorrowedRights(), ASSET_TAG_MOVED (+55 more)
+### Community 1 - "prisma.ts"
+Cohesion: 0.03
+Nodes (138): main(), prisma, SeedStep, WORKFLOWS, WorkflowSeed, main(), isBookkeeping(), main() (+130 more)
 
 ### Community 2 - "sales.ts / pipelineStages.ts / activityTypes.ts"
+Cohesion: 0.03
+Nodes (86): ACTIVITY_INCLUDE, activitySchema, BREAKDOWN_WORD, checkLine(), checkQuoteNumber(), checkVatRate(), createQuotationSchema, d() (+78 more)
+
+### Community 3 - "routes/hr.ts"
 Cohesion: 0.02
-Nodes (103): ACTIVITY_INCLUDE, activitySchema, allDayStart(), asDate(), BREAKDOWN_WORD, breakdownOfQuery(), checkActivityLinks(), checkLine() (+95 more)
+Nodes (238): Box, eyesShut(), frameOf(), shearFrames(), stillFrames(), turnFrames(), api(), apiForm() (+230 more)
 
-### Community 3 - "routes/hr.ts / myEmployee() / checkLeave()"
+### Community 4 - "planApprovals.ts"
 Cohesion: 0.04
-Nodes (68): allocateSchema, alreadyIn(), alreadyOut(), asDate(), ATTENDANCE_SORTS, capturedFrames(), capturedPhoto(), captureReader() (+60 more)
+Nodes (61): CLEARED_CUSTOMER, decisionLabel(), jobInclude, kickoffChart(), KickoffJob, kickoffRoutes, mayPrepare(), present() (+53 more)
 
-### Community 4 - "notFound"
-Cohesion: 0.06
-Nodes (66): currentUser(), forbidden(), notFound(), canEditRecord(), AREAS, assertCanView(), assertMayAct(), CLEARANCE_SORTS (+58 more)
-
-### Community 5 - "verify-finance.ts"
-Cohesion: 0.09
-Nodes (39): hasLine(), labelRuns(), labelsSaid(), approvedByCount(), cents(), check(), cleanup(), D() (+31 more)
+### Community 5 - "verify-aftermarket.ts"
+Cohesion: 0.07
+Nodes (59): pendingCount(), printsRole(), roleWords(), signoffSlots(), signs(), slotsSaid(), words(), CHART_KEYS (+51 more)
 
 ### Community 6 - "scoroQuotes.ts / scoroInvoices.ts / seed-sample-"
 Cohesion: 0.05
-Nodes (78): teamFor(), resolveCredit(), methodOf(), OwnerChoice, ownerChoices(), ownerKey(), ownerQuestion(), PAYMENT_WORDS (+70 more)
+Nodes (78): d(), deleteStray(), ISSUED, LINES, main(), ORDER_DESCRIPTIONS, ORDERS, pickOwner() (+70 more)
 
 ### Community 7 - "shared/insights.ts"
-Cohesion: 0.10
-Nodes (30): ChainOverview, LIVE_MONEY, BottleneckRow, chainLine(), CompanySummary, companySummary(), figure(), FigureBasis (+22 more)
-
-### Community 8 - "nextNumber"
-Cohesion: 0.11
-Nodes (40): api(), apiReachable(), check(), cleanup(), expectRejection(), HOUSE, HttpResult, issueOf() (+32 more)
-
-### Community 9 - "routes/partners.ts"
 Cohesion: 0.07
-Nodes (56): apiReachable(), check(), cleanup(), http(), httpCases(), HttpResult, main(), makeRole() (+48 more)
+Nodes (61): check(), cleanup(), D(), day(), expectRejection(), main(), makeJob(), makeQuotation() (+53 more)
 
-### Community 10 - "verify-academy.ts"
-Cohesion: 0.08
-Nodes (55): printsRole(), roleWords(), signoffSlots(), signs(), words(), api(), apiReachable(), check() (+47 more)
-
-### Community 11 - "index.ts"
-Cohesion: 0.02
-Nodes (131): app, webDist, aftermarketRoutes, asDate(), assertNoReportOnReplannedVisits(), assetInclude, assetListSummary(), assetRoutes (+123 more)
-
-### Community 12 - "StatusBadge"
+### Community 8 - "pdfTemplates.ts"
 Cohesion: 0.09
-Nodes (30): StatusBadge(), CadJobOrders(), PriorityBadge(), useDesigners(), PunchMethod(), StageBadge(), PartnerBadge(), Contract (+22 more)
+Nodes (39): DOCS, documentType(), pdfTemplateRoutes, previewSchema, TemplateDoc, PrintableSalesOrder, COSTING_COLUMN_LABELS, COSTING_COLUMNS (+31 more)
 
-### Community 13 - "verify-cad.ts"
-Cohesion: 0.20
-Nodes (17): pendingCount(), slotsSaid(), CHART_KEYS, rolesLike(), apiReachable(), bells(), check(), cleanup() (+9 more)
+### Community 9 - "can"
+Cohesion: 0.04
+Nodes (69): Request, Action, ACTIONS, ModuleDef, OWNED, OWNED_KEPT, PermissionDef, READ (+61 more)
 
-### Community 14 - "ExamQuestions.tsx"
-Cohesion: 0.28
-Nodes (8): blankQuestion(), ExamDetail, ExamQuestionsPage(), save(), newKey(), Question, Sitting, SITTING_TONES
+### Community 10 - "lib/costingMath.ts"
+Cohesion: 0.12
+Nodes (24): cents(), CostingFigures, costingFigures(), CostingRates, lineAmount(), lineAmountCents(), MathLine, MILLION (+16 more)
 
-### Community 15 - "clampToPage"
-Cohesion: 0.19
-Nodes (15): clampToPage(), pageSizeOf(), tableBottom(), Canvas(), move(), changed(), dragTo(), follow() (+7 more)
+### Community 11 - "masters.ts"
+Cohesion: 0.02
+Nodes (128): requireAny(), requireSuperAdmin(), conflict(), ListResult, listResult(), unauthorized(), ACTION_LABELS, allPermissions() (+120 more)
+
+### Community 12 - "routes/hiring.ts"
+Cohesion: 0.04
+Nodes (52): load(), mayRead(), assertCanOpen(), decides(), CANDIDATE_SORTS, candidateInclude, CandidateRow, candidateSchema (+44 more)
+
+### Community 13 - "routes/aftermarket.ts"
+Cohesion: 0.04
+Nodes (54): assetInclude, AssetRow, assetSchema, ATTENDED, CLOSED_CONTRACT, CONTRACT_SORTS, contractInclude, contractPatchSchema (+46 more)
+
+### Community 14 - "verify-sales.ts"
+Cohesion: 0.04
+Nodes (112): apiReachable(), approvedBy(), asApproved(), check(), cleanup(), d(), editorTokenIsSpare(), http() (+104 more)
+
+### Community 15 - "Canvas"
+Cohesion: 0.29
+Nodes (5): Canvas(), move(), dragTo(), shown(), snapTo()
 
 ### Community 16 - "paper.ts"
-Cohesion: 0.07
-Nodes (64): Check, checkListPaper(), checkOwnPaper(), countedAs(), escapeRe(), flat(), get(), LANDSCAPE (+56 more)
+Cohesion: 0.10
+Nodes (46): main(), Check, checkListPaper(), checkOwnPaper(), countedAs(), escapeRe(), flat(), get() (+38 more)
 
-### Community 17 - "clearance.ts"
-Cohesion: 0.14
-Nodes (25): pendingFor(), AccountabilityRef, AREA_ORDER, ChecklistLine, ClearanceSummary, clearanceSummary(), figuresFor(), headcountAt() (+17 more)
-
-### Community 18 - "shared/finance.ts"
+### Community 17 - "pullouts.ts"
 Cohesion: 0.08
-Nodes (58): advanceListSummary(), presentAdvance(), availableAfterFor(), budgetRequestListSummary(), financePartOf(), recordOrProjectBudget(), requestBudget(), checkSheet() (+50 more)
+Nodes (40): asDate(), cents(), checkSheet(), D(), isServiceGroup(), lastParts(), lineSchema, LIST_INCLUDE (+32 more)
+
+### Community 18 - "formatDateTime"
+Cohesion: 0.06
+Nodes (18): readableSize(), formatDateTime(), BorrowSlipDetail(), StockIssueDetail(), FileChips(), RevisionsCard(), SubmitRevisionPanel(), ThreadCard() (+10 more)
 
 ### Community 19 - "routes/academy.ts"
+Cohesion: 0.03
+Nodes (122): api(), apiReachable(), check(), cleanup(), d(), expectRejection(), HttpResult, Line (+114 more)
+
+### Community 20 - "verify-chain.ts"
+Cohesion: 0.03
+Nodes (140): PORTRAIT, Slot, api(), apiReachable(), approvalSlot(), approvedBy(), approvedByCount(), awaits() (+132 more)
+
+### Community 21 - "shared/day.ts"
 Cohesion: 0.04
-Nodes (74): academySettingsRoutes, addAttendeesSchema, assertCanEdit(), assertCourseReadable(), CALENDAR_VIEW, cancelSchema, canEditSession(), clockFmt (+66 more)
+Nodes (75): check(), cleanup(), D(), fig(), Figure, Line, main(), quotation() (+67 more)
 
-### Community 20 - "badRequest"
-Cohesion: 0.09
-Nodes (47): badRequest(), resolveUser(), activeCourse(), asDate(), assertTrainer(), enrollableEmployees(), externalData(), meetLinkOf() (+39 more)
-
-### Community 21 - "routes/peopleFlow.ts / shared/peopleFlow.ts / ad"
-Cohesion: 0.07
-Nodes (54): baseWhere(), flowRows(), fullName(), itemBody, matches(), pathResponse(), peopleFlowRoutes, present() (+46 more)
-
-### Community 22 - "verify-pipeline.ts"
+### Community 22 - "ui.tsx"
 Cohesion: 0.16
-Nodes (18): isBold(), apiReachable(), BoardBody, BoardCard, cents(), check(), cleanup(), D() (+10 more)
+Nodes (13): OdooHistory, ASSET_LABEL, ASSET_TONES, AssetDetail, AssetRow, AssetState, AssetType, columns (+5 more)
 
-### Community 23 - "ModalFoot"
+### Community 23 - "Field"
 Cohesion: 0.05
-Nodes (32): ListReportModal(), TickPicker(), Modal(), ModalFoot(), ModifySlipModal(), AddSupplierModal(), CanvassNotesModal(), SupplierRowModal() (+24 more)
+Nodes (40): Field(), Modal(), ModalFoot(), ModifySlipModal(), AddSupplierModal(), CanvassNotesModal(), SupplierRowModal(), ReceivingRefsModal() (+32 more)
 
 ### Community 24 - "forecast.ts"
 Cohesion: 0.08
-Nodes (52): listOf(), loadForecast(), namesOf(), addDays(), breakdownOf(), bucketKeyOf(), buildForecast(), cellOf() (+44 more)
+Nodes (48): addDays(), breakdownOf(), bucketKeyOf(), buildForecast(), cellOf(), cents(), COMPARE_MODE_LABELS, COMPARE_MODES (+40 more)
 
-### Community 25 - "odoo.ts / odooMigration.ts / tidy()"
-Cohesion: 0.05
-Nodes (84): names(), api(), apiReachable(), approvalSlot(), approvedBy(), approvedByCount(), awaits(), check() (+76 more)
+### Community 25 - "NumberInput"
+Cohesion: 0.08
+Nodes (18): NumberInput(), LandedPanel(), CorrectCostPanel(), InvoiceRequestModal(), NewBillModal(), AmendPanel(), CounterPanel(), daysFrom() (+10 more)
 
-### Community 26 - "audit.ts"
-Cohesion: 0.06
-Nodes (24): AuditAction, AuditInput, ipOf(), REDACTED, CHAIN_ACCESS_MARK, CHAIN_COMMON, CHAIN_MANAGER_ROLES, CHAIN_PR (+16 more)
+### Community 26 - "qs"
+Cohesion: 0.08
+Nodes (36): Tone, downloadTemplate(), ListReportModal(), csv(), downloadBlob(), qs(), StockMovements(), AttendanceRegister() (+28 more)
 
 ### Community 27 - "verify-evaluations.ts / manilaDate() / main()"
 Cohesion: 0.08
-Nodes (57): api(), apiReachable(), check(), cleanup(), expectRejection(), HttpResult, iso(), Line (+49 more)
+Nodes (56): names(), api(), apiReachable(), check(), cleanup(), expectRejection(), HttpResult, iso() (+48 more)
 
-### Community 28 - "jobOrders.ts"
-Cohesion: 0.04
-Nodes (105): idsFilter(), passportRows(), sessionListWhere(), auditListWhere(), advanceListWhere(), assetListWhere(), contractListWhere(), kindWord() (+97 more)
+### Community 28 - "idsFilter"
+Cohesion: 0.05
+Nodes (97): idsFilter(), passportRows(), sessionListWhere(), auditListWhere(), advanceListWhere(), assertCanSee(), ownOnly(), assetListWhere() (+89 more)
 
 ### Community 29 - "receiptCost.ts"
-Cohesion: 0.20
-Nodes (18): awardedCanvass(), presentPo(), basisWords(), centavo(), CostBasis, CostedLine, CostedOrder, discountFactor() (+10 more)
+Cohesion: 0.12
+Nodes (31): awardedCanvass(), presentPo(), BASE_CURRENCY, cents(), D(), issueOrderStock(), key(), num() (+23 more)
 
-### Community 30 - "orgChart.ts"
-Cohesion: 0.08
-Nodes (37): main(), main(), isoDay(), settleServiceJobOrder(), subjectOf(), personName(), syncLoginFromEmployee(), applyEmployeeNumberList() (+29 more)
+### Community 30 - "exhibitionVisitors.ts"
+Cohesion: 0.20
+Nodes (17): ALIASES, Brand, brandsFromRow(), buildOne(), caches, Context, contextOf(), EXHIBITION_SELECT (+9 more)
 
 ### Community 31 - "progress.ts"
-Cohesion: 0.07
-Nodes (33): BILLING_COUNTED, BILLING_SORTS, billingListInclude, billingPreparer(), billingRoutes, billingTrail(), cents(), createReportSchema (+25 more)
+Cohesion: 0.06
+Nodes (39): asDate(), BILLING_COUNTED, BILLING_SORTS, billingListInclude, billingPreparer(), billingRoutes, billingTrail(), cents() (+31 more)
 
-### Community 32 - "routes/hiring.ts"
-Cohesion: 0.03
-Nodes (75): CANDIDATE_SORTS, candidateInclude, CandidateRow, candidateSchema, checkContractDates(), checkMprRefs(), checkOpenMpr(), CONTRACT_EDIT_RIGHTS (+67 more)
+### Community 32 - "cadJobOrders.ts"
+Cohesion: 0.07
+Nodes (37): impliedBy(), asDate(), BEFORE_QUEUE, cadInclude, cadJobOrderRoutes, CadRow, cadSchema, checkLinks() (+29 more)
 
 ### Community 33 - "verify-foundation.ts"
-Cohesion: 0.04
-Nodes (102): Clash, KINDS, overlaps(), Row, contentStreams(), pdfPieces(), PdfRun, pdfRuns() (+94 more)
+Cohesion: 0.03
+Nodes (120): Clash, KINDS, overlaps(), Row, contentStreams(), PdfRun, pdfRuns(), runWidth() (+112 more)
 
 ### Community 34 - "finance/Reports.tsx"
-Cohesion: 0.17
-Nodes (13): MiniBar(), AHEAD, cell(), monthStart(), PAST, qtyText(), quarterStart(), Report (+5 more)
+Cohesion: 0.09
+Nodes (28): MiniBar(), IconBadge(), AHEAD, cell(), monthStart(), PAST, qtyText(), quarterStart() (+20 more)
 
-### Community 35 - "shared/costingMath.ts"
-Cohesion: 0.13
-Nodes (24): cents(), CostingFigures, costingFigures(), CostingRates, lineAmount(), lineAmountCents(), MathLine, MILLION (+16 more)
+### Community 35 - "costing.ts"
+Cohesion: 0.04
+Nodes (79): approvalConfigured(), asDay(), assertCostingVisible(), assignSchema, categoryRanks(), checkReferences(), checkVatRate(), COSTING_SORTS (+71 more)
 
 ### Community 36 - "builkImport.ts"
 Cohesion: 0.07
 Nodes (52): main(), check(), fold(), main(), check(), fold(), main(), check() (+44 more)
 
-### Community 37 - "env.ts"
-Cohesion: 0.18
-Nodes (18): between(), pdfText(), api(), apiReachable(), check(), cleanup(), D(), dateOnly() (+10 more)
+### Community 37 - "verify-pipeline.ts"
+Cohesion: 0.08
+Nodes (31): pdf-lib@^1.17.1, isBold(), apiReachable(), BoardBody, BoardCard, cents(), check(), cleanup() (+23 more)
 
 ### Community 38 - "CostingSheet.tsx"
-Cohesion: 0.05
-Nodes (68): cents(), CostingFigures, costingFigures(), CostingRates, lineAmount(), lineAmountCents(), lineCodes(), MathLine (+60 more)
+Cohesion: 0.08
+Nodes (43): lineCodes(), ValueSource, CostingDetail, blankLine(), blankSection(), blankTask(), Category, CostingSheet() (+35 more)
 
-### Community 39 - "procurement.ts"
+### Community 39 - "notFound"
 Cohesion: 0.04
-Nodes (45): asDate(), AwardSupplier, CANVASS_SORTS, canvassView(), CheckedPrLine, checkNature(), checkPoLines(), checkPrLines() (+37 more)
+Nodes (79): currentUser(), forbidden(), notFound(), canEditRecord(), forEdit(), load(), AREAS, assertCanView() (+71 more)
 
 ### Community 40 - "Chain flow plan 2026-10-14 / Owner's seven plan "
 Cohesion: 0.05
 Nodes (41): shared/approvals.ts engine (submitForApproval, act), Approval router plan 2026-10-12, preparedAt helper (one Prepared-by timestamp), Budget request route (TL, Back Support, Finance Manager, CEO), Costing route: Technical Manager then Team Leader, Finance Manager role, Approval routing sheet plan 2026-10-13, Purchase order route banded at 100,000 (+33 more)
 
-### Community 41 - "env.ts"
-Cohesion: 0.04
-Nodes (69): apiReachable(), Captured, check(), cleanup(), decodedParts(), fakeSmtp(), fieldsOf(), http() (+61 more)
+### Community 41 - "verify-accounts.ts"
+Cohesion: 0.08
+Nodes (43): Printed, apiReachable(), Captured, check(), cleanup(), decodedParts(), fakeSmtp(), fieldsOf() (+35 more)
 
-### Community 42 - "ImportModal.tsx"
-Cohesion: 0.11
-Nodes (20): ColumnDef, GroupQuestion, IMPORT_TONES, ImportModal(), downloadTemplate(), ImportReport, OwnerQuestion, ReportTable (+12 more)
+### Community 42 - "Suppliers.tsx"
+Cohesion: 0.06
+Nodes (47): BulkContext, ColumnDef, GroupQuestion, IMPORT_TONES, ImportModal(), ImportReport, loadImportSpec(), OwnerQuestion (+39 more)
 
 ### Community 43 - "Pipeline.tsx"
-Cohesion: 0.07
-Nodes (50): loadPeople(), Board, BOARD_KEYS, BoardPerson, byClosing(), Card, CARD_FIELDS, Column (+42 more)
+Cohesion: 0.29
+Nodes (11): announce(), dragOver(), drop(), move(), onCardKey(), resolveDrop(), stageOptions(), stepTarget() (+3 more)
 
-### Community 44 - "pdfDesign.ts"
+### Community 44 - "routes/budgetRequests.ts"
 Cohesion: 0.04
-Nodes (84): pdfkit@^0.15.1, parseBody(), checkedDesign(), columnLabel(), DOCS, documentType(), pdfTemplateRoutes, previewSchema (+76 more)
+Nodes (62): APPROVED_STATES, BOOKABLE, bookSchema, BUDGET_LIST_PERMISSIONS, budgetRequestRoutes, BudgetRow, budgetSections(), checkCharging() (+54 more)
 
 ### Community 45 - "ProjectWorkspace.tsx"
 Cohesion: 0.06
-Nodes (48): formatMoney(), BatchRequestsPanel(), PurchaseOrders(), FinanceLinesPanel(), ProjectPlanApprovalsCard(), GroupRows(), ProjectCostingCard(), AssetDraft (+40 more)
+Nodes (40): recordLink(), ACTION_TONES, AuditRow, CostingDetail, CostingOption, JOB_STATUSES, JOB_TONES, JobRow (+32 more)
 
-### Community 46 - "verify-delivery.ts"
-Cohesion: 0.07
-Nodes (52): pdf-lib@^1.17.1, main(), adminToken(), holidaysAside(), holidaysBack(), putHolidays(), squash(), api() (+44 more)
+### Community 46 - "middleware.ts"
+Cohesion: 0.05
+Nodes (74): adminToken(), holidaysAside(), holidaysBack(), putHolidays(), between(), LANDSCAPE, pdfPieces(), pdfText() (+66 more)
 
-### Community 47 - "Assets.tsx"
-Cohesion: 0.14
-Nodes (14): ASSET_LABEL, ASSET_TONES, AssetDetail, AssetRow, AssetState, AssetType, columns, EmployeeAssets() (+6 more)
+### Community 47 - "QuotationEditor.tsx"
+Cohesion: 0.09
+Nodes (33): AreaProps, InputProps, MemoryInput(), ORDER_MEMORY, QUOTATION_MEMORY, Shared, LineMargin, QuotationTotals (+25 more)
 
 ### Community 48 - "useAuth"
 Cohesion: 0.07
-Nodes (73): App(), Guard(), GuardAny(), MovedTo(), NotFound(), Routed(), SIGNED_OUT_PAGES, Stat() (+65 more)
+Nodes (66): App(), Guard(), GuardAny(), MovedTo(), NotFound(), Routed(), SIGNED_OUT_PAGES, DataList() (+58 more)
 
-### Community 49 - "verify-sales.ts"
-Cohesion: 0.04
-Nodes (106): apiReachable(), approvedBy(), asApproved(), check(), cleanup(), d(), editorTokenIsSpare(), http() (+98 more)
+### Community 49 - "BudgetRequests.tsx"
+Cohesion: 0.12
+Nodes (22): RequestItemsCard(), BookTravelPanel(), BUDGET_REQUEST_TONES, BudgetRequestDetail(), BudgetRequests(), BudgetRequestsList(), COPY_SOURCE_KEY, copyLink() (+14 more)
 
-### Community 50 - "exhibitionVisitors.ts"
-Cohesion: 0.07
-Nodes (55): apiReachable(), check(), cleanup(), http(), main(), makeUser(), ALIASES, Brand (+47 more)
+### Community 50 - "verify-marketing.ts"
+Cohesion: 0.18
+Nodes (18): apiReachable(), check(), cleanup(), http(), main(), makeUser(), parseBadge(), parseBadgeWith() (+10 more)
 
-### Community 51 - "liveness.ts"
-Cohesion: 0.06
-Nodes (42): livenessGate(), LivenessRefusal, yawOf(), b64(), BLINK_RATIO, Box, boxOf(), Challenge (+34 more)
+### Community 51 - "Stat"
+Cohesion: 0.17
+Nodes (18): Meter(), Panel(), Stat(), PassportRow, Passports(), QueueRow, TeamReadiness, EvaluationsDuePanel() (+10 more)
 
-### Community 52 - "qrScan.ts"
-Cohesion: 0.21
-Nodes (9): Detector, JsQr, loadJsQr(), nativeDetector(), QrReader, qrReader(), readQrFromFile(), readPhoto() (+1 more)
+### Community 52 - "ScanPanel"
+Cohesion: 0.16
+Nodes (15): Detector, JsQr, loadJsQr(), nativeDetector(), QrReader, qrReader(), readQrFromFile(), blankDraft() (+7 more)
 
 ### Community 53 - "devDependencies"
 Cohesion: 0.11
 Nodes (19): devDependencies, prisma@^6.19.3, tsx@^4.19.2, @types/cors@^2.8.17, @types/express@^4.17.21, @types/jsonwebtoken@^9.0.7, @types/morgan@^1.9.9, @types/multer@^1.4.12 (+11 more)
 
-### Community 54 - "salesOrders.ts"
-Cohesion: 0.02
-Nodes (175): mayDeleteDocument(), routeSignoffs(), COMMISSION_LINK(), commissionRoutes, D(), loadVisible(), mayEdit(), mayPay() (+167 more)
+### Community 54 - "ClaimEditor.tsx"
+Cohesion: 0.19
+Nodes (19): chargeBody(), ChargeCell(), ChargeChoices, chargeKey(), chargeOf(), LineCharge, OfficeBudgetOption, LineCharging (+11 more)
 
-### Community 55 - "officeBudget.ts"
-Cohesion: 0.12
-Nodes (29): advanceOffice(), ASKED, billOffice(), cents(), chargeAgainstOffice(), claimOffice(), LINE_ORDER, LineRow (+21 more)
+### Community 55 - "badRequest"
+Cohesion: 0.04
+Nodes (68): badRequest(), parseBody(), asDate(), assertNoReportOnReplannedVisits(), asDate(), travelColumns(), asDay(), reportWindow() (+60 more)
 
 ### Community 56 - "warehouse.ts"
 Cohesion: 0.03
-Nodes (130): listResult(), can(), mayReadPayment(), PaymentRegister, paymentRegister(), attendanceScoped(), asDate(), cents() (+122 more)
+Nodes (108): itemListWhere(), activeGroupNames(), asDate(), assertChangeIssue(), BORROW_SORTS, BORROW_TYPES, borrowLineSchema, borrowListWhere() (+100 more)
 
-### Community 57 - "ui.tsx"
+### Community 57 - "charts.tsx"
+Cohesion: 0.19
+Nodes (19): 1. What to copy, BarGroup, BarList(), Brief(), Donut(), Empty(), Funnel(), GroupedBars() (+11 more)
+
+### Community 58 - "inventory.ts"
+Cohesion: 0.10
+Nodes (45): check(), main(), Rollback, postPullout(), D(), postReceivingGoods(), postStockIssue(), dropPlaceholder() (+37 more)
+
+### Community 59 - "nextNumber"
+Cohesion: 0.04
+Nodes (90): check(), cleanup(), main(), api(), apiReachable(), check(), cleanup(), expectRejection() (+82 more)
+
+### Community 60 - "officeBudget.ts"
 Cohesion: 0.07
-Nodes (38): react, Activity, BUILTIN_TYPES, TYPE_ICONS, Hit, avatarUrls, modalStack, Toast (+30 more)
+Nodes (43): ADVANCE_CLOSED, ADVANCE_SORTS, advanceInclude, advanceRoutes, AdvanceRow, advanceSchema, advanceStage(), asDate() (+35 more)
 
-### Community 58 - "Navigation.tsx"
-Cohesion: 0.11
-Nodes (19): CommandPalette(), go(), onKeyDown(), HelpDesk(), IconName, PATHS, SCREEN_ICONS, screenIcon() (+11 more)
-
-### Community 59 - "rfq.ts"
-Cohesion: 0.08
-Nodes (27): current(), procurementSettingsRoutes, assertVisible(), cents(), checkSuppliers(), createSchema, headerSchema, LIST_INCLUDE (+19 more)
-
-### Community 60 - "DocumentApproval"
-Cohesion: 0.07
-Nodes (32): DocumentApproval(), Column, ACTION_TONES, AuditRow, APPROVER_FILTERS, clock(), save(), CorrectionRecord() (+24 more)
-
-### Community 61 - "PermissionMatrix.tsx"
-Cohesion: 0.18
-Nodes (17): actionsFor(), Level, LEVEL_LABELS, levelOptions(), LEVELS, levelsOf(), MANAGE_KEYS, VIEW_KEYS (+9 more)
+### Community 61 - "accounts.ts"
+Cohesion: 0.17
+Nodes (14): ADMIN_RESET_HOURS, consumeToken(), createLogin(), Delivery, hashToken(), INVITE_DAYS, issueToken(), liveToken() (+6 more)
 
 ### Community 62 - "Hiring.tsx"
-Cohesion: 0.05
-Nodes (45): OnlineExamCard(), Analytics, CANDIDATE_LABEL, CANDIDATE_TONES, candidateBadge(), candidateColumns, CandidateDetail, CandidateModal() (+37 more)
+Cohesion: 0.07
+Nodes (33): Analytics, CANDIDATE_LABEL, CANDIDATE_TONES, candidateColumns, CandidateDetail, CandidateRow, candidateStep(), CandidateTable() (+25 more)
 
 ### Community 63 - "myRecords.ts"
-Cohesion: 0.12
-Nodes (22): leaveBalance(), Cutoff, CUTOFF_DEFAULT, cutoffByKey(), cutoffFor(), CutoffRule, DtrDay, dtrDay() (+14 more)
+Cohesion: 0.11
+Nodes (24): Cutoff, CUTOFF_DEFAULT, cutoffByKey(), cutoffFor(), CutoffRule, daysOf(), DtrDay, dtrDay() (+16 more)
 
 ### Community 64 - "statusLabel"
-Cohesion: 0.09
-Nodes (101): borrow(), canvass(), incoming(), inventory(), KINDS, outgoing(), overview(), pullout() (+93 more)
+Cohesion: 0.15
+Nodes (69): borrow(), canvass(), incoming(), inventory(), KINDS, outgoing(), overview(), pullout() (+61 more)
 
-### Community 65 - "salesFigures.ts"
-Cohesion: 0.21
-Nodes (16): flowsFor(), cents(), GROUP_SEPARATOR, groupKeyOf(), groupSharesOf(), isNarrowed(), narrowRows(), NO_GROUP (+8 more)
+### Community 65 - "ui.tsx"
+Cohesion: 0.07
+Nodes (41): react, react-dom, Box, COLOURS, FONTS, Handle, HANDLES, Mode (+33 more)
 
 ### Community 66 - "Reference.tsx / CategoryCard() / activeBadge()"
 Cohesion: 0.05
-Nodes (40): commit(), save(), activeBadge(), ACTIVITY_TYPES, ActivityTypeDef, ASSET_TYPES, AssetTypeDef, Categories() (+32 more)
+Nodes (42): WarehouseModal, commit(), save(), activeBadge(), ACTIVITY_TYPES, ActivityTypeDef, ASSET_TYPES, AssetTypeDef (+34 more)
 
-### Community 67 - "memos.ts"
-Cohesion: 0.07
-Nodes (28): AUDIENCES, audienceSchema, checkedAudience(), day(), include, isRecipient(), load(), memoRoutes (+20 more)
+### Community 67 - "shared/marketing.ts"
+Cohesion: 0.17
+Nodes (12): Badge, BadgeFormat, brandKey(), EXHIBITION_BRANDS, FIRST_EXHIBITION, MARKETING_COMMON, matchBrand(), QR_FIELDS (+4 more)
 
 ### Community 68 - "UI adjustments of 2026-11-18 — summary for another G-Core"
 Cohesion: 0.29
@@ -617,373 +616,369 @@ Nodes (6): 1. One layout for every list screen, 2. Pickers you type in, 3. "+ Ne
 Cohesion: 0.05
 Nodes (43): Cloudflare tunnel gcore-gruntech, G-CORE deployment guide, gcore-gruntech-db Postgres on 5435, rebuild.ps1 and autodeploy, Settings snapshot export/import, Business Operations Model (specification), One approval engine, Budget Request vs Purchase Request (+35 more)
 
-### Community 70 - "QuotationEditor.tsx"
-Cohesion: 0.06
-Nodes (79): AreaProps, InputProps, MemoryInput(), ORDER_MEMORY, QUOTATION_MEMORY, Shared, upperText(), daysBetween() (+71 more)
+### Community 70 - "QuotationEditor"
+Cohesion: 0.11
+Nodes (44): upperText(), daysBetween(), blankLine(), DiscountCalculator(), solve(), typed(), groupProblem(), isBlank() (+36 more)
 
-### Community 71 - "attendanceCorrections.ts"
-Cohesion: 0.10
-Nodes (31): at(), attendanceCorrectionWork(), body, checkDay(), correctedTimes(), CORRECTION_LINK(), EDIT_KEYS, include (+23 more)
+### Community 71 - "index.ts"
+Cohesion: 0.03
+Nodes (67): app, webDist, academySettingsRoutes, courseRoutes, passportRoutes, sessionRoutes, AUDIT_SORTS, auditClock (+59 more)
 
-### Community 72 - "Canvass.tsx"
-Cohesion: 0.07
-Nodes (25): AwardData, bodyOf(), CANVASS_TONES, CanvassableRfq, CanvassDetail(), CanvassDetailData, CanvassRow, CanvassSummary (+17 more)
+### Community 72 - "ServiceDocuments.tsx"
+Cohesion: 0.17
+Nodes (14): AGAINST, DocumentCategory, DocumentDetail, DocumentSummary, Lookup(), MachineHit, machineLabel(), ModelHit (+6 more)
 
 ### Community 73 - "routes/assets.ts"
 Cohesion: 0.09
 Nodes (25): assetRoutes, checkType(), detailsOf(), include, LEAVING, loadSlip(), mayReadSlip(), nameOf() (+17 more)
 
-### Community 74 - "Sessions.tsx"
-Cohesion: 0.10
-Nodes (22): PeoplePicker(), onSearchKey(), toggle(), Person, AttendeeRow, courseHint(), CourseOption, Draft (+14 more)
+### Community 74 - "react-router-dom"
+Cohesion: 0.17
+Nodes (14): AttendeeRow, courseHint(), CourseOption, Draft, EmployeeLookup, RESULT_LABEL, RESULT_TONES, SESSION_TONES (+6 more)
 
-### Community 75 - "lib/day.ts"
-Cohesion: 0.07
-Nodes (70): apiGet(), apiReachable(), apiSend(), check(), cleanup(), main(), makeRole(), makeUser() (+62 more)
+### Community 75 - "parseDay"
+Cohesion: 0.12
+Nodes (44): apiGet(), apiReachable(), apiSend(), check(), cleanup(), main(), makeRole(), makeUser() (+36 more)
 
 ### Community 76 - "service/Reports.tsx"
-Cohesion: 0.12
-Nodes (14): PickerVisit, PRESET_BY_PATH, RenewalRow, Report, REPORT_DOC_TYPE, REPORT_TONES, reportListFor(), reportPermission() (+6 more)
+Cohesion: 0.15
+Nodes (15): KINDS, PickerVisit, PRESET_BY_PATH, RenewalRow, Report, REPORT_DOC_TYPE, REPORT_TONES, reportListFor() (+7 more)
 
 ### Community 77 - "quotationMath.ts / quotationTotals() / spread()"
-Cohesion: 0.14
-Nodes (35): absDec(), add(), align(), cmp(), CostPanel, D(), Dec, dec() (+27 more)
+Cohesion: 0.16
+Nodes (32): absDec(), add(), align(), cmp(), D(), Dec, dec(), digits() (+24 more)
 
 ### Community 78 - "PulloutSlips.tsx"
-Cohesion: 0.07
-Nodes (22): useBackLink(), BLANK, CHOICES, CONDITIONS, FreeLine, Header, Kind, Pick (+14 more)
+Cohesion: 0.10
+Nodes (22): BLANK, blankFree(), CHOICES, CONDITIONS, FreeLine, Header, Kind, LinePick (+14 more)
 
-### Community 79 - "useConfirm"
-Cohesion: 0.09
-Nodes (28): ConfirmApi, ConfirmBar(), go(), ConfirmSpec, messageOf(), useConfirm(), MoreItem, RecordActionsProps (+20 more)
+### Community 79 - "RecordHeader.tsx"
+Cohesion: 0.31
+Nodes (9): ConfirmApi, ConfirmBar(), go(), ConfirmSpec, messageOf(), MoreItem, RecordActionsProps, RecordHeaderProps (+1 more)
 
-### Community 80 - "seed-sample-quotation.ts"
-Cohesion: 0.11
-Nodes (26): d(), deleteStray(), ISSUED, LINES, main(), ORDER_DESCRIPTIONS, ORDERS, pickOwner() (+18 more)
+### Community 80 - "salesOrders.ts"
+Cohesion: 0.05
+Nodes (78): requireAnyOrDecider(), cashRequestSignatories(), breakdownSection(), changeWords(), comparedCells(), quotationPrintData(), unroutedApproval(), assertOrderVisible() (+70 more)
 
 ### Community 81 - "Evaluations.tsx"
-Cohesion: 0.09
-Nodes (24): ListResult, MilestonePicture, dateOnly(), Draft, draftOf(), DueRow, EmployeeLookup, EmployeeRef (+16 more)
+Cohesion: 0.11
+Nodes (22): ListResult, MilestonePicture, dateOnly(), Draft, draftOf(), DueResponse, DueRow, EmployeeLookup (+14 more)
 
 ### Community 82 - "api/package.json"
 Cohesion: 0.17
 Nodes (11): morgan@^1.10.0, description, @types/compression@^1.7.5, main, name, prisma, seed, private (+3 more)
 
-### Community 83 - "face.ts / HttpError / describeFace()"
-Cohesion: 0.11
-Nodes (22): AVATAR_PX, centre(), describe(), detect(), eyeGeometry(), FaceCapture, FaceLandmarks, FacePurpose (+14 more)
+### Community 83 - "lib/permissionLevels.ts"
+Cohesion: 0.18
+Nodes (12): actionsFor(), Level, LEVEL_LABELS, levelOptions(), LEVELS, levelsOf(), MANAGE_KEYS, VIEW_KEYS (+4 more)
 
-### Community 84 - "shared/hr.ts"
-Cohesion: 0.07
-Nodes (44): deleteAttachment(), saveAttachmentBytes(), clearPhoto(), oldPhotos(), photoBytes(), setPhoto(), accountPhotoFrom(), faceEngineReady() (+36 more)
+### Community 84 - "PurchaseRequests.tsx"
+Cohesion: 0.18
+Nodes (6): PulloutCard(), PR_STATUSES, PrItem, PrRow, PurchaseRequestDetail(), usePrBase()
 
 ### Community 85 - "pdfTemplate.ts"
-Cohesion: 0.08
-Nodes (43): Align, Anchor, ANCHOR_HINTS, ANCHOR_LABELS, ANCHORS_FOR, Base, Block, BlockType (+35 more)
+Cohesion: 0.10
+Nodes (26): Align, Anchor, ANCHOR_HINTS, ANCHOR_LABELS, ANCHORS_FOR, Base, Block, BlockType (+18 more)
 
-### Community 86 - "Renderer"
-Cohesion: 0.16
-Nodes (13): formatDateTime(), pdfSafe(), byPosition(), drawLaid(), fontName(), isAbove(), laid(), lineWidth() (+5 more)
+### Community 86 - "pdfDesign.ts"
+Cohesion: 0.06
+Nodes (48): pdfSafe(), ALIGNS, ANCHORS, base, boxBlock, byPosition(), CompanyRow, countsPages() (+40 more)
 
 ### Community 87 - "Marketing.tsx / BarList() / Marketing()"
-Cohesion: 0.09
-Nodes (28): BadgePreview(), blankDraft(), Brand, Dashboard, draftOf(), Exhibition, ExhibitionDay, ExhibitionModal() (+20 more)
+Cohesion: 0.10
+Nodes (26): BadgePreview(), Brand, Dashboard, dayLabel(), draftOf(), Exhibition, ExhibitionDay, ExhibitionModal() (+18 more)
 
 ### Community 88 - "LayoutEditor.tsx / LayoutEditor() / selector.ts"
-Cohesion: 0.11
-Nodes (28): Box, boxOf(), COLOURS, companions(), FONTS, Handle, HANDLES, LayoutEditor() (+20 more)
+Cohesion: 0.16
+Nodes (18): boxOf(), companions(), LayoutEditor(), pick(), startMove(), startResize(), readTranslate(), classFor() (+10 more)
 
-### Community 89 - "Checkbox"
-Cohesion: 0.08
-Nodes (31): NumberInput(), Cell(), SettingColumn, SettingListCard(), SettingRow, mayEditPage(), CorrectCostPanel(), FinanceSettings() (+23 more)
+### Community 89 - "NumberInput"
+Cohesion: 0.09
+Nodes (20): Cell(), SettingListCard(), PeopleFlowCard(), AcademyCard(), accept(), save(), AcademyRules, AREAS (+12 more)
 
-### Community 90 - "imports.ts"
+### Community 90 - "resolve.ts"
 Cohesion: 0.07
-Nodes (51): check(), cleanup(), main(), courseImport, customerListSummary(), customerSpec, customerWrite(), EmployeeImportRecord (+43 more)
+Nodes (54): apiReachable(), check(), cleanup(), http(), httpCases(), HttpResult, main(), makeRole() (+46 more)
 
 ### Community 91 - "Quotations.tsx"
 Cohesion: 0.07
 Nodes (34): initials(), ApprovalRoute, BookingData, BookingLineRow, BULK_TARGETS, costingsOf(), CostMakeup, CostMakeupBlock() (+26 more)
 
-### Community 92 - "ApprovalStepper.tsx"
-Cohesion: 0.09
-Nodes (26): Action, ApprovalStepper(), CLASS, Decision, DECISION_VERB, MARK, PreviewRoute, Request (+18 more)
+### Community 92 - "NumberInput.tsx"
+Cohesion: 0.10
+Nodes (18): NumberChange, Props, BillingRow, MonitorRow, PctInput(), ReportDay, ReportLine, ReportRow (+10 more)
 
-### Community 93 - "Dashboard.tsx"
-Cohesion: 0.18
-Nodes (13): excelReport(), AttendanceRow, Dashboard, DashboardRow, EvaluationsDuePanel(), EvaluationsDueStat(), useDue(), METHOD_TONES (+5 more)
+### Community 93 - "RfqEditor"
+Cohesion: 0.33
+Nodes (9): blankRow(), newKey(), PickRequest(), RfqEditor(), body(), pickSupplier(), save(), setRow() (+1 more)
 
-### Community 94 - "pdf.ts"
+### Community 94 - "renderSchedule"
 Cohesion: 0.05
-Nodes (77): logoFile(), logoImage(), memo, printLogoPath(), isoKey(), isWorkingDay(), isWorkingDow(), Align (+69 more)
+Nodes (76): pdfkit@^0.15.1, costingAppendix(), printLogoPath(), Align, autoWidths(), breakPoint(), caps(), CellLine (+68 more)
 
-### Community 95 - "projectStock.ts"
-Cohesion: 0.13
-Nodes (23): check(), main(), Rollback, backfillProjectStock(), cents(), D(), issueProjectStock(), key() (+15 more)
+### Community 95 - "Pipeline.tsx"
+Cohesion: 0.08
+Nodes (26): Menu(), ToolsMenuItem, Person, Board, BOARD_KEYS, BoardPerson, byClosing(), Card (+18 more)
 
 ### Community 96 - "routes/meetings.ts"
 Cohesion: 0.07
-Nodes (36): addInviteesSchema, agreeSchema, cancelSchema, clockFmt, dateTimeFmt, detailSelect, invitableUsers(), inviteeIds (+28 more)
+Nodes (34): addInviteesSchema, agreeSchema, cancelSchema, clockFmt, dateTimeFmt, detailSelect, invitableUsers(), inviteeIds (+26 more)
 
-### Community 97 - "DataList.tsx"
-Cohesion: 0.09
-Nodes (24): BulkContext, csvCell(), exportCsv(), exportSelected(), extractText(), forgetLocalViews(), LookupFilter(), movingViews (+16 more)
+### Community 97 - "Attachments.tsx"
+Cohesion: 0.23
+Nodes (10): Attachment, AttachmentPreview(), extensionOf(), previewKind(), Icon(), IconName, PATHS, SCREEN_ICONS (+2 more)
 
 ### Community 98 - "PdfTemplateEditor"
-Cohesion: 0.11
-Nodes (13): docType(), getToken(), request(), emptyFieldsIn(), listOf(), history(), Layers(), PdfTemplateEditor() (+5 more)
+Cohesion: 0.13
+Nodes (18): docType(), getToken(), clampToPage(), pageSizeOf(), tableBottom(), changed(), follow(), Layers() (+10 more)
 
-### Community 99 - "projectBudget.ts"
-Cohesion: 0.08
-Nodes (39): requestCharging(), standInCategory(), claimCharges(), cents(), Db, num(), requestGroups(), requestPlaces() (+31 more)
+### Community 99 - "Column"
+Cohesion: 0.12
+Nodes (17): Column, APPROVER_FILTERS, clock(), save(), submit(), Detail, messageOf(), Row (+9 more)
 
-### Community 100 - "Employees.tsx"
-Cohesion: 0.14
-Nodes (13): mayView(), EmployeeRow, EmployeeTab, EMPLOYMENT_TYPES, ExistingLogin, LoginDraft, PersonDoor, PersonPrefill (+5 more)
+### Community 100 - "react"
+Cohesion: 0.10
+Nodes (22): Delivery, LinkDelivery(), MailStatus, Role, SignInPanel(), TEAM_SCOPED_ROLES, UserDetail, UserRow (+14 more)
 
 ### Community 101 - "MyRecords.tsx"
-Cohesion: 0.16
-Nodes (19): Empty(), MemosReceived(), AttendanceTab(), Balance, Cutoff, dash(), DTR_LABEL, DTR_TONES (+11 more)
+Cohesion: 0.11
+Nodes (18): AttendanceIssues(), ISSUE_WORDS, Issues, lateText(), Row, save(), Balance, Cutoff (+10 more)
 
-### Community 102 - "Orders.tsx"
-Cohesion: 0.20
-Nodes (7): BASIS_WORDS, Batchable, LandedPanel(), PoDetailData, PoLine, PoRow, PO_CURRENCIES
+### Community 102 - "verify-plantilla.ts"
+Cohesion: 0.08
+Nodes (48): signedCount(), addDays(), apiReachable(), check(), cleanup(), fetchApi(), http(), HttpResult (+40 more)
 
-### Community 103 - "resolveTemplate"
-Cohesion: 0.18
-Nodes (12): merge(), resolveInline(), resolveTemplate(), signoffColumns(), BlockBody(), cellText(), fitSize(), ItemsBody() (+4 more)
+### Community 103 - "PdfTemplates.tsx"
+Cohesion: 0.09
+Nodes (33): ColumnKey, FieldDef, Layout, merge(), resolveInline(), resolveTemplate(), Sample, signoffColumns() (+25 more)
 
 ### Community 104 - "typedItemSplit.ts"
-Cohesion: 0.38
-Nodes (9): typedIdentity(), D(), fillTypedItemDescriptions(), num(), OrderLine, Skip, splitInside(), splitMergedTypedItems() (+1 more)
+Cohesion: 0.27
+Nodes (13): itemForTypedLine(), matchTypedItem(), repairProjectlessReceipts(), repairTypedStockReceipts(), typedIdentity(), D(), fillTypedItemDescriptions(), num() (+5 more)
 
-### Community 105 - "Progress.tsx"
-Cohesion: 0.12
-Nodes (22): allHeld(), DecisionNote(), PlanApprovalPage(), submit(), BillingDetailPage(), submit(), BillingRow, MonitorRow (+14 more)
+### Community 105 - "useConfirm"
+Cohesion: 0.05
+Nodes (50): DecisionNote(), DocumentApproval(), Attachments(), BudgetCard(), useConfirm(), print(), printSelected(), RecordActions() (+42 more)
 
 ### Community 106 - "BudgetRequestEditor.tsx"
-Cohesion: 0.05
-Nodes (85): BudgetLineFigures, BudgetNoun, RequestBudget, RequestSource, SOURCE_WORDS, BriefLine, BriefPart, chargeBody() (+77 more)
+Cohesion: 0.16
+Nodes (32): NO_CHARGE, OfficeLineAdvice(), OfficeLineSelect(), blankRequestLine(), financeLikely(), isBlankLine(), lineAmount(), lineProblem() (+24 more)
 
-### Community 107 - "routes/budgetRequests.ts"
-Cohesion: 0.04
-Nodes (69): APPROVED_STATES, asDate(), assertCanOpen(), assertCanSee(), BOOKABLE, bookSchema, BUDGET_LIST_PERMISSIONS, budgetRequestListWhere() (+61 more)
+### Community 107 - "projectBudget.ts"
+Cohesion: 0.20
+Nodes (16): PlaceCard, ADVANCE_IN_FLIGHT, advanceBudget(), BudgetLine, BudgetPool, budgetPosition(), cents(), chargeAgainstBudget() (+8 more)
 
-### Community 109 - "quotationBuying.ts"
-Cohesion: 0.18
-Nodes (25): officeLineFor(), assertBudgetLeft(), auditOn(), budgetLineFor(), BUYABLE, cents(), checkQuotationTarget(), costsToReallocate() (+17 more)
+### Community 109 - "formatSpan"
+Cohesion: 0.20
+Nodes (10): CalendarToolbar(), formatSpan(), statusTone(), atNine(), TrainingCalendar(), atNine(), durationText(), Meetings() (+2 more)
 
 ### Community 110 - "IncomingEditor.tsx"
-Cohesion: 0.13
-Nodes (21): blankFree(), Category, cents(), CurrencyOption, Existing, FreeLine, IncomingEditor(), body() (+13 more)
+Cohesion: 0.10
+Nodes (27): allHeld(), blankFree(), Category, cents(), CurrencyOption, Existing, FreeLine, IncomingEditor() (+19 more)
 
-### Community 111 - "Projects.tsx"
-Cohesion: 0.14
-Nodes (16): marginTone(), CostingDetail, CostingOption, JOB_STATUSES, JOB_TONES, JobRow, JobStatus(), NewJobPreset (+8 more)
+### Community 111 - "quotationBuying.ts"
+Cohesion: 0.19
+Nodes (24): assertBudgetLeft(), auditOn(), budgetLineFor(), BUYABLE, cents(), checkQuotationTarget(), costsToReallocate(), D() (+16 more)
 
 ### Community 112 - "Checkbox"
-Cohesion: 0.12
-Nodes (17): Checkbox(), Loaded, PipelineStages(), reset(), save(), Row, rowsOf(), StageDef (+9 more)
+Cohesion: 0.06
+Nodes (17): Checkbox(), PipelineStages(), reset(), save(), rowsOf(), UserEditor(), ProcurementSettings(), Settings (+9 more)
 
 ### Community 113 - "OrgChart.tsx"
-Cohesion: 0.13
-Nodes (25): Branch(), buildForest(), Card(), CardLink(), ChartRole, countBelow(), KEY_ROLE_NAMES, KEY_ROLES (+17 more)
+Cohesion: 0.12
+Nodes (28): Branch(), buildForest(), Card(), CardLink(), ChartRole, countBelow(), KEY_ROLE_NAMES, KEY_ROLES (+20 more)
 
 ### Community 114 - "Meetings.tsx"
-Cohesion: 0.11
-Nodes (21): isHttp(), MapLink(), mapsSearchUrl(), toLocalInput(), setStart(), ANSWER_LABEL, ANSWER_TONES, atNine() (+13 more)
+Cohesion: 0.12
+Nodes (20): isHttp(), MapLink(), mapsSearchUrl(), toLocalInput(), setStart(), ANSWER_LABEL, ANSWER_TONES, CalendarRow (+12 more)
 
 ### Community 115 - "Courses.tsx"
-Cohesion: 0.16
-Nodes (20): ActiveBadge(), formatSpan(), CoursePage(), BLANK_COURSE, CategoryChip(), CourseCard(), CourseDetail, CourseModule (+12 more)
+Cohesion: 0.15
+Nodes (19): ActiveBadge(), BLANK_COURSE, CategoryChip(), CourseCard(), CourseDetail, CourseModule, CourseRow, Courses() (+11 more)
 
 ### Community 116 - "web/package.json / dependencies / devDependencie"
-Cohesion: 0.12
-Nodes (19): @types/react, @types/react-dom, vite, @vitejs/plugin-react, devDependencies, @types/react@^18.3.18, @types/react-dom@^18.3.5, typescript@^5.7.3 (+11 more)
+Cohesion: 0.06
+Nodes (37): html-to-image, @types/react, @types/react-dom, vite, @vitejs/plugin-react, xlsx, dependencies, html-to-image@1.11.13 (+29 more)
 
 ### Community 117 - "scripts"
 Cohesion: 0.18
 Nodes (11): scripts, build, dev, prisma:deploy, prisma:generate, prisma:migrate, prisma:push, prisma:studio (+3 more)
 
-### Community 118 - "Clock.tsx"
-Cohesion: 0.17
-Nodes (15): formatTime(), AttendanceIssues(), ISSUE_WORDS, Issues, lateText(), Row, Challenge, CHALLENGE_LABEL (+7 more)
+### Community 118 - "SalesOrderReports.tsx"
+Cohesion: 0.26
+Nodes (10): formatCompactMoney(), MatrixReport, SalesMatrix(), KINDS, listOf(), SalesFlows(), SalesOrderReports(), STATUSES (+2 more)
 
-### Community 119 - "verify-insights.ts"
-Cohesion: 0.22
-Nodes (18): check(), cleanup(), D(), day(), expectRejection(), main(), makeJob(), makeQuotation() (+10 more)
+### Community 119 - "finAccess.ts"
+Cohesion: 0.20
+Nodes (8): FIN_ACCESS_MARK, FIN_COMMON, FIN_MANAGER_ROLE, FIN_SALES, FIN_SALES_ROLES, MONEY_IN_ACCESS_MARK, MONEY_IN_KEYS, MONEY_IN_ROLES
 
-### Community 120 - "react-router-dom"
-Cohesion: 0.27
-Nodes (9): react-router-dom, HrReports(), LeaveBalances, LeaveReport(), OvertimeByProject, OvertimeReport(), startOfYear(), Tab (+1 more)
+### Community 120 - "Navigation.tsx"
+Cohesion: 0.15
+Nodes (14): CommandPalette(), go(), onKeyDown(), HelpDesk(), sectionIcon(), BackTarget, NavigationApi, NavigationContext (+6 more)
 
 ### Community 121 - "SessionDetail"
-Cohesion: 0.21
-Nodes (7): draftFrom(), SessionDetail(), askComplete(), complete(), enrolMe(), run(), saveResults()
+Cohesion: 0.16
+Nodes (8): MeetLink(), draftFrom(), SessionDetail(), askComplete(), complete(), enrolMe(), run(), saveResults()
 
 ### Community 122 - "JobOrders.tsx"
-Cohesion: 0.11
-Nodes (17): AcknowledgeModal(), BASIS_TONES, daysLabel(), InvoiceModal(), JOB_ORDER_TONES, JobOrderDetailRow, JobOrderModal(), pickQuotation() (+9 more)
+Cohesion: 0.18
+Nodes (11): BASIS_TONES, JOB_ORDER_TONES, JobOrderDetailRow, JobOrderRow, NO_OPTIONS, Options, OUTCOME_LABEL, Person (+3 more)
 
-### Community 123 - "verify-insights-brief.ts"
-Cohesion: 0.20
-Nodes (17): check(), cleanup(), D(), fig(), Figure, Line, main(), quotation() (+9 more)
+### Community 123 - "verify-finance.ts"
+Cohesion: 0.06
+Nodes (61): hasLine(), labelRuns(), labelsSaid(), approvedByCount(), cents(), check(), cleanup(), D() (+53 more)
 
 ### Community 124 - "humanise"
 Cohesion: 0.18
-Nodes (17): relativeTime(), recordLink(), DIVISIONS, Home(), MyWork, ApprovalRequest, Decision, DECISION_DONE (+9 more)
+Nodes (12): react-router-dom, Hit, DIVISIONS, MyWork, ApprovalRequest, Decision, DECISION_DONE, DECISION_LABEL (+4 more)
 
-### Community 125 - "Misc.tsx"
-Cohesion: 0.36
-Nodes (6): HrFact(), HrFacts, LinkInfo, Personal, Profile, Setting
+### Community 125 - "Payables.tsx"
+Cohesion: 0.20
+Nodes (9): BILL_STATUSES, BILL_TERMS, BillLine, daysFrom(), OrderLines, PayablesSummary, qtyWords(), termsWords() (+1 more)
 
-### Community 126 - "RecordHeader"
-Cohesion: 0.09
-Nodes (13): previewSteps(), RecordActions(), RecordHeader(), openPdf(), PurchaseOrderDetail(), PulloutDetail(), ReceivingDetail(), CommissionPage() (+5 more)
+### Community 126 - "JobOrderDetail"
+Cohesion: 0.14
+Nodes (4): JobOrderDetail(), reportPermission(), ServiceReportDetail(), ServiceJobOrderDetail()
 
 ### Community 127 - "MeetingDetail"
-Cohesion: 0.16
-Nodes (9): MeetLink(), durationText(), MeetingDetail(), respond(), run(), send(), MinutesCard(), run() (+1 more)
+Cohesion: 0.24
+Nodes (7): MeetingDetail(), respond(), run(), send(), MinutesCard(), run(), save()
 
 ### Community 128 - "OfficeBudgets.tsx"
-Cohesion: 0.14
-Nodes (12): useUnsavedChanges(), BudgetRow, BudgetView, Doc, Draft, DraftLine, KIND_WORDS, Line (+4 more)
+Cohesion: 0.20
+Nodes (9): BudgetRow, BudgetView, Doc, Draft, DraftLine, KIND_WORDS, Line, Totals (+1 more)
 
 ### Community 129 - "Receivables.tsx"
 Cohesion: 0.09
-Nodes (26): noTeamNote(), teamCards(), yearStartKey(), Allocation, AllocationLinks(), allocationTarget(), CellLink(), EWT_CHOICES (+18 more)
-
-### Community 130 - "routes/insights.ts"
-Cohesion: 0.16
-Nodes (16): ForecastItem, forecastItems(), GroupRow, insightRoutes, NOT_CANCELLED, sendCsv(), SubIndustryRow, UNCLASSIFIED (+8 more)
+Nodes (28): TeamShare, Allocation, AllocationLinks(), allocationTarget(), CellLink(), EWT_CHOICES, EwtBadge(), Invoice (+20 more)
 
 ### Community 131 - "db / healthcheck / environment"
 Cohesion: 0.08
 Nodes (24): container_name, environment, healthcheck, image, logging, ports, restart, volumes (+16 more)
 
-### Community 132 - "SearchSelect"
+### Community 132 - "jobOrders.ts"
 Cohesion: 0.06
-Nodes (26): 4. Files to copy or mirror, CustomerForm, CustomerPicker(), PersonSelect(), SearchSelect(), close(), onBlur(), onKeyDown() (+18 more)
+Nodes (56): agreedAmount(), asDate(), checkBelongs(), costingLabor(), crewOf(), IN_PROGRESS_WHERE, isoDay(), JOB_ORDER_SORTS (+48 more)
 
-### Community 133 - "VisitSheet"
-Cohesion: 0.67
-Nodes (3): VisitSheet(), patchVisit(), save()
+### Community 133 - "Schedule.tsx"
+Cohesion: 0.11
+Nodes (21): CustomerRef, CalendarEvent, FormState, Asset, AssetDetail, AssetSummary, WARRANTY_LABEL, WARRANTY_TONE (+13 more)
 
 ### Community 134 - "Partners.tsx"
-Cohesion: 0.07
-Nodes (32): open(), openAttachment(), InvoiceCopy(), asFile(), FaceEnrollments, FaceSample, FaceSampleQuality, FaceSamplesPanel() (+24 more)
+Cohesion: 0.08
+Nodes (30): open(), openAttachment(), InvoiceCopy(), asFile(), FaceEnrollments, FaceSample, FaceSampleQuality, FaceSamplesPanel() (+22 more)
 
-### Community 135 - "CourseModal"
-Cohesion: 0.18
-Nodes (3): CourseModal(), RequirementsEditor(), SyllabusEditor()
+### Community 135 - "approvals.ts"
+Cohesion: 0.03
+Nodes (109): TYPICAL_REQUESTER, settle(), signCosting(), settle(), at(), attendanceCorrectionWork(), body, checkDay() (+101 more)
 
-### Community 136 - "prisma.ts"
-Cohesion: 0.02
-Nodes (211): authenticate(), bearer(), Express, Request, require_(), requireAny(), requireAnyOrDecider(), requireSuperAdmin() (+203 more)
+### Community 136 - "employmentExams.ts"
+Cohesion: 0.10
+Nodes (25): answersSchema, brake(), dayKey(), EXAM_READERS, examQuestionRoutes, finalize(), __forTests, hashOf() (+17 more)
 
 ### Community 137 - "CostingSheet"
-Cohesion: 0.13
-Nodes (12): CostingDetailPage(), CostLine, Fact(), KIND_LABEL, pct(), Ref, ScopeSection, ScopeTask (+4 more)
+Cohesion: 0.08
+Nodes (27): marginTone(), RecordBudgetRequests(), CostingDetailPage(), CostLine, Fact(), KIND_LABEL, pct(), Ref (+19 more)
 
 ### Community 138 - "Forecast.tsx"
-Cohesion: 0.11
-Nodes (27): Breakdown(), Bucket, By, BYS, Cell, Change, ChangeCell(), Compare (+19 more)
+Cohesion: 0.10
+Nodes (28): ToolsMenu(), Breakdown(), Bucket, By, BYS, Cell, Change, ChangeCell() (+20 more)
 
-### Community 139 - "Payables.tsx"
-Cohesion: 0.07
-Nodes (25): SupplierForm, SupplierPicker(), SupplierRef, Header, SupRow, BILL_STATUSES, BILL_TERMS, BillLine (+17 more)
+### Community 139 - "FaceHealthPanel.tsx"
+Cohesion: 0.21
+Nodes (11): FaceHealth, FaceHealthPanel(), IDENTITY_REASONS, PAIR_TONES, Person, PersonLink(), RECENT_TONES, RecentRefusal (+3 more)
 
 ### Community 140 - "EvaluationRuns.tsx"
-Cohesion: 0.20
-Nodes (11): DraftTarget, EmployeeHit, EvaluationResultPage(), fmt(), Mine, PersonReport, Run, RunSummary (+3 more)
+Cohesion: 0.14
+Nodes (14): DraftTarget, EmployeeHit, EvaluationAnswerPage(), EvaluationResultPage(), EvaluationRuns(), fmt(), Mine, MyEvaluations() (+6 more)
 
 ### Community 141 - "Approval engine (shared/approvals.ts) / Permissi"
 Cohesion: 0.09
 Nodes (22): Approval engine (shared/approvals.ts), BUSINESS-OPERATIONS-MODEL spec, Sales calendar and activities, G-CORE platform, Help box and help tickets, Sales Marketing exhibition visitors, Meetings and minutes, nextNumber numbering engine (+14 more)
 
 ### Community 142 - "Warehouse.tsx"
-Cohesion: 0.11
-Nodes (25): PhotoCard(), ProductPicture(), label, BrandTile, CategoryTile, ChainOverview, HeldLines(), heldOnly() (+17 more)
+Cohesion: 0.13
+Nodes (20): PhotoCard(), avatarUrl(), ProductPicture(), BrandTile, CategoryTile, ChainOverview, HeldLines(), heldOnly() (+12 more)
 
-### Community 143 - "Schedule.tsx"
-Cohesion: 0.05
-Nodes (59): CustomerRef, CalendarToolbar(), ToolsMenu(), ToolsMenuItem, statusTone(), blockSpan(), DAY_MINUTES, MIN_BLOCK_MINUTES (+51 more)
+### Community 143 - "Calendar.tsx"
+Cohesion: 0.12
+Nodes (27): durationLabel(), formatTime(), ActivityModal(), ContactRow, localInstant(), LookupPicker(), LookupRef, SaveAction (+19 more)
 
 ### Community 144 - "ProjectGantt.tsx"
-Cohesion: 0.09
-Nodes (20): HolidayKeys, dropHolidays(), EMPTY, Holiday, loadHolidays(), useHolidayKeys(), save(), GanttScopeItem (+12 more)
+Cohesion: 0.16
+Nodes (10): GanttScopeItem, GanttTask, keyOf(), MONTHS, ProjectGantt(), Bar(), Row, STATUS_LABEL (+2 more)
 
-### Community 145 - "shared/canvassMath.ts"
-Cohesion: 0.23
-Nodes (12): AwardSummary, awardSummary(), AwardWinner, canvassFigures(), ColumnFigures, lineAmountCents(), lowestPerLine(), MAX_SHEET_SUPPLIERS (+4 more)
+### Community 145 - "procurement.ts"
+Cohesion: 0.03
+Nodes (68): assertCanvassVisible(), AwardSupplier, batchSource(), CANVASS_SORTS, canvassView(), cents(), CheckedPrLine, checkNature() (+60 more)
 
 ### Community 146 - "Customer360.tsx"
-Cohesion: 0.10
-Nodes (22): formatWholeMoney(), ACTION_TONES, AssetLine, Collection(), Contact, ContractLine, Customer360, Customer360Page() (+14 more)
+Cohesion: 0.11
+Nodes (18): formatWholeMoney(), ACTION_TONES, AssetLine, Contact, ContractLine, Customer360, HistoryRow, InvoiceLine (+10 more)
 
-### Community 147 - "RecordHeader.tsx"
+### Community 147 - "Passport.tsx"
 Cohesion: 0.16
-Nodes (14): CourseRef, expiryText(), Line, LINE_LABEL, LINE_TONES, Passport(), PassportData, PassportView() (+6 more)
+Nodes (13): CourseRef, expiryText(), Line, LINE_LABEL, LINE_TONES, PassportData, PassportView(), askReject() (+5 more)
 
-### Community 148 - "notify"
-Cohesion: 0.19
-Nodes (18): settleBorrowSlip(), settleReceiving(), settleStockIssue(), tellIssuedTo(), tellReceived(), tellToConfirmAtSite(), tellWarehouse(), warehouseNotApplied() (+10 more)
+### Community 148 - "Leave.tsx"
+Cohesion: 0.22
+Nodes (9): Balance, EmployeeOption, save(), LeaveDetail, submit(), LeaveRow, LeaveType, messageOf() (+1 more)
 
 ### Community 149 - "todayLocal"
-Cohesion: 0.13
-Nodes (16): blankLine(), cents(), CONDITIONS, Existing, IssueRow, IssueSummary, Line, newKey() (+8 more)
+Cohesion: 0.18
+Nodes (17): useBackLink(), useUnsavedChanges(), blankLine(), cents(), CONDITIONS, Existing, IssueRow, IssueSummary (+9 more)
 
 ### Community 150 - "Appearance.tsx"
 Cohesion: 0.16
-Nodes (18): isEmpty(), stylesheetDefaults(), FOLLOWERS, hexToTriple(), RGB_TWINS, Scope, splitLength(), toHexInput() (+10 more)
+Nodes (17): isEmpty(), FOLLOWERS, hexToTriple(), RGB_TWINS, Scope, splitLength(), toHexInput(), TOKEN_GROUPS (+9 more)
 
 ### Community 151 - "SalesOrders.tsx"
-Cohesion: 0.08
-Nodes (25): TeamShare, ContactRef, TickChoice, PaymentsSummary, ReceivablesSummary, LeadSummary, AppendQuotePanel(), Item (+17 more)
+Cohesion: 0.09
+Nodes (19): ContactRef, AppendQuotePanel(), Item, ApprovalRoute, DirectOpen, LinkLine, LinkQuotationLine, LinkView (+11 more)
 
 ### Community 152 - "ServiceJobOrders.tsx"
-Cohesion: 0.13
-Nodes (12): KINDS, BASES, machineLine(), NO_OPTIONS, Options, Person, ServiceJobOrderDetail(), ServiceJoDetail (+4 more)
+Cohesion: 0.19
+Nodes (12): BasisBadge(), BASES, columns(), machineLine(), NO_OPTIONS, Options, Person, ServiceJoDetail (+4 more)
 
-### Community 153 - "FaceHealthPanel.tsx"
-Cohesion: 0.21
-Nodes (11): FaceHealth, FaceHealthPanel(), IDENTITY_REASONS, PAIR_TONES, Person, PersonLink(), RECENT_TONES, RecentRefusal (+3 more)
+### Community 153 - "CustomerPicker"
+Cohesion: 0.12
+Nodes (8): CustomerForm, CustomerPicker(), CadRequestModal(), DirectOrderForm(), AssetModal(), JobOrderModal(), pickQuotation(), pickSalesOrder()
 
 ### Community 154 - "dependencies"
 Cohesion: 0.10
 Nodes (20): dependencies, bcryptjs@^2.4.3, compression@^1.7.5, dotenv@^16.4.7, express@^4.21.2, helmet@^8.0.0, jsonwebtoken@^9.0.2, multer@^2.0.0 (+12 more)
 
-### Community 155 - "resolve.ts"
-Cohesion: 0.05
-Nodes (51): assertMayDelete(), errorMiddleware(), HttpError, canView(), menuFor(), MenuModule, MenuSubmodule, answersSchema (+43 more)
+### Community 155 - "Pipeline"
+Cohesion: 0.16
+Nodes (16): loadPeople(), Customise(), listLinkFor(), narrow(), overdueOnly(), payloadFor(), PipeColumn(), Pipeline() (+8 more)
 
-### Community 156 - "Roles.tsx"
-Cohesion: 0.18
-Nodes (13): mayEdit(), levelLabel(), ROLE_LEVELS, rolesByLevel(), PermissionMatrix(), ApplyResult, HRole, RoleHierarchy() (+5 more)
+### Community 156 - "PublicExam.tsx"
+Cohesion: 0.27
+Nodes (8): Answer, call(), clock(), Paper, PublicExam(), Question, tokenFromHash(), View
 
-### Community 157 - "registry.ts"
-Cohesion: 0.13
-Nodes (14): Action, ACTION_LABELS, ACTIONS, ModuleDef, OWNED, OWNED_KEPT, PermissionDef, READ (+6 more)
+### Community 157 - "helpTickets.ts"
+Cohesion: 0.03
+Nodes (58): Appearance, APPEARANCE_KEY, appearanceRoutes, cleanMap(), cleanRules(), currentAppearance(), EMPTY_APPEARANCE, readAppearance() (+50 more)
 
 ### Community 158 - "BorrowSlips.tsx"
-Cohesion: 0.11
-Nodes (12): blank(), BORROW_TONES, BORROW_TYPE_OPTIONS, BorrowRow, BorrowSlipDetail(), BorrowSummary, CONDITIONS, Line (+4 more)
+Cohesion: 0.08
+Nodes (29): Action, ApprovalStepper(), CLASS, Decision, DECISION_VERB, MARK, PreviewRoute, previewSteps() (+21 more)
 
-### Community 159 - "shared/gops.ts"
-Cohesion: 0.24
-Nodes (16): gopsRoutes, canSee(), canSeeSales(), cents(), dayOf(), GopsOverview, gopsOverview(), GopsSales (+8 more)
+### Community 159 - "salesReports.ts"
+Cohesion: 0.08
+Nodes (43): authenticate(), bearer(), require_(), handler(), gopsRoutes, canSeeOrderCost(), filterWords(), flowsFor() (+35 more)
 
-### Community 160 - "qs"
-Cohesion: 0.17
-Nodes (15): print(), printSelected(), qs(), loadOrder(), CompanyOverview(), ExportButton(), run(), Profitability() (+7 more)
+### Community 160 - "PurchaseRequisitionEditor.tsx"
+Cohesion: 0.10
+Nodes (38): parseDelimited(), amountOf(), blankLine(), Budget, Draft, ExistingPo, fromSource(), isBlank() (+30 more)
 
-### Community 161 - "Customers.tsx"
-Cohesion: 0.21
-Nodes (12): loadImportSpec(), loadPeople(), ApiError, startImport(), CustomerBulkActions(), CustomerForm(), Customers(), CustomerSummary (+4 more)
+### Community 161 - "shared/holidays.ts"
+Cohesion: 0.22
+Nodes (16): holidayRoutes, schema, setHolidayKeys(), clean(), easter(), Holiday, HolidayKind, holidays() (+8 more)
 
-### Community 162 - "prLines.ts"
-Cohesion: 0.16
-Nodes (15): CategoryRef, Column, headerOf(), HEADERS, LineNature, ORDER, parseDelimited(), ParsedLines (+7 more)
+### Community 162 - "helpReceivers.ts"
+Cohesion: 0.28
+Nodes (7): chosenReceiverIds(), HELP_RECEIVERS_KEY, isChosenReceiver(), MAX_RECEIVERS, RECEIVER_RIGHTS, saveReceivers(), ticketReceivers()
 
 ### Community 163 - "db / healthcheck / environment"
 Cohesion: 0.11
@@ -994,48 +989,48 @@ Cohesion: 0.13
 Nodes (19): Declared and category scope values (valueSource), Remove This Month Forecast board column, Hold and Cancel on pipeline Move (Lost with a kind), Costing, pipeline, provider plan 2026-10-13, Project Costing paper rename, Quotation provider quick-add supplier, SCOPE_PRELOAD preloaded scope of work, spreadSections (schedule of values writer) (+11 more)
 
 ### Community 165 - "quotation.ts"
-Cohesion: 0.10
-Nodes (29): presentRevision(), CostingForQuote, costingsForQuote(), costingSplit(), CostPanel, D(), DEFAULT_QUOTATION_CURRENCY, INSTALLATION_LINE (+21 more)
+Cohesion: 0.08
+Nodes (34): CostingForQuote, CostPanel, D(), DEFAULT_QUOTATION_CURRENCY, INSTALLATION_LINE, LINE_COST_KEYS, lineAmount(), lineKind() (+26 more)
 
 ### Community 166 - "lib/appearance.ts"
-Cohesion: 0.25
-Nodes (14): close(), revert(), save(), appearanceCss(), applyAppearance(), asMap(), asRules(), block() (+6 more)
+Cohesion: 0.20
+Nodes (17): close(), revert(), save(), Appearance, appearanceCss(), applyAppearance(), asMap(), asRules() (+9 more)
 
 ### Community 167 - "FileViewer.tsx"
 Cohesion: 0.11
 Nodes (30): send(), workbookToCsv(), columnName(), detectHeaderRow(), extensionOf(), isSpreadsheet(), looksNumeric(), matchingRows() (+22 more)
 
-### Community 168 - "EmployeeForm"
-Cohesion: 0.36
-Nodes (6): EmployeeForm(), createLoginNow(), loginPayload(), save(), existingLoginIn(), LoginFields()
+### Community 168 - "createLoginNow"
+Cohesion: 0.67
+Nodes (4): createLoginNow(), loginPayload(), save(), existingLoginIn()
 
 ### Community 169 - "sCurve.ts"
-Cohesion: 0.18
-Nodes (13): remove(), upload(), CurveTick, curveTicks(), dayMs(), labelOf(), MONTHS, Job (+5 more)
+Cohesion: 0.17
+Nodes (14): remove(), upload(), CurveTick, curveTicks(), dayMs(), labelOf(), MONTHS, Job (+6 more)
 
-### Community 170 - "orderStock.ts"
-Cohesion: 0.29
-Nodes (12): cents(), D(), issueOrderStock(), key(), num(), OrderMove, PO_OPEN, PR_LIVE (+4 more)
+### Community 170 - "SalesOrders"
+Cohesion: 0.39
+Nodes (8): noTeamNote(), teamCards(), PdfButton(), yearStartKey(), Receivables(), Leads(), Quotations(), SalesOrders()
 
 ### Community 171 - "compilerOptions / web/tsconfig.json / allowImpor"
 Cohesion: 0.11
 Nodes (17): compilerOptions, allowImportingTsExtensions, esModuleInterop, forceConsistentCasingInFileNames, isolatedModules, jsx, lib, module (+9 more)
 
-### Community 172 - "frameSharpness.ts"
+### Community 172 - "recordVisitor"
+Cohesion: 0.32
+Nodes (8): clean(), findSame(), interestRows(), presentExhibition(), recordVisitor(), dateOfDay(), exhibitionDays(), todaysDay()
+
+### Community 173 - "usePeople"
 Cohesion: 0.29
-Nodes (9): CENTRE_FRACTION, frameSharpness(), laplacianVariance(), SCORING_WIDTH, scoringSize(), sharpestIndex(), toGrey(), useCamera() (+1 more)
+Nodes (5): usePeople(), CreditPanel(), useTeams(), JobOrders(), ServiceJobOrders()
 
-### Community 173 - "Users.tsx"
-Cohesion: 0.19
-Nodes (10): Delivery, LinkDelivery(), MailStatus, Role, SignInPanel(), TEAM_SCOPED_ROLES, UserDetail, UserRow (+2 more)
-
-### Community 174 - "InvoiceModal"
-Cohesion: 0.22
-Nodes (8): InvoiceRequestModal(), AmendPanel(), CounterPanel(), daysFrom(), EwtPicker(), InvoiceModal(), TermsPicker(), toCents()
+### Community 174 - "ExamQuestions.tsx"
+Cohesion: 0.33
+Nodes (6): blankQuestion(), ExamDetail, newKey(), Question, Sitting, SITTING_TONES
 
 ### Community 175 - "Company.tsx"
-Cohesion: 0.29
-Nodes (4): Company(), openSpecimen(), CompanyData, HolidaysCard()
+Cohesion: 0.17
+Nodes (11): HolidayKeys, dropHolidays(), EMPTY, Holiday, loadHolidays(), useHolidayKeys(), Company(), openSpecimen() (+3 more)
 
 ### Community 176 - "compilerOptions / api/tsconfig.json / declaratio"
 Cohesion: 0.12
@@ -1045,173 +1040,169 @@ Nodes (16): compilerOptions, declaration, esModuleInterop, forceConsistentCasing
 Cohesion: 0.14
 Nodes (16): Day boundaries audit (UTC vs Manila), manilaDate / dayKey fix, Timestamp range edges (fromAt/toAt), Plan: sales order paper as owner's slide, Net-of-discount line figures (netAmount, netMargin), Totals block grid style, SCORO-style quotations (key Q), canSeeQuotationCost cost visibility (+8 more)
 
-### Community 178 - "PublicExam.tsx"
-Cohesion: 0.27
-Nodes (8): Answer, call(), clock(), Paper, PublicExam(), Question, tokenFromHash(), View
+### Community 178 - "sandbox.ts"
+Cohesion: 0.33
+Nodes (5): clearing, create(), D(), ITEMS, PEOPLE
 
-### Community 179 - "Loading"
-Cohesion: 0.06
-Nodes (34): Attachments(), readableSize(), formatDateTime(), Loading(), BEFORE_QUEUE, CAD_TONES, CadBulkActions(), apply() (+26 more)
+### Community 179 - "CadJobOrders.tsx"
+Cohesion: 0.11
+Nodes (22): BEFORE_QUEUE, CAD_TONES, CadBulkActions(), apply(), CadDetail, CadJobOrders(), CadRow, CadSummary (+14 more)
 
 ### Community 180 - "CadJobOrders.tsx"
-Cohesion: 0.12
-Nodes (20): PersonRow, AssignMade, BULK_LEAD_TARGETS, LEAD_STAGE_TABS, LEAD_STATUSES, LeadBulkActions(), apply(), LeadDetail() (+12 more)
+Cohesion: 0.16
+Nodes (13): AssignMade, BULK_LEAD_TARGETS, LEAD_STAGE_TABS, LEAD_STATUSES, LeadDetailRow, LeadProgress(), LeadRow, PART_IDEAS (+5 more)
 
-### Community 181 - "requestMoney"
-Cohesion: 0.26
-Nodes (11): FinancePosition, financePosition(), Settleable, ASKING, c(), cashSpent(), DEAD, Money (+3 more)
+### Community 181 - "StockMovements.tsx"
+Cohesion: 0.15
+Nodes (8): DIRECTION, ItemRef, MOVEMENT_COLUMNS, MovementRow, ODOO_COLUMNS, OdooRow, Options, OWNER_WORDS
 
-### Community 182 - "num"
-Cohesion: 0.24
-Nodes (11): batchSource(), forLabelOf(), fromRequestItem(), lineSuggestions(), notApplied(), num(), orderSource(), presentPr() (+3 more)
+### Community 182 - "Clearances.tsx"
+Cohesion: 0.17
+Nodes (11): Area, AreaDef, CLEARANCE_TONES, ClearanceDetailData, ClearanceRow, ClearanceSummary, EmployeeLookup, Item (+3 more)
 
 ### Community 183 - "scoro_convert.py / re / repair()"
 Cohesion: 0.17
 Nodes (5): addr(), classify(), notes(), repair(), write()
 
-### Community 184 - "jobOrders.ts"
-Cohesion: 0.03
-Nodes (114): ADVANCE_CLOSED, ADVANCE_SORTS, advanceInclude, advanceRoutes, AdvanceRow, advanceSchema, advanceStage(), asDate() (+106 more)
+### Community 184 - "jobs.ts"
+Cohesion: 0.04
+Nodes (77): deleteOrRefuse(), orderBy(), KIND_LABEL, asDate(), CategoryPosition, costingForJob(), costingsForJob(), createJobRecord() (+69 more)
 
-### Community 185 - "routes/appearance.ts"
-Cohesion: 0.27
-Nodes (9): Appearance, APPEARANCE_KEY, appearanceRoutes, cleanMap(), cleanRules(), currentAppearance(), EMPTY_APPEARANCE, readAppearance() (+1 more)
+### Community 185 - "QuotationBuying.tsx"
+Cohesion: 0.21
+Nodes (10): loadOfficeLines(), OfficeLineOption, useOfficeLines(), PrDetail, OrderSpend, OrderSpendPanel(), JobOption, QuotationBuying() (+2 more)
 
-### Community 186 - "QuotationBuying.tsx"
-Cohesion: 0.28
-Nodes (6): PrDetail, OrderSpend, JobOption, QuotationBuying(), QuotationBuyingData, Reallocate()
-
-### Community 187 - "Attachments.tsx"
+### Community 186 - "CourseModal"
 Cohesion: 0.18
-Nodes (14): Attachment, AttachmentPreview(), extensionOf(), previewKind(), Icon(), IconBadge(), Avatar(), avatarUrl() (+6 more)
+Nodes (3): CourseModal(), RequirementsEditor(), SyllabusEditor()
 
-### Community 188 - "shared/holidays.ts"
-Cohesion: 0.22
-Nodes (16): holidayRoutes, schema, setHolidayKeys(), clean(), easter(), Holiday, HolidayKind, holidays() (+8 more)
+### Community 187 - "IssueBatchModal"
+Cohesion: 0.33
+Nodes (5): AssetModal(), Assets(), useAssetTypes(), IssueBatchModal(), todayKey()
 
-### Community 189 - "roleSeeds.ts"
-Cohesion: 0.25
-Nodes (6): ACCESS_SPLIT, FIRST_RUN, PROJECT_MANAGER_GRANTS, PROJECT_MANAGER_ONLY, ROLE_SEEDS, RoleSeed
+### Community 188 - "SalesCalendar"
+Cohesion: 0.29
+Nodes (4): celebrationToEvent(), SalesCalendar(), openEvent(), visitToEvent()
 
-### Community 190 - "PurchaseRequisitionEditor.tsx"
-Cohesion: 0.05
-Nodes (56): Meter(), ContactModal, CREATE_LABEL, CREATE_RIGHT, CreatedItem, CreateKind, CreatePopup(), NewItemPopup (+48 more)
+### Community 189 - "presentCanvass"
+Cohesion: 0.70
+Nodes (5): awardOf(), canvassRow(), figuresOf(), presentCanvass(), sheetLinesOf()
+
+### Community 190 - "Rfq.tsx"
+Cohesion: 0.17
+Nodes (12): SupplierRef, Header, Header, RFQ_TONES, RfqDetailData, RfqLine, RfqRow, RfqSummary (+4 more)
 
 ### Community 191 - "G-FIN AR, AP, collections, EWT / G-CHAIN procure"
 Cohesion: 0.14
 Nodes (15): Aftermarket (service contracts, visits, Service JO), Budget requests, cash advances, liquidations, G-CHAIN/G-FIN reports (reportKit), Commission requests, Costing sheet and costingMath, G-FIN AR, AP, collections, EWT, Insights (no tables, reads documents), Inventory (weighted average, product cards, project/order stock) (+7 more)
 
-### Community 192 - "NumberInput.tsx"
-Cohesion: 0.25
-Nodes (5): NumberChange, Props, AftermarketSettings(), Dashboard, FIELD_TYPES
+### Community 192 - "SearchSelect.tsx"
+Cohesion: 0.22
+Nodes (12): ContactModal, CREATE_LABEL, CREATE_RIGHT, CreatedItem, CreateKind, CreatePopup(), NewItemPopup, collect() (+4 more)
 
-### Community 193 - "RfqEditor"
-Cohesion: 0.39
-Nodes (8): blankRow(), newKey(), RfqEditor(), body(), pickSupplier(), save(), setRow(), snapshot()
+### Community 193 - "Commissions.tsx"
+Cohesion: 0.17
+Nodes (11): Advance, COMMISSION_TONES, CommissionDetail, Named, round2(), Row, ShareLine, Source (+3 more)
 
-### Community 194 - "SalesOrderReports.tsx"
-Cohesion: 0.36
-Nodes (7): KINDS, listOf(), SalesFlows(), SalesOrderReports(), STATUSES, TargetBox(), Team
+### Community 194 - "timeGrid.ts"
+Cohesion: 0.40
+Nodes (4): DAY_MINUTES, MIN_BLOCK_MINUTES, SLOT_MINUTES, Span
+
+### Community 195 - "close"
+Cohesion: 0.67
+Nodes (4): close(), onBlur(), onKeyDown(), pick()
 
 ### Community 196 - "TextSettings"
 Cohesion: 0.27
-Nodes (11): fieldsIn(), pt(), unknownFieldsIn(), AlignChoice(), ColorField(), FieldOptions(), Inspector(), ItemsSettings() (+3 more)
+Nodes (11): emptyFieldsIn(), listOf(), pt(), AlignChoice(), ColorField(), FieldOptions(), Inspector(), ItemsSettings() (+3 more)
 
-### Community 197 - "D"
-Cohesion: 0.33
-Nodes (7): cents(), D(), poVat(), recalcPo(), receivedPct(), writePoLines(), writePrLines()
+### Community 197 - "roleSeeds.ts"
+Cohesion: 0.25
+Nodes (6): ACCESS_SPLIT, FIRST_RUN, PROJECT_MANAGER_GRANTS, PROJECT_MANAGER_ONLY, ROLE_SEEDS, RoleSeed
 
 ### Community 198 - "PeopleFlow.tsx"
-Cohesion: 0.14
-Nodes (17): day(), EmployeeFlowTab(), FLOW_TONES, FlowItem, FlowItemRow(), FlowPath, FlowRow, FlowStages() (+9 more)
+Cohesion: 0.15
+Nodes (14): EmployeeFlowTab(), FLOW_TONES, FlowItem, FlowPath, FlowRow, FlowStages(), FlowSummary, humaniseType() (+6 more)
 
-### Community 200 - "memory.ts"
-Cohesion: 0.33
-Nodes (6): descriptionMemory(), distinctTexts(), MEMORY_LIMIT, MEMORY_SCAN, memoryKey(), memoryTerm()
+### Community 200 - "stockCardHistory.ts"
+Cohesion: 0.20
+Nodes (14): MOVE_KIND_LABELS, OdooMoveKind, counterparties(), historyOf(), HistoryRow, join(), MoveLike, MovementDocument (+6 more)
 
 ### Community 201 - "QuotationDetailsEditor"
-Cohesion: 0.43
-Nodes (6): ContactPicker(), onKeyDown(), pick(), startAdding(), contactReach(), keyOf()
+Cohesion: 0.19
+Nodes (9): ContactPicker(), onKeyDown(), pick(), startAdding(), contactReach(), keyOf(), NumberField(), QuotationDetailsEditor() (+1 more)
 
-### Community 202 - "approvals.ts"
-Cohesion: 0.05
-Nodes (86): TYPICAL_REQUESTER, check(), cleanup(), D(), day(), expectRejection(), grantKeys(), iso() (+78 more)
+### Community 204 - "Loading"
+Cohesion: 0.07
+Nodes (38): Empty(), formatMoney(), Loading(), HelpTicketPage(), Picture(), BASIS_WORDS, Batchable, BatchRequestsPanel() (+30 more)
 
-### Community 203 - "rolesFromChart.ts"
-Cohesion: 0.38
-Nodes (6): CHART_ROLES, fold(), replaceRolesWithChart(), ROLES_FROM_CHART_MARK, rolesFromChartDone(), SUCCESSOR
-
-### Community 204 - "AssetSlips.tsx"
-Cohesion: 0.33
-Nodes (6): ackBadge(), AssetSlips(), AvailableAsset, EmployeeHit, Slip, todayKey()
-
-### Community 205 - "Login.tsx"
-Cohesion: 0.53
-Nodes (3): PasswordInput(), LandingBrand(), Login()
+### Community 205 - "formatDate"
+Cohesion: 0.08
+Nodes (27): day(), formatDate(), humanise(), relativeTime(), Deadline(), save(), InvoiceDetail(), PaymentDetail() (+19 more)
 
 ### Community 206 - "ErrorBox"
-Cohesion: 0.06
-Nodes (28): ErrorBox(), useToast(), MailLine(), FilePlanPanel(), DayModal(), TurnoverModal(), OnAccountRow(), EmployeePicker() (+20 more)
+Cohesion: 0.07
+Nodes (30): ErrorBox(), useToast(), todayLocal(), MailLine(), NewCanvassPanel(), FilePlanPanel(), PhaseEditor(), NewReportModal() (+22 more)
 
 ### Community 207 - "G-CORE user interface style"
 Cohesion: 0.18
 Nodes (10): 2. Colours, 3. Type, 4. Sizes — always tokens, never a raw pixel in an inline style, 5. The list screen (every list looks like this), 6. The record page, 7. Forms and dialogs, 8. Charts, 9. Accessibility (+2 more)
 
 ### Community 208 - "routes/finance.ts"
-Cohesion: 0.04
-Nodes (64): checkCharging(), ALL_PAYMENTS, AMENDABLE, amendSchema, asDate(), awaitsApproval(), BILL_OWED, BILL_SORTS (+56 more)
+Cohesion: 0.03
+Nodes (87): ALL_PAYMENTS, AMENDABLE, amendSchema, asDate(), awaitsApproval(), BILL_OWED, BILL_SORTS, BillBody (+79 more)
 
 ### Community 209 - "ActivityLog.tsx"
-Cohesion: 0.40
-Nodes (5): ActivityLog(), add(), blankForm(), iconOf(), nowTime()
+Cohesion: 0.29
+Nodes (8): Activity, ActivityLog(), add(), blankForm(), BUILTIN_TYPES, iconOf(), nowTime(), TYPE_ICONS
 
 ### Community 210 - "lib/canvassMath.ts / awardSummary() / lowestPerL"
 Cohesion: 0.23
 Nodes (12): AwardSummary, awardSummary(), AwardWinner, canvassFigures(), ColumnFigures, lineAmountCents(), lowestPerLine(), MAX_SHEET_SUPPLIERS (+4 more)
 
-### Community 213 - "Field"
-Cohesion: 0.08
-Nodes (14): Field(), NewCanvassPanel(), blankFree(), PickSource(), PulloutEditor(), PulloutSteps(), PlanRequestModal(), EditJobModal() (+6 more)
+### Community 211 - "CashAdvances.tsx"
+Cohesion: 0.11
+Nodes (24): BudgetLineFigures, BudgetNoun, RequestBudget, RequestSource, SOURCE_WORDS, CurrentOfficeLine, RequestItem, Budget (+16 more)
 
-### Community 214 - "captureScreen() / takeScreenshot() / screenshot."
-Cohesion: 0.10
-Nodes (18): html-to-image, react-dom, xlsx, dependencies, html-to-image@1.11.13, react@^18.3.1, react-dom@^18.3.1, react-router-dom@^6.28.1 (+10 more)
+### Community 213 - "SearchSelect"
+Cohesion: 0.06
+Nodes (24): 4. Files to copy or mirror, PersonSelect(), SearchSelect(), WorkflowEditor(), BorrowRequestEditor(), TaskEditor(), NewJobModal(), CommissionEditor() (+16 more)
 
 ### Community 215 - "AccountLinks.tsx"
-Cohesion: 0.25
-Nodes (12): setToken(), ForgotPassword(), Frame(), NewPassword(), Personal, ResetPassword(), SignedInNote(), tokenIn() (+4 more)
+Cohesion: 0.10
+Nodes (28): HrFact(), HrFacts, PasswordInput(), ApiError, request(), setToken(), ForgotPassword(), Frame() (+20 more)
 
 ### Community 216 - "Numbering.tsx"
-Cohesion: 0.24
-Nodes (8): Numbering(), NumberingResponse, Period, PERIOD_LABEL, renderPreview(), Scope, SequenceEditor(), SequenceRow
+Cohesion: 0.25
+Nodes (7): NumberingResponse, Period, PERIOD_LABEL, renderPreview(), Scope, SequenceEditor(), SequenceRow
 
-### Community 217 - "Rfq.tsx"
-Cohesion: 0.14
-Nodes (14): ChooseSuppliers(), Header, lineBody(), lineTitle(), QuotePanel(), QuoteTable(), RfqDetail(), RfqDetailData (+6 more)
+### Community 217 - "RfqDetail"
+Cohesion: 0.22
+Nodes (6): ChooseSuppliers(), lineBody(), lineTitle(), QuotePanel(), QuoteTable(), RfqDetail()
 
 ### Community 218 - "stageLabelFor"
-Cohesion: 0.53
-Nodes (6): bulkLabel(), bulkOutcome(), planMove(), QuotationBulkStatus(), apply(), stageLabelFor()
+Cohesion: 0.36
+Nodes (8): bulkLabel(), bulkOutcome(), needsApprovalFirst(), planMove(), QuotationBulkStatus(), apply(), stageKeyFor(), stageLabelFor()
 
-### Community 219 - "Warehouses"
-Cohesion: 0.29
-Nodes (3): LocationModal(), WarehouseModal(), Warehouses()
+### Community 219 - "PermissionMatrix.tsx"
+Cohesion: 0.12
+Nodes (24): PersonRow, TickChoice, TickPicker(), mayEdit(), levelLabel(), ROLE_LEVELS, rolesByLevel(), LevelsTable() (+16 more)
 
 ### Community 220 - "pdfThumb.ts"
 Cohesion: 0.67
 Nodes (3): pdfFirstPage(), PdfJs, pdfjs()
 
-### Community 223 - "formatDate"
-Cohesion: 0.10
-Nodes (19): day(), formatDate(), PulloutCard(), save(), EmployeeEvaluationsTab(), EvaluationRuns(), MyEvaluations(), DueTable() (+11 more)
+### Community 221 - "StockCardHistory.tsx"
+Cohesion: 0.39
+Nodes (8): label, FromTo(), OdooHistoryCard(), qty(), StockMovement, StockMovements(), StockCard(), placeIn()
 
-### Community 224 - "People.tsx"
+### Community 224 - "lib/day.ts"
 Cohesion: 0.23
-Nodes (9): cache, personGroup(), toPerson(), Mode, MODE_LABEL, Post, PostPanel(), Team (+1 more)
+Nodes (13): CalendarViewKey, dayKeyOf(), isDayKey(), isWorking(), isWorkingDow(), NO_HOLIDAYS, pad(), workingDayKey() (+5 more)
 
-### Community 225 - "prisma.ts"
-Cohesion: 0.06
-Nodes (43): isBookkeeping(), main(), SNAPSHOT_VERSION, main(), same(), Snapshot, clearing, create() (+35 more)
+### Community 225 - "celebrations.ts"
+Cohesion: 0.27
+Nodes (11): annualDayIn(), Celebration, CelebrationKind, celebrationsBetween(), fillGreeting(), key(), manilaHour(), occurrencesBetween() (+3 more)
 
 ### Community 227 - "qrCode.ts"
 Cohesion: 0.38
@@ -1221,17 +1212,17 @@ Nodes (6): loadQr(), qrDataUrl(), QrFactory, QrInstance, qrSvg(), issue()
 Cohesion: 0.22
 Nodes (10): Plan: attachments on quotation and sales order, Attachments card and guards, withAttachments PDF merger (pdf-lib), Plan: owner's six of 2026-10-13, Costing PDF template (third designed document), Meeting minutes and map link, People Flow G-HR module, Request for Approval routed document (+2 more)
 
-### Community 229 - "geo.ts"
-Cohesion: 0.22
-Nodes (10): addPosition(), currentPosition(), Position, PositionResult, enroll(), punch(), startRing(), stopRing() (+2 more)
+### Community 229 - "Clock.tsx"
+Cohesion: 0.11
+Nodes (28): CENTRE_FRACTION, frameSharpness(), laplacianVariance(), SCORING_WIDTH, scoringSize(), sharpestIndex(), toGrey(), addPosition() (+20 more)
 
-### Community 235 - "charts.tsx"
-Cohesion: 0.14
-Nodes (29): 1. What to copy, BarGroup, BarList(), Brief(), Donut(), Empty(), Funnel(), GroupedBars() (+21 more)
+### Community 234 - "Canvass.tsx"
+Cohesion: 0.12
+Nodes (12): AwardData, bodyOf(), CANVASS_TONES, CanvassableRfq, CanvassDetail(), CanvassDetailData, CanvassRow, CanvassSummary (+4 more)
 
-### Community 236 - "BudgetRequests.tsx"
-Cohesion: 0.07
-Nodes (49): BudgetCard(), usePeople(), RequestItemsCard(), humanise(), ReceiversCard(), BUDGET_REQUEST_TONES, BudgetRequests(), BudgetRequestsList() (+41 more)
+### Community 235 - "Overview.tsx"
+Cohesion: 0.10
+Nodes (21): BriefLine, BriefPart, Clause, clockOf(), CompanyOverview(), composeLines(), Dashboard, ProfitRow (+13 more)
 
 ### Community 237 - "Purchase order full page editor (built) / Purcha"
 Cohesion: 0.25
@@ -1245,13 +1236,25 @@ Nodes (8): credentials-file, ingress, hostname, originRequest, service, connectT
 Cohesion: 0.67
 Nodes (3): ProviderLookup(), addSupplier(), pick()
 
-### Community 240 - "HelpTickets.tsx"
-Cohesion: 0.13
-Nodes (13): HELP_KINDS, HELP_STATUS_TONES, MineRow, Picture, HelpTicketPage(), Person, Picture(), ReceiversInfo (+5 more)
+### Community 240 - "People.tsx"
+Cohesion: 0.07
+Nodes (34): HELP_KINDS, HELP_STATUS_TONES, MineRow, Picture, cache, personGroup(), toPerson(), PeoplePicker() (+26 more)
+
+### Community 246 - "DataList.tsx"
+Cohesion: 0.20
+Nodes (13): csvCell(), exportCsv(), exportSelected(), extractText(), forgetLocalViews(), LookupFilter(), movingViews, Props (+5 more)
 
 ### Community 249 - "FlowPicture.tsx"
-Cohesion: 0.20
-Nodes (16): compact(), cut(), Down(), FlowPicture(), savePng(), Side(), TONES, tones() (+8 more)
+Cohesion: 0.18
+Nodes (17): compact(), cut(), Down(), FlowPicture(), savePng(), Side(), TONES, tones() (+9 more)
+
+### Community 252 - "LeadBulkActions"
+Cohesion: 0.83
+Nodes (4): LeadBulkActions(), apply(), leadStatusLabel(), planLeadMove()
+
+### Community 253 - "Contracts.tsx"
+Cohesion: 0.19
+Nodes (11): Contract, CONTRACT_TONES, ContractDetail, call(), run(), ContractSummary, Coverable, RENEWAL_TONE (+3 more)
 
 ### Community 255 - "links.ts / settingLink() / DETAIL"
 Cohesion: 0.29
@@ -1298,24 +1301,24 @@ Cohesion: 0.67
 Nodes (3): Employee number list, ROLE sheet people-to-roles, ROLE REV1 role hierarchy
 
 ## Knowledge Gaps
-- **121 isolated node(s):** `RFC-6266`, `RFC-5545`, `RFC-2047`, `RFC-4180`, `RFC-4180` (+116 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2915 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **40 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **121 isolated node(s):** `RFC-5545`, `RFC-6266`, `RFC-2047`, `RFC-4180`, `RFC-4180` (+116 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2965 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **38 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `prisma` connect `prisma.ts` to `verify-hr.ts / main() / liveness.ts`, `seed.ts`, `routes/insights.ts`, `routes/hr.ts / myEmployee() / checkLeave()`, `notFound`, `verify-finance.ts`, `scoroQuotes.ts / scoroInvoices.ts / seed-sample-`, `sales.ts / pipelineStages.ts / activityTypes.ts`, `nextNumber`, `routes/partners.ts`, `verify-academy.ts`, `index.ts`, `prisma.ts`, `verify-cad.ts`, `shared/insights.ts`, `paper.ts`, `clearance.ts`, `shared/finance.ts`, `routes/academy.ts`, `badRequest`, `routes/peopleFlow.ts / shared/peopleFlow.ts / ad`, `verify-pipeline.ts`, `notify`, `odoo.ts / odooMigration.ts / tidy()`, `audit.ts`, `verify-evaluations.ts / manilaDate() / main()`, `resolve.ts`, `jobOrders.ts`, `orgChart.ts`, `progress.ts`, `routes/hiring.ts`, `verify-foundation.ts`, `shared/gops.ts`, `receiptCost.ts`, `builkImport.ts`, `env.ts`, `quotation.ts`, `procurement.ts`, `env.ts`, `orderStock.ts`, `pdfDesign.ts`, `verify-delivery.ts`, `verify-sales.ts`, `exhibitionVisitors.ts`, `salesOrders.ts`, `officeBudget.ts`, `jobOrders.ts`, `routes/appearance.ts`, `warehouse.ts`, `rfq.ts`, `shared/holidays.ts`, `roleSeeds.ts`, `myRecords.ts`, `statusLabel`, `salesFigures.ts`, `memos.ts`, `attendanceCorrections.ts`, `routes/assets.ts`, `approvals.ts`, `lib/day.ts`, `rolesFromChart.ts`, `seed-sample-quotation.ts`, `routes/finance.ts`, `shared/hr.ts`, `imports.ts`, `pdf.ts`, `projectStock.ts`, `routes/meetings.ts`, `projectBudget.ts`, `typedItemSplit.ts`, `routes/budgetRequests.ts`, `quotationBuying.ts`, `verify-insights.ts`, `verify-insights-brief.ts`?**
-  _High betweenness centrality (0.072) - this node is a cross-community bridge._
-- **What connects `RFC-6266`, `RFC-5545`, `RFC-2047` to the rest of the system?**
+- **Why does `prisma` connect `prisma.ts` to `invoiceRequests.ts`, `sales.ts / pipelineStages.ts / activityTypes.ts`, `routes/hr.ts`, `jobOrders.ts`, `verify-aftermarket.ts`, `scoroQuotes.ts / scoroInvoices.ts / seed-sample-`, `approvals.ts`, `shared/insights.ts`, `can`, `employmentExams.ts`, `masters.ts`, `routes/hiring.ts`, `routes/aftermarket.ts`, `verify-sales.ts`, `pdfTemplates.ts`, `paper.ts`, `procurement.ts`, `pullouts.ts`, `routes/academy.ts`, `verify-chain.ts`, `shared/day.ts`, `planApprovals.ts`, `receiptCost.ts`, `verify-evaluations.ts / manilaDate() / main()`, `idsFilter`, `helpTickets.ts`, `exhibitionVisitors.ts`, `progress.ts`, `cadJobOrders.ts`, `verify-foundation.ts`, `salesReports.ts`, `costing.ts`, `builkImport.ts`, `verify-pipeline.ts`, `helpReceivers.ts`, `notFound`, `shared/holidays.ts`, `verify-accounts.ts`, `quotation.ts`, `routes/budgetRequests.ts`, `middleware.ts`, `sandbox.ts`, `verify-marketing.ts`, `badRequest`, `jobs.ts`, `warehouse.ts`, `inventory.ts`, `nextNumber`, `officeBudget.ts`, `accounts.ts`, `myRecords.ts`, `statusLabel`, `shared/marketing.ts`, `roleSeeds.ts`, `index.ts`, `stockCardHistory.ts`, `routes/assets.ts`, `parseDay`, `routes/finance.ts`, `salesOrders.ts`, `pdfDesign.ts`, `resolve.ts`, `renderSchedule`, `routes/meetings.ts`, `celebrations.ts`, `verify-plantilla.ts`, `typedItemSplit.ts`, `projectBudget.ts`, `quotationBuying.ts`, `finAccess.ts`, `verify-finance.ts`?**
+  _High betweenness centrality (0.054) - this node is a cross-community bridge._
+- **What connects `RFC-5545`, `RFC-6266`, `RFC-2047` to the rest of the system?**
   _121 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `verify-hr.ts / main() / liveness.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.060362173038229376 - nodes in this community are weakly interconnected._
-- **Why does `main()` connect `verify-foundation.ts` to `seed.ts`, `Receivables.tsx`, `notFound`, `prisma.ts`, `nextNumber`, `paper.ts`, `clearance.ts`, `badRequest`, `resolve.ts`, `jobOrders.ts`, `orgChart.ts`, `prLines.ts`, `env.ts`, `FileViewer.tsx`, `pdfDesign.ts`, `verify-delivery.ts`, `salesOrders.ts`, `jobOrders.ts`, `warehouse.ts`, `routes/appearance.ts`, `approvals.ts`, `Renderer`, `pdf.ts`, `PdfTemplateEditor`, `resolveTemplate`, `FlowPicture.tsx`, `humanise`?**
-  _High betweenness centrality (0.038) - this node is a cross-community bridge._
-- **Should `seed.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.05468215994531784 - nodes in this community are weakly interconnected._
-- **Why does `DataList()` connect `useAuth` to `Receivables.tsx`, `SearchSelect`, `Partners.tsx`, `Payables.tsx`, `StatusBadge`, `Warehouse.tsx`, `Schedule.tsx`, `todayLocal`, `SalesOrders.tsx`, `ServiceJobOrders.tsx`, `BorrowSlips.tsx`, `qs`, `verify-foundation.ts`, `Customers.tsx`, `Users.tsx`, `ProjectWorkspace.tsx`, `Assets.tsx`, `Loading`, `CadJobOrders.tsx`, `ui.tsx`, `DocumentApproval`, `PurchaseRequisitionEditor.tsx`, `Hiring.tsx`, `PeopleFlow.tsx`, `Canvass.tsx`, `Sessions.tsx`, `service/Reports.tsx`, `ErrorBox`, `PulloutSlips.tsx`, `useConfirm`, `Evaluations.tsx`, `Marketing.tsx / BarList() / Marketing()`, `Rfq.tsx`, `Quotations.tsx`, `ApprovalStepper.tsx`, `Dashboard.tsx`, `formatDate`, `DataList.tsx`, `Employees.tsx`, `MyRecords.tsx`, `Orders.tsx`, `Progress.tsx`, `BudgetRequests.tsx`, `Projects.tsx`, `HelpTickets.tsx`, `Checkbox`, `Meetings.tsx`, `Courses.tsx`, `JobOrders.tsx`, `RecordHeader`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
+- **Should `invoiceRequests.ts` be split into smaller, more focused modules?**
+  _Cohesion score 0.060144346431435444 - nodes in this community are weakly interconnected._
+- **Why does `day()` connect `formatDate` to `warehouse.ts`, `useAuth`, `parseDay`, `DataList.tsx`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+- **Should `prisma.ts` be split into smaller, more focused modules?**
+  _Cohesion score 0.028874521373422887 - nodes in this community are weakly interconnected._
+- **Why does `formatDate()` connect `formatDate` to `formatDateTime`, `ui.tsx`, `Field`, `NumberInput`, `qs`, `finance/Reports.tsx`, `CostingSheet.tsx`, `Suppliers.tsx`, `ProjectWorkspace.tsx`, `QuotationEditor.tsx`, `useAuth`, `BudgetRequests.tsx`, `Stat`, `ScanPanel`, `Hiring.tsx`, `ui.tsx`, `QuotationEditor`, `ServiceDocuments.tsx`, `service/Reports.tsx`, `PulloutSlips.tsx`, `Evaluations.tsx`, `PurchaseRequests.tsx`, `Marketing.tsx / BarList() / Marketing()`, `Quotations.tsx`, `NumberInput.tsx`, `RfqEditor`, `Pipeline.tsx`, `Column`, `react`, `MyRecords.tsx`, `useConfirm`, `formatSpan`, `IncomingEditor.tsx`, `Meetings.tsx`, `SalesOrderReports.tsx`, `Navigation.tsx`, `JobOrders.tsx`, `humanise`, `Payables.tsx`, `JobOrderDetail`, `MeetingDetail`, `OfficeBudgets.tsx`, `Receivables.tsx`, `Schedule.tsx`, `Partners.tsx`, `CostingSheet`, `Forecast.tsx`, `EvaluationRuns.tsx`, `Warehouse.tsx`, `ProjectGantt.tsx`, `Customer360.tsx`, `Passport.tsx`, `Leave.tsx`, `todayLocal`, `SalesOrders.tsx`, `ServiceJobOrders.tsx`, `CustomerPicker`, `BorrowSlips.tsx`, `PurchaseRequisitionEditor.tsx`, `SalesOrders`, `ExamQuestions.tsx`, `CadJobOrders.tsx`, `CadJobOrders.tsx`, `Clearances.tsx`, `Rfq.tsx`, `Commissions.tsx`, `PeopleFlow.tsx`, `Loading`, `ErrorBox`, `CashAdvances.tsx`, `SearchSelect`, `RfqDetail`, `StockCardHistory.tsx`, `Canvass.tsx`, `Overview.tsx`, `People.tsx`, `DataList.tsx`, `Contracts.tsx`?**
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
 - **Should `sales.ts / pipelineStages.ts / activityTypes.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.02465233881163085 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0324868451155342 - nodes in this community are weakly interconnected._
