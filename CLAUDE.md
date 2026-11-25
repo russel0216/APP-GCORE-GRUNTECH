@@ -4892,6 +4892,37 @@ alone, and Odoo's pictures imported from its CSV export).
   MB stored. One audit row per run; a file sharp cannot read is named, the
   rest go on.
 
+## A sales order line pulled out in parts (2026-11-25)
+
+The owner's audit of the pull-out slip, on GT-SO-2026-0044 ("the item on the
+sales order is 1 lot … OMEGA AIR, FILTER, AAF 0026 XM … consists of housing,
+drain and filter element separate in warehouse shelves, which we will assemble
+later"); his answers took the recommended defaults.
+
+- **`PulloutItem.sourceQty`** — how much of its source line a row covers. On a
+  SALES_ORDER slip the FIRST part of a line carries what the slip completes of
+  it (2 lots; 0 for a trip of some parts only, the rest following on another
+  slip) and its other parts 0; null — a slip from before, a request line — is
+  the quantity itself. `pulledBySource()` sums `sourceQty ?? quantity`, so a
+  line's "left" is counted in the ORDER's unit, never in pieces. `sourceQty`
+  on any other kind is a 400; past what is left, the refusal says to add the
+  parts under the line and say what it completes.
+- **The parts are remembered**: `lastParts()` — the newest slip (waiting or
+  out) that answered a line of ANOTHER order with the same part number (else
+  title) and completed something gives each part's quantity per unit
+  (`parts` on the source line); the form starts from it, scaled to what is
+  left. A suggestion only.
+- **Service lines** (`service` on the source line): a sales order line under
+  GRUNTECH SERVICES or Other Services (`SERVICE_GROUPS`), a request line of
+  nature SERVICE — listed last, unticked, "nothing to pull out from the shelf".
+- **The form** (`PulloutEditor`): on a sales order, a **Completes** column and
+  "+ Add part" under each ticked line, parts with their own item, quantity,
+  serial and condition, ✕ to remove one; the shelf check adds a part's
+  quantities across lines. The slip page and the paper say "completes 2 lot" /
+  "— part" under each row. **"Pull out stock"** is a button on an issued sales
+  order (it was in ⋯), and the "Something else" card says it records nothing
+  against a sales order. verify-chain pins it.
+
 ## Odoo's product moves as history, and the stock card's movements (2026-11-25)
 
 The owner's Odoo "Product Moves" export (stock.move.line: Date, Reference,

@@ -3585,6 +3585,12 @@ model PulloutItem {
   /// The sales order line or the request line it answers (one of two tables, so no foreign key).
   sourceLineId String?
   quantity     Decimal @db.Decimal(18, 3)
+  /// How much of its source line this row covers (2026-11-25, the owner's
+  /// GT-SO-2026-0044: a filter sold as "1 lot" leaves as housing, drain and
+  /// element). On a sales order slip the FIRST part of a line carries the lots
+  /// the slip completes (0 for a trip that completes none) and its other parts
+  /// 0; null — a slip from before, or a request line — the quantity itself.
+  sourceQty    Decimal? @db.Decimal(18, 3)
   /// At the warehouse's average when it went out; an estimate until then.
   unitCost     Decimal @default(0) @db.Decimal(18, 2)
   amount       Decimal @default(0) @db.Decimal(18, 2)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -180,6 +180,10 @@ interface SourceLine {
   quantity: number;
   left: number;
   itemId: string | null;
+  /** A service line — nothing on a shelf; left unticked at the foot (2026-11-25). */
+  service?: boolean;
+  /** The parts the same product left as last time, per unit of the line (2026-11-25). */
+  parts?: { itemId: string; perUnit: number }[] | null;
 }
 
 interface StockItem {
@@ -222,6 +226,30 @@ interface Pick {
   serialNo: string;
   condition: string;
 }
+/** One shelf item going out for a source line — a lot may leave as several (2026-11-25). */
+interface Part {
+  key: string;
+  itemId: string;
+  quantity: string;
+  serialNo: string;
+  condition: string;
+}
+/** A source line on the slip: ticked or not, how much of it this slip completes, and its parts. */
+interface LinePick {
+  include: boolean;
+  covers: string;
+  parts: Part[];
+}
+let partSeq = 0;
+const newPart = (itemId = '', quantity = '', condition = 'Brand new'): Part => ({ key: `p${++partSeq}`, itemId, quantity, serialNo: '', condition });
+const round3 = (n: number) => String(Math.round(n * 1000) / 1000);
+/** What a line starts with: the parts it left in last time, scaled to what is left, else the item its part number names. */
+const startPick = (l: SourceLine): LinePick => ({
+  include: l.left > 0 && !l.service,
+  covers: String(l.left),
+  parts: l.parts?.length ? l.parts.map((pt) => newPart(pt.itemId, round3(pt.perUnit * l.left))) : [newPart(l.itemId ?? '', String(l.left))],
+});
+
 interface FreeLine {
   key: string;
   itemId: string;
@@ -292,12 +320,12 @@ const CHOICES: { kind: PickKind | 'OTHER'; title: string; text: string }[] = [
   {
     kind: 'SALES_ORDER',
     title: 'Goods for a sales order',
-    text: 'Items released for a customer’s issued sales order.',
+    text: 'Items for a customer’s issued sales order. The order shows what went out; a line sold as one lot may leave as several parts.',
   },
   {
     kind: 'OTHER',
     title: 'Something else',
-    text: 'A supplier return, testing, a repair, a loan to site — you say why on the slip.',
+    text: 'A supplier return, testing, a repair, a loan to site — you say why. Not for a sales order: nothing would be recorded against the order.',
   },
 ];
 
@@ -445,7 +473,7 @@ export function PulloutEditor() {
   const [dirty, setDirty] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [form, setForm] = useState<Header>(BLANK);
-  const [picks, setPicks] = useState<Record<string, Pick>>({});
+  const [picks, setPicks] = useState<Record<string, LinePick>>({});
   const [free, setFree] = useState<FreeLine[]>([blankFree()]);
   // A project's own goods are ticked off the list of what it holds, by item (2026-11-06).
   const [ownPicks, setOwnPicks] = useState<Record<string, Pick>>({});
@@ -522,7 +550,14 @@ export function PulloutEditor() {
             notes: str('notes'),
             jobId: none ? ((slip.job as { id: string } | null)?.id ?? '') : '',
           });
-          const items = slip.items as { sourceLineId: string | null; item: { id: string }; quantity: number; serialNo: string | null; condition: string | null }[];
+          const items = slip.items as {
+            sourceLineId: string | null;
+            item: { id: string };
+            quantity: number;
+            sourceQty: number | null;
+            serialNo: string | null;
+            condition: string | null;
+          }[];
           if (jobId) {
             setOwnPicks(
               Object.fromEntries(
@@ -536,10 +571,18 @@ export function PulloutEditor() {
                 : [blankFree()],
             );
           } else {
-            const next: Record<string, Pick> = {};
-            for (const l of src.lines) next[l.id] = { include: false, itemId: l.itemId ?? '', quantity: String(l.left), serialNo: '', condition: '' };
-            for (const i of items) {
-              if (i.sourceLineId) next[i.sourceLineId] = { include: true, itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '', condition: i.condition ?? '' };
+            const next: Record<string, LinePick> = {};
+            for (const l of src.lines) next[l.id] = { ...startPick(l), include: false };
+            const mine = new Map<string, typeof items>();
+            for (const i of items) if (i.sourceLineId) mine.set(i.sourceLineId, [...(mine.get(i.sourceLineId) ?? []), i]);
+            for (const [lineId, rows] of mine) {
+              // A slip from before the parts said no `sourceQty`: each row covered its own quantity.
+              const covers = rows.reduce((sum, r) => sum + (r.sourceQty ?? r.quantity), 0);
+              next[lineId] = {
+                include: true,
+                covers: round3(covers),
+                parts: rows.map((r) => ({ ...newPart(r.item.id, String(r.quantity), r.condition ?? ''), serialNo: r.serialNo ?? '' })),
+              };
             }
             setPicks(next);
           }
@@ -562,9 +605,7 @@ export function PulloutEditor() {
             setFree(fromReq.lines.map((l) => ({ key: `f${++freeSeq}`, itemId: l.itemId, quantity: String(l.quantity), serialNo: '', condition: 'Brand new' })));
             setDirty(true);
           }
-          setPicks(
-            Object.fromEntries(src.lines.map((l) => [l.id, { include: l.left > 0, itemId: l.itemId ?? '', quantity: String(l.left), serialNo: '', condition: 'Brand new' }])),
-          );
+          setPicks(Object.fromEntries(src.lines.map((l) => [l.id, startPick(l)])));
         }
       } catch (err) {
         if (live) setError(err);
@@ -641,6 +682,10 @@ export function PulloutEditor() {
   const atSite = own && !!data.warehouses.find((w) => w.id === form.warehouseId)?.isSite;
   const purposes = data.purposes.filter((p) => !none || p.noSource);
   const chosen = source.lines.filter((l) => picks[l.id]?.include);
+  // A sales order line may leave as several shelf items — a lot's housing, drain and element (2026-11-25).
+  const inParts = source.kind === 'SALES_ORDER';
+  // Service lines (testing, commissioning) sit at the foot, unticked: nothing on a shelf.
+  const shownLines = [...source.lines.filter((l) => !l.service), ...source.lines.filter((l) => l.service)];
   const freeSent = free.filter((l) => l.itemId || l.quantity);
   const problems: string[] = [];
   if (!form.warehouseId) problems.push(own ? 'say where the goods are' : 'choose the warehouse');
@@ -667,16 +712,26 @@ export function PulloutEditor() {
     });
   } else {
     if (!chosen.length) problems.push('tick at least one line');
+    const asked = new Map<string, number>();
     for (const l of chosen) {
       const p = picks[l.id];
-      const q = Number(p.quantity);
-      if (!p.itemId) problems.push(`choose the item for "${l.title}"`);
-      else if (!(q > 0)) problems.push(`give a quantity for "${l.title}"`);
-      else if (q > l.left + 0.0005) problems.push(`only ${l.left} ${l.unit} of "${l.title}" is left`);
-      else {
-        const it = itemById.get(p.itemId);
-        if (it && q > it.available + 0.0005) problems.push(`only ${it.available} ${it.unit} of ${it.name} is available`);
+      if (inParts) {
+        const c = Number(p.covers);
+        if (p.covers.trim() === '' || !(c >= 0)) problems.push(`say how much of "${l.title}" this slip completes (0 if only some parts go now)`);
+        else if (c > l.left + 0.0005) problems.push(`only ${l.left} ${l.unit} of "${l.title}" is left`);
       }
+      p.parts.forEach((pt, n) => {
+        const q = Number(pt.quantity);
+        const which = p.parts.length > 1 ? `part ${n + 1} of "${l.title}"` : `"${l.title}"`;
+        if (!pt.itemId) problems.push(`choose the shelf item for ${which}`);
+        else if (!(q > 0)) problems.push(`give a quantity for ${which}`);
+        else if (!inParts && q > l.left + 0.0005) problems.push(`only ${l.left} ${l.unit} of "${l.title}" is left`);
+        else asked.set(pt.itemId, (asked.get(pt.itemId) ?? 0) + q);
+      });
+    }
+    for (const [itemId, q] of asked) {
+      const it = itemById.get(itemId);
+      if (it && q > it.available + 0.0005) problems.push(`only ${it.available} ${it.unit} of ${it.name} is available`);
     }
   }
 
@@ -709,13 +764,17 @@ export function PulloutEditor() {
         ? ownChosen.map((p) => ({ itemId: p.itemId, quantity: Number(p.quantity), serialNo: t(p.serialNo), condition: t(p.condition) }))
         : freeMode
         ? freeSent.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), serialNo: t(l.serialNo), condition: t(l.condition) }))
-        : chosen.map((l) => ({
-            sourceLineId: l.id,
-            itemId: picks[l.id].itemId,
-            quantity: Number(picks[l.id].quantity),
-            serialNo: t(picks[l.id].serialNo),
-            condition: t(picks[l.id].condition),
-          })),
+        : chosen.flatMap((l) =>
+            picks[l.id].parts.map((pt, n) => ({
+              sourceLineId: l.id,
+              itemId: pt.itemId,
+              quantity: Number(pt.quantity),
+              // The lots the slip completes ride on the line's first part; its other parts complete nothing of their own.
+              ...(inParts ? { sourceQty: n === 0 ? Number(picks[l.id].covers) : 0 } : {}),
+              serialNo: t(pt.serialNo),
+              condition: t(pt.condition),
+            })),
+          ),
     };
     try {
       if (editing && existing) {
@@ -739,8 +798,12 @@ export function PulloutEditor() {
     setForm((f) => ({ ...f, [k]: e.target.value }));
     setDirty(true);
   };
-  const setPick = (lineId: string, patch: Partial<Pick>) => {
+  const setPick = (lineId: string, patch: Partial<LinePick>) => {
     setPicks((ps) => ({ ...ps, [lineId]: { ...ps[lineId], ...patch } }));
+    setDirty(true);
+  };
+  const setPart = (lineId: string, key: string, patch: Partial<Part>) => {
+    setPicks((ps) => ({ ...ps, [lineId]: { ...ps[lineId], parts: ps[lineId].parts.map((pt) => (pt.key === key ? { ...pt, ...patch } : pt)) } }));
     setDirty(true);
   };
   const setFreeLine = (key: string, patch: Partial<FreeLine>) => {
@@ -1107,89 +1170,172 @@ export function PulloutEditor() {
             </div>
           </>
         ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th aria-label="Pull out" />
-                  <th>Line</th>
-                  <th className="right">Left</th>
-                  <th>Item from the shelf</th>
-                  <th className="right">Available</th>
-                  <th className="right proc-col-input">Quantity</th>
-                  <th>Serial / batch</th>
-                  <th>Condition</th>
-                </tr>
-              </thead>
-              <tbody>
-                {source.lines.map((l) => {
-                  const p = picks[l.id] ?? { include: false, itemId: '', quantity: '', serialNo: '', condition: '' };
-                  const it = itemById.get(p.itemId);
-                  return (
-                    <tr key={l.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Pull out ${l.title}`}
-                          checked={p.include}
-                          disabled={l.left <= 0 && !p.include}
-                          onChange={(e) => setPick(l.id, { include: e.target.checked })}
-                        />
-                      </td>
-                      <td>
-                        <div>{l.title}</div>
-                        <div className="faint">{[l.partNumber, l.description].filter(Boolean).join(' · ') || `${l.quantity} ${l.unit}`}</div>
-                      </td>
-                      <td className="right mono">
-                        {l.left} {l.unit}
-                      </td>
-                      <td>
-                        <SearchSelect aria-label={`Item for ${l.title}`} placeholder="Type a part number or name…" value={p.itemId} disabled={!p.include} onChange={(e) => setPick(l.id, { itemId: e.target.value })}>
-                          {itemOptions(p.itemId)}
-                        </SearchSelect>
-                      </td>
-                      <td className="right mono">
-                        {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
-                        {it?.orderStock && <div className="faint">held for the order</div>}
-                        {/* Said, so an empty company shelf never reads as a fault (2026-11-06). */}
-                        {p.include && (!it || it.available <= 0) && (
-                          <div className="faint">
-                            {source.kind === 'PURCHASE_REQUEST' && data.projectHolds?.itemIds.includes(p.itemId)
-                              ? 'none on the company shelf — it is in the project’s own goods'
-                              : 'none on the company shelf'}
-                          </div>
+          <>
+            {inParts && (
+              <p className="faint po-parts-note">
+                A line sold as one lot may leave as several shelf items — a filter&rsquo;s housing, drain and element. Pick the first under the line, then{' '}
+                <strong>+ Add part</strong> for the rest. <strong>Completes</strong> is how much of the order line this slip finishes: 2 when both lots go
+                whole, 0 when only some parts go now and the rest follow on another slip.
+              </p>
+            )}
+            <div className="table-wrap">
+              <table className="data po-lines">
+                <thead>
+                  <tr>
+                    <th aria-label="Pull out" />
+                    <th>Order line</th>
+                    <th className="right">Left</th>
+                    {inParts && <th className="right proc-col-input">Completes</th>}
+                    <th>Item from the shelf</th>
+                    <th className="right">Available</th>
+                    <th className="right proc-col-input">Quantity</th>
+                    <th>Serial / batch</th>
+                    <th>Condition</th>
+                    {inParts && <th aria-label="Remove part" />}
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownLines.map((l) => {
+                    const p = picks[l.id] ?? { include: false, covers: '', parts: [newPart()] };
+                    const cols = inParts ? 10 : 8;
+                    return (
+                      <Fragment key={l.id}>
+                        {p.parts.map((pt, n) => {
+                          const it = itemById.get(pt.itemId);
+                          const first = n === 0;
+                          const name = p.parts.length > 1 ? `part ${n + 1} of ${l.title}` : l.title;
+                          return (
+                            <tr key={pt.key} className={!first ? 'po-part-row' : l.service && !p.include ? 'po-service-row' : undefined}>
+                              <td>
+                                {first && (
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Pull out ${l.title}`}
+                                    checked={p.include}
+                                    disabled={l.left <= 0 && !p.include}
+                                    onChange={(e) => setPick(l.id, { include: e.target.checked })}
+                                  />
+                                )}
+                              </td>
+                              <td>
+                                {first ? (
+                                  <>
+                                    <div>{l.title}</div>
+                                    <div className="faint">
+                                      {l.service
+                                        ? 'Service — nothing to pull out from the shelf'
+                                        : [l.partNumber, l.description].filter(Boolean).join(' · ') || `${l.quantity} ${l.unit}`}
+                                    </div>
+                                    {first && p.include && l.parts?.length && p.parts.length > 1 ? <div className="faint">Parts as last time — change them if they differ</div> : null}
+                                  </>
+                                ) : (
+                                  <div className="faint po-part-label">↳ part {n + 1}</div>
+                                )}
+                              </td>
+                              <td className="right mono">{first ? `${l.left} ${l.unit}` : ''}</td>
+                              {inParts && (
+                                <td>
+                                  {first && (
+                                    <NumberInput
+                                      kind="quantity"
+                                      className="mono proc-cell-input"
+                                      step="0.001"
+                                      aria-label={`How much of ${l.title} this slip completes`}
+                                      value={p.covers}
+                                      disabled={!p.include}
+                                      onChange={(e) => setPick(l.id, { covers: e.target.value })}
+                                    />
+                                  )}
+                                </td>
+                              )}
+                              <td>
+                                <SearchSelect
+                                  aria-label={`Item for ${name}`}
+                                  placeholder="Type a part number or name…"
+                                  value={pt.itemId}
+                                  disabled={!p.include}
+                                  onChange={(e) => setPart(l.id, pt.key, { itemId: e.target.value })}
+                                >
+                                  {itemOptions(pt.itemId)}
+                                </SearchSelect>
+                              </td>
+                              <td className="right mono">
+                                {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
+                                {it?.orderStock && <div className="faint">held for the order</div>}
+                                {/* Said, so an empty company shelf never reads as a fault (2026-11-06). */}
+                                {p.include && pt.itemId && (!it || it.available <= 0) && (
+                                  <div className="faint">
+                                    {source.kind === 'PURCHASE_REQUEST' && data.projectHolds?.itemIds.includes(pt.itemId)
+                                      ? 'none on the company shelf — it is in the project’s own goods'
+                                      : 'none on the company shelf'}
+                                  </div>
+                                )}
+                              </td>
+                              <td>
+                                <NumberInput
+                                  kind="quantity"
+                                  className="mono proc-cell-input"
+                                  step="0.001"
+                                  aria-label={`Quantity of ${name}`}
+                                  value={pt.quantity}
+                                  disabled={!p.include}
+                                  onChange={(e) => setPart(l.id, pt.key, { quantity: e.target.value })}
+                                />
+                                {it && <div className="faint">{it.unit}</div>}
+                              </td>
+                              <td className="inc-unit-cell">
+                                <input
+                                  aria-label={`Serial or batch of ${name}`}
+                                  value={pt.serialNo}
+                                  maxLength={120}
+                                  disabled={!p.include}
+                                  onChange={(e) => setPart(l.id, pt.key, { serialNo: e.target.value })}
+                                />
+                              </td>
+                              <td className="inc-unit-cell">
+                                <input
+                                  aria-label={`Condition of ${name}`}
+                                  list="pullout-conditions"
+                                  value={pt.condition}
+                                  maxLength={80}
+                                  disabled={!p.include}
+                                  onChange={(e) => setPart(l.id, pt.key, { condition: e.target.value })}
+                                />
+                              </td>
+                              {inParts && (
+                                <td>
+                                  {p.parts.length > 1 && p.include && (
+                                    <button
+                                      type="button"
+                                      className="btn btn-sm btn-icon"
+                                      aria-label={`Remove ${name}`}
+                                      onClick={() => setPick(l.id, { parts: p.parts.filter((x) => x.key !== pt.key) })}
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                        {inParts && p.include && (
+                          <tr className="po-part-add">
+                            <td />
+                            <td colSpan={cols - 1}>
+                              <button type="button" className="btn btn-sm" onClick={() => setPick(l.id, { parts: [...p.parts, newPart()] })}>
+                                + Add part
+                              </button>
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td>
-                        <NumberInput
-                          kind="quantity"
-                          className="mono proc-cell-input"
-                          step="0.001"
-                          aria-label={`Quantity of ${l.title}`}
-                          value={p.quantity}
-                          disabled={!p.include}
-                          onChange={(e) => setPick(l.id, { quantity: e.target.value })}
-                        />
-                      </td>
-                      <td className="inc-unit-cell">
-                        <input aria-label={`Serial or batch of ${l.title}`} value={p.serialNo} maxLength={120} disabled={!p.include} onChange={(e) => setPick(l.id, { serialNo: e.target.value })} />
-                      </td>
-                      <td className="inc-unit-cell">
-                        <input
-                          aria-label={`Condition of ${l.title}`}
-                          list="pullout-conditions"
-                          value={p.condition}
-                          maxLength={80}
-                          disabled={!p.include}
-                          onChange={(e) => setPick(l.id, { condition: e.target.value })}
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
         <datalist id="pullout-conditions">
           {CONDITIONS.map((c) => (
@@ -1263,6 +1409,8 @@ export function PulloutDetail() {
     amount: number;
     item: { id: string; code: string; partNumber: string | null; brand: string | null; name: string; description?: string | null; unit: string };
     sourceLine: { title: string; unit: string } | null;
+    /** How much of its order line the row completes — set on a part of a lot (2026-11-25). */
+    sourceQty?: number | null;
   }[];
 
   async function submit() {
@@ -1489,7 +1637,14 @@ export function PulloutDetail() {
                   </td>
                   <td>{i.serialNo ?? <span className="faint">—</span>}</td>
                   <td>{i.condition ?? <span className="faint">—</span>}</td>
-                  {!!(so || pr) && <td>{i.sourceLine?.title ?? <span className="faint">—</span>}</td>}
+                  {!!(so || pr) && (
+                    <td>
+                      {i.sourceLine?.title ?? <span className="faint">—</span>}
+                      {i.sourceLine && i.sourceQty != null && (
+                        <div className="faint">{i.sourceQty > 0 ? `completes ${i.sourceQty} ${i.sourceLine.unit}` : 'a part — completes nothing by itself'}</div>
+                      )}
+                    </td>
+                  )}
                   <td className="right mono">
                     {i.quantity} {i.item.unit}
                   </td>

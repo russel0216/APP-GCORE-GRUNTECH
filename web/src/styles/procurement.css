@@ -920,3 +920,22 @@ a.inv-move:hover .inv-move-what {
 .po-next {
   margin: 0;
 }
+
+/* A sales order line leaving in parts (2026-11-25): the parts sit under their
+   line, the service lines at the foot, faded until ticked. */
+.po-parts-note {
+  margin-bottom: var(--s-3);
+}
+.po-lines tr.po-part-row td {
+  border-top: 0;
+}
+.po-part-label {
+  padding-left: var(--s-4);
+}
+.po-lines tr.po-part-add td {
+  border-top: 0;
+  padding-top: 0;
+}
+.po-lines tr.po-service-row td {
+  opacity: 0.6;
+}

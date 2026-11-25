@@ -838,6 +838,12 @@ export function SalesOrderDetail() {
                 Request invoice
               </button>
             )}
+            {/* Out of the ⋯ menu (2026-11-25, the owner's audit: people could not find how to pull out). */}
+            {order.status === 'ISSUED' && can('gchain.pullout_slips.create') && (
+              <button className="btn" onClick={() => navigate(`/g-chain/pullout-slips/new?salesOrder=${order.id}`)}>
+                Pull out stock
+              </button>
+            )}
           </>
         }
         print={`/api/sales-orders/${order.id}/pdf`}
@@ -848,13 +854,6 @@ export function SalesOrderDetail() {
             hint: 'The order alone, without the files attached to it',
             onSelect: () => openPdf(`/api/sales-orders/${order.id}/pdf?attachments=0`, (e) => setError(e)),
           },
-          // Stock out of a warehouse for the customer's delivery (2026-10-14).
-          order.status === 'ISSUED' &&
-            can('gchain.pullout_slips.create') && {
-              label: 'Pull out stock…',
-              hint: 'A pull-out slip against this order',
-              onSelect: () => navigate(`/g-chain/pullout-slips/new?salesOrder=${order.id}`),
-            },
           order.canEdit &&
             pending && {
               label: 'Pull back to draft',

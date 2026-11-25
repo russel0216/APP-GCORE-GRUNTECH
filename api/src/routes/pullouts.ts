@@ -131,6 +131,10 @@ export interface SourceLine {
   /** The budget line a project is charged under (a request line's own). */
   costCategoryId: string | null;
   estimatedCost: number;
+  /** A service line (testing, commissioning) — nothing on a shelf; the form leaves it unticked (2026-11-25). */
+  service: boolean;
+  /** The parts the same product left as last time — each part's quantity for one unit of the line (2026-11-25). */
+  parts: { itemId: string; perUnit: number }[] | null;
 }
 
 interface Source {
@@ -173,13 +177,70 @@ const NO_SOURCE: Source = {
  * again at submit and at posting).
  */
 async function pulledBySource(lineIds: string[], exceptSlipId?: string, statuses: PulloutStatus[] = ['PENDING_APPROVAL', 'PULLED_OUT']) {
-  if (!lineIds.length) return new Map<string, number>();
-  const rows = await prisma.pulloutItem.groupBy({
-    by: ['sourceLineId'],
+  const out = new Map<string, number>();
+  if (!lineIds.length) return out;
+  const rows = await prisma.pulloutItem.findMany({
     where: { sourceLineId: { in: lineIds }, slip: { status: { in: statuses }, ...(exceptSlipId ? { id: { not: exceptSlipId } } : {}) } },
-    _sum: { quantity: true },
+    select: { sourceLineId: true, quantity: true, sourceQty: true },
   });
-  return new Map(rows.map((r) => [r.sourceLineId as string, num(r._sum.quantity)]));
+  // A row covers its `sourceQty` of the line where it says one (a part of a lot), else its quantity.
+  for (const r of rows) out.set(r.sourceLineId!, (out.get(r.sourceLineId!) ?? 0) + num(r.sourceQty ?? r.quantity));
+  return out;
+}
+
+/** The quotation groups whose lines are services — nothing on a shelf to pull out (2026-11-25). */
+const SERVICE_GROUPS = new Set(['gruntech services', 'other services']);
+const squash = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+export const isServiceGroup = (group: string | null) => !!group && SERVICE_GROUPS.has(squash(group));
+
+/**
+ * The parts each sales order line left as the last time the same product went
+ * out (2026-11-25): the newest slip, waiting or out, that answered a line of
+ * another order with the same part number (else the same title) and said how
+ * much of it it covered — each part's quantity per unit of the line. A
+ * suggestion only; the form shows it and the person changes it.
+ */
+async function lastParts(lines: { id: string; partNumber: string | null; title: string | null }[]) {
+  const out = new Map<string, { itemId: string; perUnit: number }[]>();
+  const keyOf = (l: { partNumber: string | null; title: string | null }) =>
+    l.partNumber?.trim() ? `p:${squash(l.partNumber)}` : l.title?.trim() ? `t:${squash(l.title)}` : '';
+  const wanted = new Map<string, string[]>();
+  for (const l of lines) {
+    const k = keyOf(l);
+    if (k) wanted.set(k, [...(wanted.get(k) ?? []), l.id]);
+  }
+  if (!wanted.size) return out;
+  const parts = [...new Set(lines.map((l) => l.partNumber?.trim()).filter((p): p is string => !!p))];
+  const titles = [...new Set(lines.filter((l) => !l.partNumber?.trim()).map((l) => l.title?.trim()).filter((t): t is string => !!t))];
+  const others = await prisma.salesOrderLine.findMany({
+    where: {
+      id: { notIn: lines.map((l) => l.id) },
+      OR: [
+        ...(parts.length ? [{ partNumber: { in: parts, mode: 'insensitive' as const } }] : []),
+        ...(titles.length ? [{ title: { in: titles, mode: 'insensitive' as const } }] : []),
+      ],
+    },
+    select: { id: true, partNumber: true, title: true },
+  });
+  if (!others.length) return out;
+  const keyById = new Map(others.map((o) => [o.id, keyOf(o)]));
+  const rows = await prisma.pulloutItem.findMany({
+    where: { sourceLineId: { in: others.map((o) => o.id) }, sourceQty: { not: null }, slip: { status: { in: ['PENDING_APPROVAL', 'PULLED_OUT'] } } },
+    select: { slipId: true, sourceLineId: true, itemId: true, quantity: true, sourceQty: true },
+    orderBy: [{ slip: { createdAt: 'desc' } }, { sortOrder: 'asc' }],
+  });
+  const done = new Set<string>();
+  for (const r of rows) {
+    const k = keyById.get(r.sourceLineId!)!;
+    if (done.has(k)) continue;
+    const group = rows.filter((x) => x.slipId === r.slipId && x.sourceLineId === r.sourceLineId);
+    const covers = group.reduce((sum, x) => sum + num(x.sourceQty), 0);
+    if (!(covers > 0)) continue;
+    done.add(k);
+    const found = group.map((x) => ({ itemId: x.itemId, perUnit: Math.round((num(x.quantity) / covers) * 1000) / 1000 }));
+    for (const id of wanted.get(k) ?? []) out.set(id, found);
+  }
+  return out;
 }
 
 /** The source a slip pulls against, with what is left on each line. Refuses one that cannot be pulled against. */
@@ -246,6 +307,7 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
       return matches.find((m) => m.partNumber?.toLowerCase() === p)?.id ?? matches.find((m) => m.code.toLowerCase() === p)?.id ?? null;
     };
     const pulled = await pulledBySource(so.lines.map((l) => l.id), exceptSlipId);
+    const suggested = await lastParts(so.lines);
     return {
       kind,
       salesOrderId: so.id,
@@ -269,6 +331,8 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
         itemId: itemFor(l.partNumber),
         costCategoryId: null,
         estimatedCost: 0,
+        service: isServiceGroup(l.group),
+        parts: suggested.get(l.id) ?? null,
       })),
     };
   }
@@ -311,6 +375,8 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
       itemId: i.itemId,
       costCategoryId: i.costCategoryId,
       estimatedCost: num(i.estimatedCost),
+      service: i.nature === 'SERVICE',
+      parts: null,
     })),
   };
 }
@@ -322,6 +388,8 @@ const lineSchema = z.object({
   sourceLineId: z.string().optional().nullable(),
   itemId: z.string().min(1, 'Which item?'),
   quantity: z.number().positive(),
+  /** On a sales order slip: how much of the line this row covers — the lots on its first part, 0 on the others (2026-11-25). */
+  sourceQty: z.number().min(0).optional().nullable(),
   serialNo: z.string().trim().max(120).optional().nullable(),
   condition: z.string().trim().max(80).optional().nullable(),
 });
@@ -437,12 +505,18 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
     if (source.jobId && !(src.costCategoryId ?? item.costCategoryId)) {
       throw badRequest(`${item.name} has no budget line — set its cost category in the item master; ${source.job!.number} is charged by budget line`);
     }
-    perLine.set(src.id, (perLine.get(src.id) ?? 0) + l.quantity);
+    if (l.sourceQty != null && body.kind !== 'SALES_ORDER') throw badRequest('Only a sales order line is pulled out in parts');
+    perLine.set(src.id, (perLine.get(src.id) ?? 0) + (l.sourceQty ?? l.quantity));
     perItem.set(item.id, (perItem.get(item.id) ?? 0) + l.quantity);
   }
   for (const [lineId, q] of perLine) {
     const src = byLine.get(lineId)!;
-    if (q > src.left + 0.0005) throw badRequest(`Only ${qty(src.left)} ${src.unit} of "${src.title}" is left to pull out`);
+    if (q > src.left + 0.0005) {
+      throw badRequest(
+        `Only ${qty(src.left)} ${src.unit} of "${src.title}" is left to pull out` +
+          (body.kind === 'SALES_ORDER' ? ' — if it leaves in parts, add them under the line and say in "Completes" how much it completes' : ''),
+      );
+    }
   }
   if (body.kind === 'PROJECT_STOCK') {
     // What the project holds at that warehouse — its own goods, at their own average.
@@ -524,6 +598,7 @@ async function writeLines(
         itemId: l.itemId,
         sourceLineId: l.sourceLineId || null,
         quantity: D(l.quantity),
+        sourceQty: l.sourceQty == null ? null : D(l.sourceQty),
         unitCost: D(avg),
         amount: D(cents(avg * l.quantity)),
         sortOrder: n,
@@ -987,6 +1062,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     items: slip.items.map((i) => ({
       ...i,
       quantity: num(i.quantity),
+      sourceQty: i.sourceQty == null ? null : num(i.sourceQty),
       unitCost: num(i.unitCost),
       amount: num(i.amount),
       sourceLine: i.sourceLineId ? (lines.get(i.sourceLineId) ?? null) : null,
@@ -1060,7 +1136,15 @@ pulloutRoutes.get(
         head: ['Item', 'Part / SKU no.', 'Item description & specifications', 'Serial / batch no.', 'Qty', 'Unit', 'Condition'],
         align: ['right', 'left', 'left', 'left', 'right', 'left', 'left'],
         rows: slip.items.map((i, n) => {
-          const answers = i.sourceLineId ? lines.get(i.sourceLineId)?.title : undefined;
+          const line = i.sourceLineId ? lines.get(i.sourceLineId) : undefined;
+          // A part of a lot says how much of its line the slip completes (2026-11-25).
+          const answers = line
+            ? i.sourceQty == null
+              ? line.title
+              : num(i.sourceQty) > 0
+                ? `${line.title} — completes ${qty(num(i.sourceQty))} ${line.unit}`
+                : `${line.title} — part`
+            : undefined;
           return [
             String(n + 1),
             i.item.partNumber ?? i.item.code,
@@ -1217,7 +1301,7 @@ async function recheck(slip: LoadedSlip) {
       reason: slip.reason,
       receivedByName: slip.receivedByName,
       notes: slip.notes,
-      lines: slip.items.map((i) => ({ sourceLineId: i.sourceLineId, itemId: i.itemId, quantity: num(i.quantity) })),
+      lines: slip.items.map((i) => ({ sourceLineId: i.sourceLineId, itemId: i.itemId, quantity: num(i.quantity), sourceQty: i.sourceQty == null ? null : num(i.sourceQty) })),
     },
     slip.id,
   );

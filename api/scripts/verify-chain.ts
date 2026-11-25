@@ -4816,6 +4816,114 @@ async function main() {
         listed.status === 200 && ((listed.body.rows ?? []) as { id: string }[]).some((r) => r.id === soSlipId) && listed.body.total === 1,
         `${listed.status} ${listed.body.total}`,
       );
+
+      // A line sold as one lot leaves as its parts (2026-11-25, the owner's
+      // GT-SO-2026-0044: a filter is a housing, a drain and an element on
+      // three shelves). The first part says how much of the line the slip
+      // completes; a trip that completes none says 0; the next order of the
+      // same product is offered the same parts; a service line is marked.
+      {
+        const partItem = async (code: string, name: string) => {
+          const it = await prisma.item.create({ data: { code: `${TAG}-${code}`, name: `${TAG} ${name}`, unit: 'pcs' } });
+          await prisma.inventoryBalance.create({ data: { itemId: it.id, warehouseId: warehouse.id, quantity: D(10), averageCost: D(40) } });
+          return it;
+        };
+        const housing = await partItem('HSG', 'Filter housing');
+        const drain = await partItem('DRN', 'Filter drain');
+        const element = await partItem('ELM', 'Filter element');
+        const lotOrder = (n: number) =>
+          prisma.salesOrder.create({
+            data: {
+              number: `${TAG}-SO-LOT${n}-${Date.now()}`,
+              status: 'ISSUED',
+              quotationId: soQuote.id,
+              customerId: customer.id,
+              ownerId: seller.id,
+              orderDate: new Date(`${todayKey}T00:00:00Z`),
+              lines: {
+                create: [
+                  { title: `${TAG} FILTER, AAF 0026 XM`, partNumber: `${TAG}-AAF0026XM`, quantity: D(2), unit: 'lot', unitPrice: D(9000), amount: D(18000), sortOrder: 0 },
+                  { title: `${TAG} TESTING AND COMMISSIONING`, group: 'GRUNTECH SERVICES', quantity: D(1), unit: 'lot', unitPrice: D(5000), amount: D(5000), sortOrder: 1 },
+                ],
+              },
+            },
+            include: { lines: { orderBy: { sortOrder: 'asc' } } },
+          });
+        const lotSo = await lotOrder(1);
+        const [filterLine, serviceLine] = lotSo.lines;
+        const parts = (completes: number, each: number) => [
+          { sourceLineId: filterLine.id, itemId: housing.id, quantity: each, sourceQty: completes },
+          { sourceLineId: filterLine.id, itemId: drain.id, quantity: each, sourceQty: 0 },
+          { sourceLineId: filterLine.id, itemId: element.id, quantity: each, sourceQty: 0 },
+        ];
+        const lotBody = (lines: unknown[]) => ({ kind: 'SALES_ORDER', salesOrderId: lotSo.id, warehouseId: warehouse.id, receivedByName: 'Customer driver', lines });
+        const lotSource = await api(pullerToken, 'GET', `/pullout-slips/source?salesOrderId=${lotSo.id}`);
+        const lotLines = ((lotSource.body.source as { lines: { id: string; service: boolean }[] }) ?? { lines: [] }).lines;
+        const asPieces = await api(pullerToken, 'POST', '/pullout-slips', lotBody(parts(2, 2).map(({ sourceQty: _, ...l }) => l)));
+        check(
+          'a lot left as pieces without saying what they complete is refused, the refusal pointing at the parts; a service line is marked',
+          asPieces.status === 400 &&
+            String(asPieces.body.error ?? '').includes('add them under the line') &&
+            lotLines.find((l) => l.id === serviceLine.id)?.service === true &&
+            lotLines.find((l) => l.id === filterLine.id)?.service === false,
+          `${asPieces.status} ${JSON.stringify(asPieces.body).slice(0, 160)}`,
+        );
+        const partTrip = await api(pullerToken, 'POST', '/pullout-slips', lotBody([{ sourceLineId: filterLine.id, itemId: housing.id, quantity: 2, sourceQty: 0 }]));
+        const whole = await api(pullerToken, 'POST', '/pullout-slips', lotBody(parts(2, 2)));
+        const leftAfter = async () =>
+          ((await api(pullerToken, 'GET', `/pullout-slips/source?salesOrderId=${lotSo.id}`)).body.source as { lines: { id: string; left: number }[] }).lines.find(
+            (l) => l.id === filterLine.id,
+          )?.left;
+        const wholeId = String(whole.body.id);
+        await api(pullerToken, 'POST', `/pullout-slips/${wholeId}/submit`);
+        const wholeReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'pullout_slip', documentId: wholeId, status: 'PENDING' } });
+        if (wholeReq) await api(bossToken, 'POST', `/approvals/${wholeReq.id}/act`, { action: 'APPROVED' });
+        const wholeRow = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: wholeId }, include: { items: true } });
+        const leftNow = await leftAfter();
+        const shelf = async (id: string) => num((await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: id, warehouseId: warehouse.id } } }))?.quantity);
+        const again = await api(pullerToken, 'POST', '/pullout-slips', lotBody(parts(1, 1)));
+        check(
+          'the two lots leave as six pieces on one slip — the line done, each shelf down by two, a further lot refused; a trip of parts alone completes nothing and is taken',
+          partTrip.status === 201 &&
+            whole.status === 201 &&
+            wholeRow.status === 'PULLED_OUT' &&
+            wholeRow.items.length === 3 &&
+            leftNow === 0 &&
+            (await shelf(housing.id)) === 8 &&
+            (await shelf(drain.id)) === 8 &&
+            (await shelf(element.id)) === 8 &&
+            again.status === 400,
+          `${partTrip.status} ${whole.status} ${JSON.stringify(whole.body).slice(0, 120)}; ${wholeRow.status} rows ${wholeRow.items.length}; left ${leftNow}; again ${again.status}`,
+        );
+        const shown = await api(pullerToken, 'GET', `/pullout-slips/${wholeId}`);
+        const paperText = flat((await printed(pullerToken, `/pullout-slips/${wholeId}/pdf?attachments=0`)).text);
+        check(
+          'the slip says what each part completes, on its page and on its paper',
+          ((shown.body.items ?? []) as { sourceQty: number | null }[]).map((i) => i.sourceQty).join(',') === '2,0,0' &&
+            paperText.includes('completes 2 lot') &&
+            paperText.includes('— part'),
+          `${JSON.stringify(((shown.body.items ?? []) as { sourceQty: number | null }[]).map((i) => i.sourceQty))} ${paperText.slice(0, 200)}`,
+        );
+        const nextSo = await lotOrder(2);
+        const nextSource = await api(pullerToken, 'GET', `/pullout-slips/source?salesOrderId=${nextSo.id}`);
+        const offered = ((nextSource.body.source as { lines: { id: string; parts: { itemId: string; perUnit: number }[] | null }[] }) ?? { lines: [] }).lines.find(
+          (l) => l.id === nextSo.lines[0].id,
+        )?.parts;
+        check(
+          'the next order of the same product is offered the parts it left in last time, one of each per lot',
+          !!offered &&
+            offered.map((p) => p.itemId).join(',') === [housing.id, drain.id, element.id].join(',') &&
+            offered.every((p) => p.perUnit === 1),
+          JSON.stringify(offered),
+        );
+        const onRequest = await api(pullerToken, 'POST', '/pullout-slips', {
+          kind: 'PURCHASE_REQUEST',
+          requestId: pullPr.id,
+          warehouseId: warehouse.id,
+          lines: [{ sourceLineId: prLine.id, itemId: item.id, quantity: 1, sourceQty: 1 }],
+        });
+        check('only a sales order line is pulled out in parts', onRequest.status === 400 && String(onRequest.body.error ?? '').includes('in parts'), `${onRequest.status}`);
+      }
       const stockPr = await prisma.purchaseRequest.create({
         data: { number: await nextNumber('purchase_request'), status: 'APPROVED', kind: 'STOCK_REPLENISHMENT', warehouseId: warehouse.id, requestedById: engineer.id, purpose: `${TAG} stock buy` },
       });
