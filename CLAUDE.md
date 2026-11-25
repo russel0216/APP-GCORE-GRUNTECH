@@ -977,6 +977,42 @@ create one, popup window so it will retain on the page".
   source scan, and this database's role holders) — compare with the last
   commit before reading a failure there as a regression.
 
+## The Incoming Report of 2026-11-25
+
+The owner's three: "Incoming Report product group, same with quotation
+product group"; "Incoming Report — currency selection"; "without a purchase
+order — Receive from (supplier could not be listed), some users can't see
+this".
+
+- **An item's PRODUCT GROUP is the quotation's list** (`Item.productGroup`,
+  the group's name as a quotation line keeps it; the inventory category stays
+  apart for the stock tiles). On the Incoming each line names it
+  (`ReceivingItem.productGroup`, an ACTIVE `QuotationGroup` in the master's
+  spelling — `activeGroupNames()` in routes/warehouse.ts, an unknown one a
+  400): REQUIRED where the line files a new item (it replaced the category's
+  requirement; the category is optional there now), changeable on an item
+  that has one. `postReceiving` writes it onto the item once the report is
+  RECEIVED (`writeLineGroups()`, an `item` UPDATED audit row), never at a
+  draft's save. `/receivings/options` sends `groups`; the paper's Product
+  group column prints it (else the category). The item master's form and
+  list, and the inventory cards, show it.
+- **A report has a CURRENCY for the costs TYPED on it**: `Receiving.currency`
+  (PHP by default) and `exchangeRate` (pesos per unit — typed, else Company
+  Settings › Exchange rates; a foreign one with neither is a 400). A typed
+  unit cost — every line without an order, a cost typed over an order line —
+  is in it; `unitCost` stores its PESO figure (to the centavo) and
+  `ReceivingItem.typedUnitCost` the figure as typed. A blank order line keeps
+  `receiptUnitCost()`'s rule. A peso correction (`restateReceiptLine`) clears
+  `typedUnitCost`. The paper still prints no price.
+- **The supplier picker opens to whoever fills a G-CHAIN or G-FIN form**:
+  `GET /suppliers/lookup` takes `requireSupplierPicker` (`shared/pickers.ts`,
+  `SUPPLIER_PICKER_KEYS`: any create / edit key in either module, or a
+  supplier View key) — it needed Suppliers › View All, so a warehouse hand
+  raising an Incoming without a PO read "Suppliers could not be listed".
+- verify-chain pins all three (it stops earlier on this laptop, at the
+  purchase request's Technical Manager step of 2026-11-19 — line 561 submits
+  without the request's project; that predates this change).
+
 ## The owner's batch of 2026-11-23
 
 - **The clock-out is ONE TAP, with no camera** (the owner's call: "remove

@@ -301,6 +301,10 @@ export function ReceivingDetail() {
     unitCost: number;
     /** The peso cost was typed on the report, over what the order says. */
     costTyped?: boolean;
+    /** The cost as typed, in the report's currency, where that is not PHP (2026-11-25). */
+    typedUnitCost?: number | null;
+    /** The product group (the quotation's list): what the line named, else its item's. */
+    productGroup?: string | null;
     amount: number;
     serialNo: string | null;
     batchNo: string | null;
@@ -592,6 +596,7 @@ export function ReceivingDetail() {
                     {i.name && i.description && i.description !== i.name && <div className="faint">{i.description}</div>}
                     {i.code && <div className="faint mono">{i.code}</div>}
                     {i.service && <div className="faint">Service rendered — no stock</div>}
+                    {!i.service && i.productGroup && <div className="faint">Product group: {i.productGroup}</div>}
                   </td>
                   <td>{i.orderItem?.costCategory?.name ?? <span className="faint">—</span>}</td>
                   <td className="right mono">
@@ -599,6 +604,11 @@ export function ReceivingDetail() {
                   </td>
                   <td className="right">
                     <span className="mono">{formatMoney(i.unitCost)}</span>
+                    {i.typedUnitCost != null && rec.currency !== 'PHP' && (
+                      <div className="faint">
+                        {formatMoney(i.typedUnitCost, String(rec.currency))} at {String(rec.exchangeRate)}
+                      </div>
+                    )}
                     {i.costTyped && order && <div className="faint">typed over the order</div>}
                   </td>
                   <td className="right mono">{formatMoney(i.amount)}</td>
@@ -765,6 +775,8 @@ interface StockRow {
     partNumber: string | null;
     /** The manufacturer / OEM. */
     brand: string | null;
+    /** The product group (the quotation's list, 2026-11-25). */
+    productGroup?: string | null;
     name: string;
     description: string | null;
     unit: string;
@@ -1313,7 +1325,7 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
                   <span className="inv-tile-loan">{s.loans.map((l) => `${l.quantity} on loan — ${l.borrower} (${l.number})`).join(' · ')}</span>
                 )}
                 <span className="inv-tile-group">
-                  {s.item.category?.name ?? 'Not categorised'}
+                  {s.item.productGroup ?? s.item.category?.name ?? 'Not categorised'}
                   {s.item.brand ? ` · ${s.item.brand}` : ''}
                 </span>
                 <span className="inv-tile-price">

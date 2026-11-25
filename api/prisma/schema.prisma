@@ -1131,6 +1131,11 @@ model Item {
 
   categoryId String?
   category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  /// The PRODUCT GROUP, from the quotation's list (Admin › Categories ›
+  /// Quotation groups) and kept as its name, as a quotation line keeps it
+  /// (2026-11-25, the owner's call: "Incoming Report product group, same with
+  /// quotation product group"). Apart from the inventory category above.
+  productGroup String?
 
   /// Which bucket this lands in when it reaches a job's cost ledger.
   costCategoryId String?
@@ -3288,6 +3293,11 @@ model Receiving {
   receivedBy   User   @relation("Receiver", fields: [receivedById], references: [id], onDelete: Restrict)
 
   receivedDate  DateTime @default(now()) @db.Date
+  /// The currency the unit costs TYPED on this report are in (2026-11-25, the
+  /// owner's call), and its rate to PHP — pesos per unit, null for PHP. Stock
+  /// is always kept in pesos: a typed cost is converted at save.
+  currency      String   @default("PHP")
+  exchangeRate  Decimal? @db.Decimal(18, 6)
   deliveryRefNo String?
   invoiceRefNo  String?
   notes         String?
@@ -3343,8 +3353,16 @@ model ReceivingItem {
   categoryId String?
   category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
+  /// The product group (the quotation's list) the line names (2026-11-25):
+  /// required where it files a new item, and written onto its item when the
+  /// report is received.
+  productGroup String?
+
   quantity  Decimal @db.Decimal(18, 3)
   unitCost  Decimal @db.Decimal(18, 2)
+  /// The unit cost as typed, in the report's currency, where that is not PHP
+  /// (2026-11-25); `unitCost` is its peso figure at the report's rate.
+  typedUnitCost Decimal? @db.Decimal(18, 4)
   /// The unit cost (pesos) was typed on the Incoming report — over what the
   /// order says (2026-10-23) — so posting and the seed's restating keep it.
   costTyped Boolean @default(false)

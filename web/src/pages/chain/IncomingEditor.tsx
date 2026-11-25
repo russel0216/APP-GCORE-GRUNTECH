@@ -37,6 +37,16 @@ interface Category {
   code: string;
   name: string;
 }
+/** A product group from the quotation's list (2026-11-25, the owner's call). */
+interface ProductGroup {
+  name: string;
+  description: string | null;
+  brand: string | null;
+}
+interface CurrencyOption {
+  code: string;
+  label: string;
+}
 interface OrderOption {
   id: string;
   number: string;
@@ -60,8 +70,10 @@ interface OrderLine {
   /** Pesos per unit it is taken in at (2026-10-23): the request's declared cost, else the price at the order's rate; null with no rate. */
   unitCost: number | null;
   costBasis: 'landed' | 'request' | 'order' | 'converted' | 'no_rate';
-  /** The item's product group; null where it has none. */
+  /** The item's inventory category; null where it has none. */
   category: Category | null;
+  /** The item's product group (the quotation's list); null where it has none. */
+  productGroup: string | null;
   /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
   newItem: boolean;
   /** A service is received as "service rendered" and enters no stock (2026-10-21). */
@@ -95,6 +107,7 @@ interface ItemOption {
   unit: string;
   standardCost: number;
   category?: Category | null;
+  productGroup?: string | null;
 }
 interface FreeLine {
   key: string;
@@ -105,6 +118,8 @@ interface FreeLine {
   quantity: string;
   unitCost: string;
   categoryId: string;
+  /** The product group the line names (the quotation's list). */
+  productGroup: string;
 }
 interface Existing {
   id: string;
@@ -121,6 +136,9 @@ interface Existing {
   /** "Delivered to site" is the project's site, not a building (2026-11-06). */
   warehouse?: { id: string; name: string; isSite?: boolean } | null;
   receivedDate: string;
+  /** The currency the typed costs are in, and its rate to PHP (2026-11-25). */
+  currency?: string;
+  exchangeRate?: number | null;
   deliveryRefNo: string | null;
   invoiceRefNo: string | null;
   notes: string | null;
@@ -136,8 +154,12 @@ interface Existing {
     unitCost: number;
     /** The peso cost was typed on the report over the order's (2026-10-23). */
     costTyped?: boolean;
+    /** The cost as typed, in the report's currency, where that is not PHP. */
+    typedUnitCost?: number | null;
     categoryId?: string | null;
     category?: Category | null;
+    productGroup?: string | null;
+    itemGroup?: string | null;
   }[];
 }
 
@@ -145,7 +167,7 @@ type Mode = 'order' | 'none';
 
 let keySeq = 0;
 const newKey = () => `l${++keySeq}`;
-const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '', categoryId: '' });
+const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '', categoryId: '', productGroup: '' });
 const cents = (n: number) => Math.round(n * 100) / 100;
 /**
  * The "Delivered to site" choice on a project's order (2026-11-06): the goods
@@ -171,8 +193,14 @@ export function IncomingEditor() {
   const [existing, setExisting] = useState<Existing | null>(null);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  /** The product groups (the quotation's list) and the currencies typed costs may be in. */
+  const [productGroups, setProductGroups] = useState<ProductGroup[]>([]);
+  const [currencies, setCurrencies] = useState<CurrencyOption[]>([{ code: 'PHP', label: 'PHP — Philippine peso' }]);
+  const [rates, setRates] = useState<Record<string, number>>({});
   /** The product group named on each order line (by order line id). */
   const [groups, setGroups] = useState<Record<string, string>>({});
+  /** The inventory category named on each order line that files a new item. */
+  const [cats, setCats] = useState<Record<string, string>>({});
 
   const [mode, setMode] = useState<Mode>('order');
   const [order, setOrder] = useState<OrderData | null>(null);
@@ -190,6 +218,8 @@ export function IncomingEditor() {
     deliveryRefNo: '',
     invoiceRefNo: '',
     notes: '',
+    currency: 'PHP',
+    exchangeRate: '',
   });
   const [saved, setSaved] = useState<string | null>(null);
   const [route, setRoute] = useState<PreviewRoute | null>(null);
@@ -197,6 +227,8 @@ export function IncomingEditor() {
   async function loadOrder(orderId: string, except?: string) {
     const o = await api.get<OrderData>(`/receivings/order/${orderId}${qs({ except: except ?? '' })}`);
     setOrder(o);
+    // Each line starts on its item's product group, changed here if need be.
+    setGroups((g) => ({ ...Object.fromEntries(o.lines.filter((l) => l.productGroup).map((l) => [l.id, l.productGroup!])), ...g }));
     return o;
   }
 
@@ -204,10 +236,19 @@ export function IncomingEditor() {
     let live = true;
     (async () => {
       try {
-        const opts = await api.get<{ warehouses: Warehouse[]; categories: Category[] }>('/receivings/options');
+        const opts = await api.get<{
+          warehouses: Warehouse[];
+          categories: Category[];
+          groups?: ProductGroup[];
+          currencies?: CurrencyOption[];
+          rates?: Record<string, number>;
+        }>('/receivings/options');
         if (!live) return;
         setWarehouses(opts.warehouses);
         setCategories(opts.categories ?? []);
+        setProductGroups(opts.groups ?? []);
+        if (opts.currencies?.length) setCurrencies(opts.currencies);
+        setRates(opts.rates ?? {});
         if (editing) {
           const r = await api.get<Existing>(`/receivings/${id}`);
           if (!live) return;
@@ -220,24 +261,31 @@ export function IncomingEditor() {
             deliveryRefNo: r.deliveryRefNo ?? '',
             invoiceRefNo: r.invoiceRefNo ?? '',
             notes: r.notes ?? '',
+            currency: r.currency ?? 'PHP',
+            exchangeRate: r.exchangeRate ? String(r.exchangeRate) : '',
           };
           setHeader(h);
+          /** A typed cost as it was typed — in the report's currency. */
+          const asTyped = (i: Existing['items'][number]) => String((h.currency !== 'PHP' ? i.typedUnitCost : null) ?? i.unitCost);
           if (r.orderId) {
             setMode('order');
             await loadOrder(r.orderId, r.id);
             const q: Record<string, string> = {};
             const g: Record<string, string> = {};
+            const k: Record<string, string> = {};
             const c: Record<string, string> = {};
             for (const i of r.items) {
               if (!i.orderItemId) continue;
               q[i.orderItemId] = String(i.quantity);
-              if (i.categoryId) g[i.orderItemId] = i.categoryId;
-              if (i.costTyped) c[i.orderItemId] = String(i.unitCost);
+              if (i.productGroup) g[i.orderItemId] = i.productGroup;
+              if (i.categoryId) k[i.orderItemId] = i.categoryId;
+              if (i.costTyped) c[i.orderItemId] = asTyped(i);
             }
             setReceive(q);
-            setGroups(g);
+            setGroups((was) => ({ ...was, ...g }));
+            setCats(k);
             setCosts(c);
-            setSaved(JSON.stringify({ mode: 'order', h, q, g, c }));
+            setSaved(JSON.stringify({ mode: 'order', h, q, g: { ...g }, k, c }));
           } else {
             setMode('none');
             setFromSupplier(!!r.supplier);
@@ -245,14 +293,15 @@ export function IncomingEditor() {
             const ls = r.items.map((i) => ({
               key: newKey(),
               item: i.itemId
-                ? { id: i.itemId, code: i.code ?? '', name: i.name ?? i.description, partNumber: null, unit: i.unit, standardCost: 0, category: i.category ?? null }
+                ? { id: i.itemId, code: i.code ?? '', name: i.name ?? i.description, partNumber: null, unit: i.unit, standardCost: 0, category: i.category ?? null, productGroup: i.itemGroup ?? null }
                 : null,
               partNumber: i.partNumber ?? '',
               description: i.description,
               unit: i.unit,
               quantity: String(i.quantity),
-              unitCost: String(i.unitCost),
+              unitCost: asTyped(i),
               categoryId: i.categoryId ?? i.category?.id ?? '',
+              productGroup: i.productGroup ?? '',
             }));
             setFree(ls.length ? ls : [blankFree()]);
             setSaved(JSON.stringify({ mode: 'none', h, ls: ls.map(({ key: _k, ...rest }) => rest) }));
@@ -280,14 +329,18 @@ export function IncomingEditor() {
   // ── Figures ────────────────────────────────────────────────────────────────
 
   const orderLinesSent = (order?.lines ?? []).filter((l) => Number(receive[l.id]) > 0);
-  /** What an order line is taken in at: the peso cost typed, else the order's. */
-  const costOf = (l: OrderLine) => ((costs[l.id] ?? '') !== '' ? Number(costs[l.id]) : l.unitCost);
+  // A typed cost is in the report's currency (2026-11-25), taken into stock in pesos.
+  const foreign = header.currency !== 'PHP';
+  const rate = foreign ? Number(header.exchangeRate) || 0 : 1;
+  const inPesos = (v: number) => cents(v * rate);
+  /** What an order line is taken in at, in pesos: the cost typed, else the order's. */
+  const costOf = (l: OrderLine) => ((costs[l.id] ?? '') !== '' ? inPesos(Number(costs[l.id])) : l.unitCost);
   const freeSent = free.filter((l) => l.item || l.quantity || l.description);
   const value = useMemo(() => {
     if (mode === 'order') return cents(orderLinesSent.reduce((s, l) => s + Number(receive[l.id]) * (costOf(l) ?? 0), 0));
-    return cents(freeSent.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unitCost) || 0), 0));
+    return cents(freeSent.reduce((s, l) => s + (Number(l.quantity) || 0) * inPesos(Number(l.unitCost) || 0), 0));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, orderLinesSent, receive, freeSent, costs]);
+  }, [mode, orderLinesSent, receive, freeSent, costs, rate]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -301,7 +354,7 @@ export function IncomingEditor() {
 
   const snapshot = () =>
     mode === 'order'
-      ? JSON.stringify({ mode, h: header, q: receive, g: groups, c: costs })
+      ? JSON.stringify({ mode, h: header, q: receive, g: groups, k: cats, c: costs })
       : JSON.stringify({ mode, h: header, ls: free.map(({ key: _k, ...rest }) => rest) });
   const dirty = saved !== null && (saved === '' ? orderLinesSent.length > 0 || freeSent.length > 0 : snapshot() !== saved);
   useUnsavedChanges(dirty && !busy);
@@ -313,6 +366,8 @@ export function IncomingEditor() {
   // A project's goods land where somebody chose (2026-11-06): a warehouse, or delivered to site.
   const forProject = mode === 'order' && order?.kind === 'DIRECT_TO_JOB' && (!!order.job || !!order.batch);
   const intoWarehouse = !!header.warehouseId && header.warehouseId !== SITE;
+  const typedAny = mode === 'order' ? orderLinesSent.some((l) => (costs[l.id] ?? '') !== '') : freeSent.length > 0;
+  if (foreign && typedAny && !(rate > 0)) problems.push(`Type the rate to PHP for ${header.currency}`);
   if (mode === 'order') {
     if (!order) problems.push('Choose the purchase order');
     else if (forProject && !header.warehouseId) problems.push('Say where the goods went — into a warehouse, or delivered to site');
@@ -331,7 +386,7 @@ export function IncomingEditor() {
       if (!l.item && !l.partNumber.trim() && !l.description.trim()) problems.push(`Line ${n + 1}: choose the item, or type its part number or description`);
       else if (!(Number(l.quantity) > 0)) problems.push(`Line ${n + 1}: quantity must be more than zero`);
       else if (l.unitCost === '') problems.push(`Line ${n + 1}: type the unit cost (0 for a free item)`);
-      else if (!l.item && !l.categoryId) problems.push(`Line ${n + 1}: choose its product group — a new item goes into inventory under one`);
+      else if (!l.item && !l.productGroup) problems.push(`Line ${n + 1}: choose its product group — it is a new item`);
     });
   }
 
@@ -343,6 +398,8 @@ export function IncomingEditor() {
       deliveryRefNo: header.deliveryRefNo.trim() || null,
       invoiceRefNo: header.invoiceRefNo.trim() || null,
       notes: header.notes.trim() || null,
+      currency: header.currency,
+      exchangeRate: foreign && rate > 0 ? rate : null,
       ...(existing ? { version: existing.updatedAt } : {}),
     };
     if (mode === 'order') {
@@ -352,7 +409,9 @@ export function IncomingEditor() {
         items: orderLinesSent.map((l) => ({
           orderItemId: l.id,
           quantity: Number(receive[l.id]),
-          categoryId: groups[l.id] || null,
+          // The group only where it is new or changed from the item's own.
+          productGroup: groups[l.id] && groups[l.id] !== (l.productGroup ?? '') ? groups[l.id] : null,
+          categoryId: cats[l.id] || null,
           // Typed over the order's peso cost; left out, the order's stands.
           ...((costs[l.id] ?? '') !== '' ? { unitCost: Number(costs[l.id]) } : {}),
         })),
@@ -372,6 +431,7 @@ export function IncomingEditor() {
         quantity: Number(l.quantity),
         unitCost: Number(l.unitCost) || 0,
         categoryId: l.categoryId || null,
+        productGroup: l.productGroup && l.productGroup !== (l.item?.productGroup ?? '') ? l.productGroup : null,
       })),
     };
   }
@@ -602,6 +662,31 @@ export function IncomingEditor() {
               <Field label="Invoice no.">
                 <input value={header.invoiceRefNo} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, invoiceRefNo: e.target.value }))} />
               </Field>
+              <Field label="Currency" hint={mode === 'order' ? 'Of the unit costs you type over the order’s' : 'Of the unit costs on the lines'}>
+                <select
+                  value={header.currency}
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    setHeader((h) => ({ ...h, currency: code, exchangeRate: code === 'PHP' ? '' : rates[code] ? String(rates[code]) : '' }));
+                  }}
+                >
+                  {currencies.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {foreign && (
+                <Field
+                  label="Rate to PHP"
+                  required
+                  hint={`Pesos per ${header.currency} — stock is kept in pesos`}
+                  error={attempted && typedAny && !(rate > 0) ? `Type the rate to PHP for ${header.currency}` : null}
+                >
+                  <NumberInput kind="decimal" value={header.exchangeRate} min={0} onChange={(e) => setHeader((h) => ({ ...h, exchangeRate: e.target.value }))} />
+                </Field>
+              )}
             </div>
             <div className="qe-rows">
               {mode === 'none' && (
@@ -651,7 +736,7 @@ export function IncomingEditor() {
                         <th className="right">Received</th>
                         <th className="right">Left</th>
                         <th className="right">Receive now</th>
-                        <th className="right">Unit cost (PHP)</th>
+                        <th className="right">Unit cost{foreign ? ` (${header.currency} typed)` : ' (PHP)'}</th>
                         <th className="right">Amount (PHP)</th>
                       </tr>
                     </thead>
@@ -671,15 +756,18 @@ export function IncomingEditor() {
                             <td>
                               {l.nature === 'SERVICE' ? (
                                 <span className="muted">Service rendered — no stock</span>
-                              ) : l.category ? (
-                                l.category.name
                               ) : (
-                                <GroupSelect
-                                  label={`Product group — ${l.name ?? l.description}`}
-                                  categories={categories}
+                                <ProductGroupCell
+                                  label={l.name ?? l.description}
+                                  groups={productGroups}
                                   value={groups[l.id] ?? ''}
+                                  itemGroup={l.productGroup}
                                   required={l.newItem && intoWarehouse}
                                   onChange={(v) => setGroups((g) => ({ ...g, [l.id]: v }))}
+                                  category={l.category?.name ?? null}
+                                  categories={l.newItem ? categories : null}
+                                  categoryId={cats[l.id] ?? ''}
+                                  onCategory={(v) => setCats((c) => ({ ...c, [l.id]: v }))}
                                 />
                               )}
                             </td>
@@ -704,15 +792,17 @@ export function IncomingEditor() {
                             <td className="right">
                               <NumberInput
                                 kind="money"
-                                aria-label={`Unit cost in pesos — ${l.name ?? l.description}`}
-                                placeholder={l.unitCost === null ? 'type in PHP' : formatMoney(l.unitCost)}
+                                aria-label={`Unit cost in ${header.currency} — ${l.name ?? l.description}`}
+                                placeholder={l.unitCost === null ? `type in ${header.currency}` : formatMoney(l.unitCost)}
                                 value={costs[l.id] ?? ''}
                                 min={0}
                                 onChange={(e) => setCosts((c) => ({ ...c, [l.id]: e.target.value }))}
                               />
                               <div className="faint">
                                 {(costs[l.id] ?? '') !== ''
-                                  ? 'typed — overrides the order'
+                                  ? foreign
+                                    ? `typed — ${formatMoney(costOf(l) ?? 0)} at ${header.exchangeRate || '?'}`
+                                    : 'typed — overrides the order'
                                   : l.costBasis === 'landed'
                                     ? 'landed cost on the order'
                                     : l.costBasis === 'request'
@@ -744,8 +834,8 @@ export function IncomingEditor() {
                       <th>Product group</th>
                       <th>Unit</th>
                       <th className="right">Qty</th>
-                      <th className="right">Unit cost</th>
-                      <th className="right">Amount</th>
+                      <th className="right">Unit cost ({header.currency})</th>
+                      <th className="right">Amount (PHP)</th>
                       <th />
                     </tr>
                   </thead>
@@ -768,6 +858,7 @@ export function IncomingEditor() {
                                         unit: x.unit || item?.unit || '',
                                         unitCost: x.unitCost || (item ? String(item.standardCost) : ''),
                                         categoryId: x.categoryId || item?.category?.id || '',
+                                        productGroup: item ? item.productGroup || x.productGroup : x.productGroup,
                                       }
                                     : x,
                                 ),
@@ -793,17 +884,18 @@ export function IncomingEditor() {
                           />
                         </td>
                         <td>
-                          {l.item?.category ? (
-                            l.item.category.name
-                          ) : (
-                            <GroupSelect
-                              label={`Product group — line ${n + 1}`}
-                              categories={categories}
-                              value={l.categoryId}
-                              required={!l.item}
-                              onChange={(v) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, categoryId: v } : x)))}
-                            />
-                          )}
+                          <ProductGroupCell
+                            label={`line ${n + 1}`}
+                            groups={productGroups}
+                            value={l.productGroup}
+                            itemGroup={l.item?.productGroup ?? null}
+                            required={!l.item}
+                            onChange={(v) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, productGroup: v } : x)))}
+                            category={l.item?.category?.name ?? null}
+                            categories={l.item ? null : categories}
+                            categoryId={l.categoryId}
+                            onCategory={(v) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, categoryId: v } : x)))}
+                          />
                         </td>
                         <td className="inc-unit-cell">
                           <input
@@ -824,13 +916,14 @@ export function IncomingEditor() {
                         <td className="right inc-num-cell">
                           <NumberInput
                             kind="money"
-                            aria-label={`Unit cost — line ${n + 1}`}
+                            aria-label={`Unit cost in ${header.currency} — line ${n + 1}`}
                             value={l.unitCost}
                             min={0}
                             onChange={(e) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, unitCost: e.target.value } : x)))}
                           />
+                          {foreign && l.unitCost !== '' && <div className="faint">{formatMoney(inPesos(Number(l.unitCost) || 0))} a unit</div>}
                         </td>
-                        <td className="right mono">{formatMoney(cents((Number(l.quantity) || 0) * (Number(l.unitCost) || 0)))}</td>
+                        <td className="right mono">{formatMoney(cents((Number(l.quantity) || 0) * inPesos(Number(l.unitCost) || 0)))}</td>
                         <td>
                           <button
                             type="button"
@@ -1034,31 +1127,62 @@ function ItemLookup({
 }
 
 /**
- * The product group a line goes into inventory under (2026-10-20, the owner's
- * call): required where the line files a new item; on an item with none it
- * fills that item's.
+ * A line's product group — the quotation's list (2026-11-25, the owner's
+ * call: "Incoming Report product group, same with quotation product group"):
+ * required where the line files a new item, and changeable on an item that
+ * has one (the item takes the change when the report is received). Under it,
+ * the item's inventory category, or — for a new item — an optional one.
  */
-function GroupSelect({
+function ProductGroupCell({
   label,
-  categories,
+  groups,
   value,
+  itemGroup,
   required,
   onChange,
+  category,
+  categories,
+  categoryId,
+  onCategory,
 }: {
   label: string;
-  categories: Category[];
+  groups: ProductGroup[];
   value: string;
+  itemGroup: string | null;
   required: boolean;
   onChange: (v: string) => void;
+  category: string | null;
+  categories: Category[] | null;
+  categoryId: string;
+  onCategory: (v: string) => void;
 }) {
+  const listed = groups.some((g) => g.name === value);
+  const chosen = groups.find((g) => g.name === value);
   return (
-    <select aria-label={label} value={value} required={required} onChange={(e) => onChange(e.target.value)}>
-      <option value="">{required ? '— choose —' : '— none —'}</option>
-      {categories.map((c) => (
-        <option key={c.id} value={c.id}>
-          {c.code} — {c.name}
-        </option>
-      ))}
-    </select>
+    <div className="inc-group-cell">
+      <select aria-label={`Product group — ${label}`} value={value} required={required} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{required ? '— choose —' : '— none —'}</option>
+        {value && !listed && <option value={value}>{value} — not on the list</option>}
+        {groups.map((g) => (
+          <option key={g.name} value={g.name}>
+            {g.name}
+          </option>
+        ))}
+      </select>
+      {chosen?.description && <div className="faint">{chosen.description}</div>}
+      {itemGroup && value && value !== itemGroup && <div className="faint">changes the item’s {itemGroup}</div>}
+      {categories ? (
+        <select aria-label={`Inventory category — ${label}`} value={categoryId} onChange={(e) => onCategory(e.target.value)}>
+          <option value="">Inventory category — none</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.code} — {c.name}
+            </option>
+          ))}
+        </select>
+      ) : (
+        category && <div className="faint">Category: {category}</div>
+      )}
+    </div>
   );
 }

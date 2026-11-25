@@ -21,9 +21,8 @@ export interface SupplierRef {
  * Search as you type against `/suppliers/lookup?q=` (debounced; active
  * suppliers only, by name or code, 25 at a time — which is why a `<select>`
  * of the whole master was the wrong shape: the first 25 of 300 is not a
- * choice). The lookup needs `gchain.suppliers.view_all`; the form that
- * offers the picker decides whether the viewer holds it, as every form here
- * already did. A name is kept as typed — suppliers are filed as their
+ * choice). The lookup opens to whoever writes on a G-CHAIN or G-FIN form,
+ * or reads the supplier master (`requireSupplierPicker`, 2026-11-25). A name is kept as typed — suppliers are filed as their
  * letterhead spells them ("Atlas Copco (Philippines) Inc."), and the lookup
  * matches case-blind anyway.
  *
@@ -43,8 +42,7 @@ export interface SupplierRef {
  * against a lookup that has not answered: the offer waits for the answer to
  * what is typed, so a quick click cannot file a company the lookup was about
  * to find. When every match is already on the list it says so (whoever the
- * viewer is), and when the lookup fails — a 403 for a role without
- * `gchain.suppliers.view_all`, a dropped connection — it says "Suppliers
+ * viewer is), and when the lookup fails — a 403, a dropped connection — it says "Suppliers
  * could not be listed" and offers no add button, because "nothing matches"
  * is not what a failed lookup means.
  *

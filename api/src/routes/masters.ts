@@ -24,6 +24,7 @@ import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/
 import { clearPhoto, setPhoto } from '../shared/catalogue';
 import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
+import { requireSupplierPicker } from '../shared/pickers';
 import { audit } from '../shared/audit';
 import { deleteGroup, deletedGroupKeys, FALLBACK_GROUP, groupKey, setDeletedGroupKeys } from '../shared/quotationGroups';
 import { activityTypeKey } from '../shared/activityTypes';
@@ -289,7 +290,7 @@ supplierRoutes.get(
 
 supplierRoutes.get(
   '/lookup',
-  require_('gchain.suppliers.view_all'),
+  requireSupplierPicker,
   handler(async (req, res) => {
     const term = String(req.query.q ?? '').trim();
     res.json(
@@ -887,6 +888,14 @@ itemRoutes.get(
 
 const ITEM_TYPES = ['MATERIAL', 'EQUIPMENT', 'CONSUMABLE', 'SERVICE', 'TOOL'] as const;
 
+/** An item's product group: an ACTIVE quotation group, in the master's spelling (2026-11-25). */
+async function itemProductGroup(name: string | null | undefined): Promise<string | null> {
+  if (!name?.trim()) return null;
+  const g = await prisma.quotationGroup.findFirst({ where: { key: groupKey(name), isActive: true }, select: { name: true } });
+  if (!g) throw badRequest(`“${name}” is not a product group on the list — Admin › Categories › Quotation groups`);
+  return g.name;
+}
+
 const itemSchema = z.object({
   code: z.string().trim().optional(),
   partNumber: z.string().trim().optional().nullable(),
@@ -896,6 +905,8 @@ const itemSchema = z.object({
   description: z.string().optional().nullable(),
   itemType: z.enum(ITEM_TYPES).default('MATERIAL'),
   categoryId: z.string().optional().nullable(),
+  /** The product group, from the quotation's list (2026-11-25). */
+  productGroup: z.string().trim().max(120).optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
   unit: z.string().trim().min(1).default('pcs'),
   standardCost: z.number().nonnegative().optional().nullable(),
@@ -926,6 +937,7 @@ itemRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(itemSchema, req.body);
+    const productGroup = await itemProductGroup(body.productGroup);
 
     const item = await prisma.$transaction(async (tx) => {
       const code = body.code || (await nextNumber('item', tx));
@@ -941,6 +953,7 @@ itemRoutes.post(
           description: body.description || null,
           itemType: body.itemType,
           categoryId: body.categoryId || null,
+          productGroup,
           costCategoryId: body.costCategoryId || null,
           unit: body.unit,
           standardCost: dec(body.standardCost),
@@ -998,6 +1011,10 @@ itemRoutes.patch(
     }
     for (const f of ['categoryId', 'costCategoryId', 'preferredSupplierId'] as const) {
       if (body[f] !== undefined) data[f] = body[f] || null;
+    }
+    // The group an item already carries stays allowed though switched off since.
+    if (body.productGroup !== undefined) {
+      data.productGroup = body.productGroup && body.productGroup === before.productGroup ? before.productGroup : await itemProductGroup(body.productGroup);
     }
     if (body.itemType !== undefined) data.itemType = body.itemType;
     if (body.unit !== undefined) data.unit = body.unit;

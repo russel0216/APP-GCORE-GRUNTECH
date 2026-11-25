@@ -566,6 +566,13 @@
 .inc-unit-cell input {
   width: 5rem;
 }
+/* A line's product group over its inventory category (2026-11-25). */
+.inc-group-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 13rem;
+}
 .inc-num-cell input {
   width: 8rem;
 }

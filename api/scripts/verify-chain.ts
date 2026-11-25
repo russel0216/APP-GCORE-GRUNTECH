@@ -5441,21 +5441,24 @@ async function main() {
         warehouseId: warehouse.id,
         items: [{ partNumber: typedPart, description: `${TAG} typed valve`, unit: 'set', quantity: 1, unitCost: 50 }],
       };
-      // A new item needs its product group (2026-10-20): refused without one,
-      // filed under it with one; the next report finds the item and asks none.
-      const group = await prisma.itemCategory.findFirstOrThrow({ orderBy: { sortOrder: 'asc' } });
+      // A new item needs its product group — the QUOTATION's list since
+      // 2026-11-25: refused without one or with one not on the list, filed
+      // under it (in the master's spelling) with one; the next report finds
+      // the item and asks none.
+      const group = await prisma.quotationGroup.findFirstOrThrow({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
       const noGroup = await api(receiverToken, 'POST', '/receivings', typedBody);
-      const t1 = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ ...typedBody.items[0], categoryId: group.id }] });
+      const offList = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ ...typedBody.items[0], productGroup: `${TAG} not a group` }] });
+      const t1 = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ ...typedBody.items[0], productGroup: group.name.toLowerCase() }] });
       const t2 = await api(receiverToken, 'POST', '/receivings', typedBody);
       const made = await prisma.item.findMany({ where: { partNumber: typedPart } });
       const lines = await prisma.receivingItem.findMany({ where: { receivingId: { in: [String(t1.body.id), String(t2.body.id)] } } });
       const blank = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ quantity: 1, unitCost: 1 }] });
       check(
-        'a line typed without picking an item files it once in the item master, under the product group it names, and the next report takes it',
-        noGroup.status === 400 && /product group/.test(String(noGroup.body.error)) &&
-          t1.status === 201 && t2.status === 201 && made.length === 1 && made[0].unit === 'set' && made[0].categoryId === group.id &&
+        'a line typed without picking an item files it once in the item master, under the quotation product group it names, and the next report takes it',
+        noGroup.status === 400 && /product group/.test(String(noGroup.body.error)) && offList.status === 400 &&
+          t1.status === 201 && t2.status === 201 && made.length === 1 && made[0].unit === 'set' && made[0].productGroup === group.name &&
           lines.length === 2 && lines.every((l) => l.itemId === made[0].id) && blank.status === 400,
-        `${noGroup.status} ${String(noGroup.body.error)} ${t1.status}/${t2.status} items ${made.length} ${made[0]?.categoryId} lines ${lines.map((l) => l.itemId).join(',')} blank ${blank.status}`,
+        `${noGroup.status} ${String(noGroup.body.error)} off-list ${offList.status} ${t1.status}/${t2.status} items ${made.length} ${made[0]?.productGroup} lines ${lines.map((l) => l.itemId).join(',')} blank ${blank.status}`,
       );
       const typedPaper = await printed(receiverToken, `/receivings/${String(t1.body.id)}/pdf?attachments=0`);
       const typedText = flat(typedPaper.text);
@@ -5465,7 +5468,55 @@ async function main() {
           !/UNIT COST|AMOUNT \(/i.test(typedText) && !typedText.includes('50.00'),
         typedText.slice(0, 500),
       );
-      await prisma.receiving.deleteMany({ where: { id: { in: [String(t1.body.id), String(t2.body.id)] } } });
+      // The group is CHANGED on an item from the Incoming (2026-11-25): the
+      // item takes it when the report is received, audited on the item.
+      const other = await prisma.quotationGroup.findFirstOrThrow({ where: { isActive: true, name: { not: group.name } }, orderBy: { sortOrder: 'asc' } });
+      const t3 = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ ...typedBody.items[0], itemId: made[0].id, productGroup: other.name }] });
+      const before3 = await prisma.item.findUniqueOrThrow({ where: { id: made[0].id } });
+      await prisma.receiving.update({ where: { id: String(t3.body.id) }, data: { status: 'PENDING_APPROVAL' } });
+      await settleReceiving(String(t3.body.id), 'APPROVED');
+      const after3 = await prisma.item.findUniqueOrThrow({ where: { id: made[0].id } });
+      const groupAudit = await prisma.auditLog.count({ where: { entityType: 'item', entityId: made[0].id, action: 'UPDATED', summary: { contains: other.name } } });
+      check(
+        'a product group changed on an Incoming line is written onto its item once the report is received, audited',
+        t3.status === 201 && before3.productGroup === group.name && after3.productGroup === other.name && groupAudit === 1,
+        `${t3.status} ${String(t3.body.error ?? '')} ${before3.productGroup} → ${after3.productGroup}, audit ${groupAudit}`,
+      );
+
+      // A typed cost in another currency (2026-11-25): refused without a
+      // rate, taken into stock in PESOS at the report's rate, the figure as
+      // typed kept beside it.
+      const usdNoRate = await api(receiverToken, 'POST', '/receivings', { ...typedBody, currency: 'USD', items: [{ ...typedBody.items[0], itemId: made[0].id }] });
+      const savedRates = await prisma.setting.findUnique({ where: { key: 'quotation.exchangeRates' } });
+      const usd = await api(receiverToken, 'POST', '/receivings', { ...typedBody, currency: 'USD', exchangeRate: 58.25, items: [{ ...typedBody.items[0], itemId: made[0].id, unitCost: 12.5 }] });
+      const usdLine = usd.status === 201 ? await prisma.receivingItem.findFirst({ where: { receivingId: String(usd.body.id) } }) : null;
+      const usdRow = usd.status === 201 ? await prisma.receiving.findUnique({ where: { id: String(usd.body.id) } }) : null;
+      const unknown = await api(receiverToken, 'POST', '/receivings', { ...typedBody, currency: 'XYZ', exchangeRate: 1, items: [{ ...typedBody.items[0], itemId: made[0].id }] });
+      check(
+        'an Incoming typed in USD is refused without a rate (when Settings has none) and taken in at pesos with one — 12.50 × 58.25 = 728.13, the 12.50 kept',
+        (savedRates && Number((savedRates.value as Record<string, unknown>).USD) > 0 ? usdNoRate.status === 201 : usdNoRate.status === 400) &&
+          usd.status === 201 && usdRow?.currency === 'USD' && num(usdRow?.exchangeRate ?? 0) === 58.25 &&
+          num(usdLine?.unitCost ?? 0) === 728.13 && num(usdLine?.typedUnitCost ?? 0) === 12.5 && unknown.status === 400,
+        `no rate ${usdNoRate.status} ${String(usdNoRate.body.error ?? '')}; ${usd.status} ${usdRow?.currency} ${usdRow?.exchangeRate} line ${usdLine?.unitCost}/${usdLine?.typedUnitCost}; XYZ ${unknown.status}`,
+      );
+
+      // A warehouse hand with no supplier right still lists suppliers on the
+      // form (2026-11-25, "Receive from — supplier could not be listed").
+      const lookup = await api(receiverToken, 'GET', '/suppliers/lookup?q=a');
+      const stranger = await mkUser('Verify No Rights', 'norights@verifyc.local', (await makeRole('zzchain_norights', 'ZZ No rights', [])).id);
+      const strangerLookup = await api(signToken(stranger.id, stranger.email), 'GET', '/suppliers/lookup?q=a');
+      check(
+        'the supplier picker answers whoever raises an Incoming report without a supplier right, and refuses a login with no right that picks one',
+        lookup.status === 200 && Array.isArray(lookup.body) && strangerLookup.status === 403,
+        `${lookup.status} / ${strangerLookup.status}`,
+      );
+      await prisma.user.delete({ where: { id: stranger.id } });
+
+      await prisma.receiving.deleteMany({
+        where: { id: { in: [t1, t2, t3, usdNoRate, usd].filter((r) => r.status === 201).map((r) => String(r.body.id)) } },
+      });
+      await prisma.inventoryTransaction.deleteMany({ where: { itemId: { in: made.map((m) => m.id) } } });
+      await prisma.inventoryBalance.deleteMany({ where: { itemId: { in: made.map((m) => m.id) } } });
       await prisma.auditLog.deleteMany({ where: { entityType: 'item', entityId: { in: made.map((m) => m.id) } } });
       await prisma.item.deleteMany({ where: { id: { in: made.map((m) => m.id) } } });
     }

@@ -174,7 +174,7 @@ export async function restateReceiptLine(
   const cost = centavo(newCost);
   const claimed = await tx.receivingItem.updateMany({
     where: { id: line.id, unitCost: line.unitCost },
-    data: { unitCost: new Prisma.Decimal(cost), ...(opts.typed === undefined ? {} : { costTyped: opts.typed }) },
+    data: { unitCost: new Prisma.Decimal(cost), typedUnitCost: null, ...(opts.typed === undefined ? {} : { costTyped: opts.typed }) },
   });
   if (!claimed.count) return false;
   if (Math.abs(before - cost) < 0.005) return true;

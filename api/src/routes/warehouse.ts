@@ -14,6 +14,9 @@ import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shar
 import { isSiteWarehouse, siteWarehouse } from '../shared/siteWarehouse';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { receiveQuoteStock, unreceiveQuoteStock } from '../shared/quotationBuying';
+import { BASE_CURRENCY, exchangeRates, storedRate } from '../shared/exchangeRates';
+import { QUOTATION_CURRENCIES, QUOTATION_CURRENCY_CODES } from '../shared/quotation';
+import { groupKey } from '../shared/quotationGroups';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { noRateMessage, orderInPesos, receiptUnitCost, restateReceiptLine, RESTATE_SELECT } from '../shared/receiptCost';
 import { notify } from '../shared/notifications';
@@ -279,7 +282,17 @@ receivingRoutes.get(
       // The product groups a line files a new item under (2026-10-20).
       prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, code: true, name: true } }),
     ]);
-    res.json({ warehouses, orders, categories });
+    // The product groups are the quotation's (2026-11-25), and the currencies
+    // a typed cost may be in, with Company Settings' rates to start from.
+    const [groups, rates] = await Promise.all([
+      prisma.quotationGroup.findMany({
+        where: { isActive: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        select: { name: true, description: true, brand: true },
+      }),
+      exchangeRates(),
+    ]);
+    res.json({ warehouses, orders, categories, groups, currencies: QUOTATION_CURRENCIES, rates, baseCurrency: BASE_CURRENCY });
   }),
 );
 
@@ -318,7 +331,7 @@ receivingRoutes.get(
       },
       orderBy: { name: 'asc' },
       take: 20,
-      select: { id: true, code: true, name: true, partNumber: true, unit: true, standardCost: true, category: { select: { id: true, code: true, name: true } } },
+      select: { id: true, code: true, name: true, partNumber: true, unit: true, standardCost: true, productGroup: true, category: { select: { id: true, code: true, name: true } } },
     });
     res.json(items.map((i) => ({ ...i, standardCost: num(i.standardCost) })));
   }),
@@ -342,7 +355,7 @@ receivingRoutes.get(
         warehouse: { select: { id: true, name: true } },
         items: {
           include: {
-            item: { select: { id: true, code: true, category: { select: { id: true, code: true, name: true } } } },
+            item: { select: { id: true, code: true, productGroup: true, category: { select: { id: true, code: true, name: true } } } },
             requestItem: { select: { estimatedCost: true } },
           },
           orderBy: { id: 'asc' },
@@ -363,11 +376,14 @@ receivingRoutes.get(
     // A typed line the item master already knows takes that item's product
     // group; one it does not will be filed new and needs one (2026-10-20).
     const matched = new Map<string, { id: string; code: string; name: string } | null>();
+    const matchedGroup = new Map<string, string | null>();
     for (const i of order.items) {
       if (i.item) continue;
       const id = await matchTypedItem(prisma, i);
-      matched.set(i.id, id ? await prisma.item.findUnique({ where: { id }, select: { category: { select: { id: true, code: true, name: true } } } }).then((r) => r?.category ?? null) : null);
-      if (!id) matched.delete(i.id);
+      if (!id) continue;
+      const found = await prisma.item.findUnique({ where: { id }, select: { productGroup: true, category: { select: { id: true, code: true, name: true } } } });
+      matched.set(i.id, found?.category ?? null);
+      matchedGroup.set(i.id, found?.productGroup ?? null);
     }
     res.json({
       id: order.id,
@@ -406,6 +422,8 @@ receivingRoutes.get(
           costBasis: cost.basis,
           /** The item's product group; null where it has none. */
           category: i.item ? i.item.category : (matched.get(i.id) ?? null),
+          /** The item's product group (the quotation's list, 2026-11-25); null where it has none. */
+          productGroup: i.item ? i.item.productGroup : (matchedGroup.get(i.id) ?? null),
           /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
           newItem: i.nature !== 'SERVICE' && !i.item && !matched.has(i.id),
           /** A service is received as "service rendered" — it enters no stock (2026-10-21). */
@@ -517,11 +535,11 @@ async function loadReceiving(id: string) {
         include: {
           orderItem: {
             include: {
-              item: { select: { id: true, code: true, name: true, category: { select: { id: true, code: true, name: true } } } },
+              item: { select: { id: true, code: true, name: true, productGroup: true, category: { select: { id: true, code: true, name: true } } } },
               costCategory: { select: { id: true, name: true } },
             },
           },
-          item: { select: { id: true, code: true, name: true, partNumber: true, unit: true, category: { select: { id: true, code: true, name: true } } } },
+          item: { select: { id: true, code: true, name: true, partNumber: true, unit: true, productGroup: true, category: { select: { id: true, code: true, name: true } } } },
           category: { select: { id: true, code: true, name: true } },
           location: { select: { id: true, code: true } },
         },
@@ -541,6 +559,9 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
   // The product group: the item's own once it has one, else what the line named.
   const itemCategory = i.orderItem ? i.orderItem.item?.category : i.item?.category;
   const category = itemCategory ?? i.category ?? null;
+  // The product group (the quotation's list, 2026-11-25): what the line named, else its item's.
+  const itemGroup = (i.orderItem ? i.orderItem.item?.productGroup : i.item?.productGroup) ?? null;
+  const productGroup = i.productGroup ?? itemGroup;
   if (i.orderItem) {
     return {
       code: i.orderItem.item?.code ?? i.orderItem.partNumber ?? null,
@@ -550,6 +571,8 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
       unit: i.orderItem.unit,
       category,
       categoryId: i.categoryId,
+      productGroup,
+      itemGroup,
       service: i.orderItem.nature === 'SERVICE',
     };
   }
@@ -561,6 +584,8 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
     unit: i.unit ?? i.item?.unit ?? '',
     category,
     categoryId: i.categoryId,
+    productGroup,
+    itemGroup,
     service: false,
   };
 }
@@ -598,6 +623,7 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     // A received report's peso costs are corrected by Edit All (2026-10-23).
     canCorrectCost: receiving.status === 'RECEIVED' && can(me, 'gchain.receiving.edit_all'),
     approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById, null, { importation: isImportation(receiving) }) : null,
+    exchangeRate: receiving.exchangeRate === null ? null : num(receiving.exchangeRate),
     order: receiving.order
       ? { ...receiving.order, total: num(receiving.order.total), exchangeRate: receiving.order.exchangeRate === null ? null : num(receiving.order.exchangeRate) }
       : null,
@@ -613,6 +639,8 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
       remarks: i.remarks,
       quantity: num(i.quantity),
       unitCost: num(i.unitCost),
+      /** The cost as typed, in the report's currency, where that is not PHP. */
+      typedUnitCost: i.typedUnitCost === null ? null : num(i.typedUnitCost),
       /** The peso cost was typed on this report, over what the order says. */
       costTyped: i.costTyped,
       amount: cents(num(i.quantity) * num(i.unitCost)),
@@ -730,6 +758,9 @@ const receivingSchema = z.object({
    */
   toSite: z.boolean().optional(),
   receivedDate: z.string().optional().nullable(),
+  /** The currency the typed unit costs are in, and its rate to PHP (2026-11-25). */
+  currency: z.string().trim().toUpperCase().optional().nullable(),
+  exchangeRate: z.number().positive().optional().nullable(),
   deliveryRefNo: z.string().trim().optional().nullable(),
   invoiceRefNo: z.string().trim().optional().nullable(),
   notes: z.string().optional().nullable(),
@@ -743,8 +774,10 @@ const receivingSchema = z.object({
         description: z.string().trim().max(2000).optional().nullable(),
         unit: z.string().trim().max(40).optional().nullable(),
         quantity: z.number().positive(),
-        /** Pesos; on an order line, typed over what the order says (null: the order's). */
+        /** In the report's currency; on an order line, typed over what the order says (null: the order's). */
         unitCost: z.number().min(0).optional().nullable(),
+        /** The product group from the quotation's list (2026-11-25) — required where the line files a new item. */
+        productGroup: z.string().trim().max(120).optional().nullable(),
         locationId: z.string().optional().nullable(),
         /** The product group (item category) — required where the line files a new item (2026-10-20). */
         categoryId: z.string().optional().nullable(),
@@ -756,6 +789,20 @@ const receivingSchema = z.object({
     .min(1, 'Receive at least one line'),
 });
 type ReceivingBody = z.infer<typeof receivingSchema>;
+type NewItem = { name: string; partNumber: string | null; unit: string; categoryId: string | null; productGroup: string | null };
+
+/**
+ * The quotation groups named on a report's lines, by key, in the master's
+ * spelling — every one must be ACTIVE on Admin › Categories › Quotation groups.
+ */
+async function activeGroupNames(names: (string | null | undefined)[]) {
+  const keys = [...new Set(names.filter((v): v is string => !!v?.trim()).map((v) => groupKey(v)))];
+  const found = keys.length ? await prisma.quotationGroup.findMany({ where: { key: { in: keys }, isActive: true }, select: { key: true, name: true } }) : [];
+  const out = new Map(found.map((g) => [g.key, g.name]));
+  const missing = names.find((v) => v?.trim() && !out.has(groupKey(v)));
+  if (missing) throw badRequest(`“${missing}” is not a product group on the list — choose one, or ask for it in Admin › Categories › Quotation groups`);
+  return out;
+}
 
 /**
  * What a report may still receive of each order line: ordered less received
@@ -812,16 +859,34 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     deliveryRefNo: body.deliveryRefNo || null,
     invoiceRefNo: body.invoiceRefNo || null,
     notes: body.notes?.trim() || null,
+    currency: BASE_CURRENCY as string,
+    exchangeRate: null as Prisma.Decimal | null,
   };
-  // Every product group named must be on file.
+  // The currency typed costs are in (2026-11-25): PHP, else a listed one with a rate.
+  const currency = body.currency || BASE_CURRENCY;
+  if (!QUOTATION_CURRENCY_CODES.includes(currency)) throw badRequest(`${currency} is not a currency G-CORE lists`);
+  const rate = currency === BASE_CURRENCY ? null : storedRate(currency, body.exchangeRate, await exchangeRates());
+  if (currency !== BASE_CURRENCY && !rate) {
+    throw badRequest(`Type the rate to PHP for ${currency} — or set it in Company Settings › Exchange rates`);
+  }
+  /** A typed cost in pesos, to the centavo, and the figure as typed where it was foreign. */
+  const typedCost = (v: number) =>
+    rate ? { peso: rate.mul(v).toDecimalPlaces(2), typed: D(v) as Prisma.Decimal | null } : { peso: D(v), typed: null as Prisma.Decimal | null };
+  misc.currency = currency;
+  misc.exchangeRate = rate;
+  // A product group named must be one of the quotation's, ACTIVE (2026-11-25), in the master's spelling.
+  const groupNames = await activeGroupNames(body.items.map((l) => l.productGroup));
+  // Every inventory category named must be on file.
   const categoryIds = [...new Set(body.items.map((l) => l.categoryId).filter((v): v is string => !!v))];
   if (categoryIds.length) {
     const known = await prisma.itemCategory.count({ where: { id: { in: categoryIds } } });
     if (known !== categoryIds.length) throw badRequest('A product group named on a line is not on file');
   }
   const needsGroup = (n: number, what: string) =>
-    badRequest(`Line ${n + 1}: choose the product group ${what} goes into inventory under — it is a new item`);
+    badRequest(`Line ${n + 1}: choose the product group of ${what} — it is a new item`);
+  const groupOf = (l: ReceivingBody['items'][number]) => (l.productGroup ? groupNames.get(groupKey(l.productGroup))! : null);
   const extras = (l: ReceivingBody['items'][number]) => ({
+    productGroup: groupOf(l),
     categoryId: l.categoryId || null,
     locationId: l.locationId || null,
     serialNo: l.serialNo || null,
@@ -858,7 +923,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       for (const [n, l] of body.items.entries()) {
         const oi = byOrderItem.get(l.orderItemId!);
         // A service is rendered, never shelved: it files no item.
-        if (oi && oi.nature !== 'SERVICE' && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
+        if (oi && oi.nature !== 'SERVICE' && !oi.itemId && !l.productGroup && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
       }
     }
     // A line against an order is valued in PESOS (2026-10-23): the landed
@@ -869,7 +934,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     // with no rate and nothing typed is refused.
     const rows = body.items.map((l) => {
       const typed = l.unitCost !== undefined && l.unitCost !== null;
-      const cost = typed ? l.unitCost! : receiptUnitCost(order, byOrderItem.get(l.orderItemId!)!).unitCost;
+      const asTyped = typed ? typedCost(l.unitCost!) : null;
+      const cost = asTyped ? asTyped.peso : receiptUnitCost(order, byOrderItem.get(l.orderItemId!)!).unitCost;
       if (cost === null) throw badRequest(noRateMessage(order));
       return {
         orderItemId: l.orderItemId!,
@@ -878,7 +944,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
         description: null,
         unit: null,
         quantity: D(l.quantity),
-        unitCost: D(cost),
+        unitCost: asTyped ? asTyped.peso : D(cost as number),
+        typedUnitCost: asTyped?.typed ?? null,
         costTyped: typed,
         ...extras(l),
       };
@@ -886,7 +953,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     return {
       header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: landing },
       rows,
-      newItems: new Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>(),
+      newItems: new Map<number, NewItem>(),
       label: `against ${order.number}`,
     };
   }
@@ -909,10 +976,10 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
   // whose part number or code (else name) is what was typed, else a new item
   // filed in the item master when the report is saved (2026-10-16, the
   // owner's report: "Can't save").
-  const newItems = new Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>();
+  const newItems = new Map<number, NewItem>();
   const rows: Array<{
     orderItemId: null; itemId: string | null; partNumber: string | null; description: string | null; unit: string | null;
-    quantity: Prisma.Decimal; unitCost: Prisma.Decimal; categoryId: string | null; locationId: string | null; serialNo: string | null; batchNo: string | null; remarks: string | null;
+    quantity: Prisma.Decimal; unitCost: Prisma.Decimal; typedUnitCost: Prisma.Decimal | null; productGroup: string | null; categoryId: string | null; locationId: string | null; serialNo: string | null; batchNo: string | null; remarks: string | null;
   }> = [];
   for (const [n, l] of body.items.entries()) {
     if (l.orderItemId) throw badRequest(`Line ${n + 1}: there is no purchase order on this report`);
@@ -931,8 +998,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       if (found.length > 1) throw badRequest(`Line ${n + 1}: “${part ?? desc}” matches more than one item — pick it from the list`);
       item = found[0] ?? null;
       if (!item) {
-        if (!l.categoryId) throw needsGroup(n, `“${desc ?? part}”`);
-        newItems.set(n, { name: desc ?? part!, partNumber: part, unit: l.unit?.trim() || 'pcs', categoryId: l.categoryId });
+        if (!l.productGroup) throw needsGroup(n, `“${desc ?? part}”`);
+        newItems.set(n, { name: desc ?? part!, partNumber: part, unit: l.unit?.trim() || 'pcs', categoryId: l.categoryId || null, productGroup: groupOf(l) });
       }
     }
     rows.push({
@@ -942,7 +1009,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       description: desc || item?.name || part,
       unit: l.unit?.trim() || item?.unit || 'pcs',
       quantity: D(l.quantity),
-      unitCost: D(l.unitCost),
+      unitCost: typedCost(l.unitCost ?? 0).peso,
+      typedUnitCost: typedCost(l.unitCost ?? 0).typed,
       ...extras(l),
     });
   }
@@ -964,12 +1032,12 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
 async function fileNewItems(
   tx: Prisma.TransactionClient,
   rows: Array<{ itemId: string | null }>,
-  newItems: Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>,
+  newItems: Map<number, NewItem>,
   actorId: string,
 ) {
   for (const [n, it] of newItems) {
     const code = await nextNumber('item', tx);
-    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit, categoryId: it.categoryId, createdById: actorId } });
+    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit, categoryId: it.categoryId, productGroup: it.productGroup, createdById: actorId } });
     rows[n].itemId = created.id;
     await tx.auditLog.create({
       data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${it.name} added from an incoming report`, actorId },
@@ -984,6 +1052,41 @@ async function fileNewItems(
  * the caller's transaction, after its claim.
  */
 async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
+  await postReceivingGoods(tx, receivingId, actorId);
+  await writeLineGroups(tx, receivingId, actorId);
+}
+
+/**
+ * The product group a line named is written onto its item once the report is
+ * received (2026-11-25, the owner's call: changed on the Incoming, the item
+ * follows), each change audited on the item.
+ */
+async function writeLineGroups(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
+  const lines = await tx.receivingItem.findMany({
+    where: { receivingId, productGroup: { not: null } },
+    select: { productGroup: true, itemId: true, orderItem: { select: { itemId: true } }, receiving: { select: { number: true } } },
+  });
+  for (const l of lines) {
+    const itemId = l.itemId ?? l.orderItem?.itemId ?? null;
+    if (!itemId || !l.productGroup) continue;
+    const item = await tx.item.findUnique({ where: { id: itemId }, select: { code: true, productGroup: true } });
+    if (!item || item.productGroup === l.productGroup) continue;
+    await tx.item.update({ where: { id: itemId }, data: { productGroup: l.productGroup } });
+    await tx.auditLog.create({
+      data: {
+        entityType: 'item',
+        entityId: itemId,
+        action: 'UPDATED',
+        summary: `${item.code} product group: ${item.productGroup ?? 'none'} → ${l.productGroup} (from ${l.receiving.number})`,
+        before: { productGroup: item.productGroup },
+        after: { productGroup: l.productGroup },
+        actorId,
+      },
+    });
+  }
+}
+
+async function postReceivingGoods(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
   const receiving = await tx.receiving.findUniqueOrThrow({
     where: { id: receivingId },
     include: {
@@ -1844,7 +1947,7 @@ receivingRoutes.get(
           i.code ?? '',
           i.partNumber ?? '',
           i.name && i.description && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description ?? ''),
-          i.service ? 'Service rendered' : (i.category?.name ?? '—'),
+          i.service ? 'Service rendered' : (i.productGroup ?? i.category?.name ?? '—'),
           qty(i.quantity),
           i.unit ?? '',
         ]),
@@ -4629,6 +4732,7 @@ async function projectStockList(me: ResolvedUser, q: ListQuery) {
             code: true,
             partNumber: true,
             brand: true,
+            productGroup: true,
             name: true,
             description: true,
             unit: true,
@@ -4754,6 +4858,7 @@ async function orderStockList(me: ResolvedUser, q: ListQuery) {
             code: true,
             partNumber: true,
             brand: true,
+            productGroup: true,
             name: true,
             description: true,
             unit: true,
@@ -4863,6 +4968,7 @@ inventoryRoutes.get(
               code: true,
               partNumber: true,
               brand: true,
+            productGroup: true,
               name: true,
               description: true,
               unit: true,

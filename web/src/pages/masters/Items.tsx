@@ -54,6 +54,8 @@ interface ItemRow {
   isActive: boolean;
   notes: string | null;
   category: Ref | null;
+  /** The product group, from the quotation's list (2026-11-25). */
+  productGroup?: string | null;
   costCategory: Ref | null;
   preferredSupplier: Ref | null;
   /** Whether the viewer may change it — Edit All, or Edit Own on an item they added (2026-10-18). */
@@ -153,6 +155,7 @@ export function Items() {
         <span className="badge">{ITEM_TYPES.find((t) => t.value === i.itemType)?.label ?? i.itemType}</span>
       ),
     },
+    { key: 'productGroup', label: 'Product group', render: (i) => i.productGroup ?? <span className="faint">—</span> },
     { key: 'category', label: 'Category', render: (i) => i.category?.name ?? '—' },
     {
       key: 'costCategory',
@@ -320,6 +323,14 @@ export function ItemForm({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  /** The product groups on offer — the quotation's list, active ones (2026-11-25). */
+  const [groups, setGroups] = useState<{ name: string; description: string | null }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ name: string; description: string | null }[]>('/reference/quotation-groups?active=true')
+      .then(setGroups)
+      .catch(() => setGroups([]));
+  }, []);
   const [preferredSupplier, setPreferredSupplier] = useState<SupplierRef | null>(
     item?.preferredSupplier ? { id: item.preferredSupplier.id, name: item.preferredSupplier.name } : null,
   );
@@ -332,6 +343,7 @@ export function ItemForm({
     description: item?.description ?? '',
     itemType: item?.itemType ?? 'MATERIAL',
     categoryId: item?.category?.id ?? '',
+    productGroup: item?.productGroup ?? '',
     costCategoryId: item?.costCategory?.id ?? '',
     unit: item?.unit ?? 'pcs',
     standardCost: item?.standardCost?.toString() ?? '',
@@ -360,6 +372,7 @@ export function ItemForm({
         description: form.description || null,
         itemType: form.itemType,
         categoryId: form.categoryId || null,
+        productGroup: form.productGroup || null,
         costCategoryId: form.costCategoryId || null,
         unit: form.unit,
         standardCost: form.standardCost === '' ? null : Number(form.standardCost),
@@ -449,6 +462,19 @@ export function ItemForm({
             {ITEM_TYPES.map((t) => (
               <option key={t.value} value={t.value}>
                 {t.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Product group" hint={groups.find((g) => g.name === form.productGroup)?.description ?? 'The quotation’s product groups'}>
+          <select value={form.productGroup} onChange={(e) => setForm({ ...form, productGroup: e.target.value })}>
+            <option value="">— none —</option>
+            {form.productGroup && !groups.some((g) => g.name === form.productGroup) && (
+              <option value={form.productGroup}>{form.productGroup} — not on the list</option>
+            )}
+            {groups.map((g) => (
+              <option key={g.name} value={g.name}>
+                {g.name}
               </option>
             ))}
           </select>
