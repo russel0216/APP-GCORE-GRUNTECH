@@ -24,6 +24,7 @@ import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/
 import { clearPhoto, setPhoto } from '../shared/catalogue';
 import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/middleware';
 import { groupWhere, itemSearchWhere } from '../shared/itemSearch';
+import { brandChoiceKey, suggestGroup } from '../shared/itemGroupsByBrand';
 import { ITEM_MANAGER_REFUSAL, mayManageItems } from '../shared/itemManagers';
 import { can } from '../permissions/resolve';
 import { requireSupplierPicker } from '../shared/pickers';
@@ -831,6 +832,92 @@ itemRoutes.get(
       req,
     );
     sendListPdf(res, pdf, 'items.pdf');
+  }),
+);
+
+/**
+ * Filing items under product groups by BRAND (2026-11-25) — the items with
+ * no group yet, one row per brand with how many and the group suggested
+ * (`suggestGroup`), for the warehouse's leads to decide. Above `/:id`.
+ */
+async function brandsWithoutGroup() {
+  const [rows, groups] = await Promise.all([
+    prisma.item.groupBy({ by: ['brand'], where: { OR: [{ productGroup: null }, { productGroup: '' }] }, _count: { _all: true } }),
+    prisma.quotationGroup.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { name: true, brand: true } }),
+  ]);
+  // One row per brand whatever its spelling: the first met names it.
+  const byKey = new Map<string, { key: string; brand: string | null; spellings: (string | null)[]; items: number }>();
+  for (const r of rows) {
+    const k = brandChoiceKey(r.brand);
+    const row = byKey.get(k) ?? { key: k, brand: r.brand?.trim() || null, spellings: [], items: 0 };
+    row.spellings.push(r.brand);
+    row.items += r._count._all;
+    byKey.set(k, row);
+  }
+  return { rows: [...byKey.values()].sort((a, b) => b.items - a.items || a.key.localeCompare(b.key)), groups };
+}
+
+itemRoutes.get(
+  '/group-by-brand',
+  requireEdit('gchain', 'items'),
+  handler(async (req, res) => {
+    if (!(await mayManageItems(currentUser(req)))) throw forbidden(ITEM_MANAGER_REFUSAL);
+    const { rows, groups } = await brandsWithoutGroup();
+    res.json({
+      brands: rows.map((r) => ({ key: r.key, brand: r.brand, items: r.items, suggest: suggestGroup(r.brand, groups) })),
+      groups: groups.map((g) => g.name),
+      total: rows.reduce((n, r) => n + r.items, 0),
+    });
+  }),
+);
+
+itemRoutes.post(
+  '/group-by-brand',
+  requireEdit('gchain', 'items'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!(await mayManageItems(me))) throw forbidden(ITEM_MANAGER_REFUSAL);
+    const body = parseBody(z.object({ choices: z.record(z.string().max(200), z.string().trim().min(1).max(120)) }).strict(), req.body);
+    const { rows, groups } = await brandsWithoutGroup();
+    const byName = new Map(groups.map((g) => [groupKey(g.name), g.name]));
+    const plan: { row: (typeof rows)[number]; group: string }[] = [];
+    for (const [k, wanted] of Object.entries(body.choices)) {
+      const row = rows.find((r) => r.key === k);
+      if (!row) continue; // Filed meanwhile: nothing left of that brand without a group.
+      const group = byName.get(groupKey(wanted));
+      if (!group) throw badRequest(`“${wanted}” is not a product group on the list — Admin › Categories › Quotation groups`);
+      plan.push({ row, group });
+    }
+    if (!plan.length) throw badRequest('Choose a product group for at least one brand');
+    // Only items still without a group are filed: one somebody set meanwhile stays.
+    const filed = await prisma.$transaction(async (tx) => {
+      const out: { brand: string | null; group: string; items: number }[] = [];
+      for (const { row, group } of plan) {
+        const { count } = await tx.item.updateMany({
+          where: {
+            AND: [
+              { OR: [{ productGroup: null }, { productGroup: '' }] },
+              { OR: row.spellings.map((sp) => ({ brand: sp })) },
+            ],
+          },
+          data: { productGroup: group },
+        });
+        out.push({ brand: row.brand, group, items: count });
+      }
+      return out;
+    }, { timeout: 60_000 });
+    const total = filed.reduce((n, f) => n + f.items, 0);
+    await audit(
+      {
+        entityType: 'item',
+        entityId: 'list',
+        action: 'UPDATED',
+        summary: `Filed ${total} item(s) under product groups by brand — ${filed.map((f) => `${f.brand ?? 'no brand'} → ${f.group} (${f.items})`).join('; ').slice(0, 900)}`,
+        after: { filed },
+      },
+      req,
+    );
+    res.json({ filed, total });
   }),
 );
 

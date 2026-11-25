@@ -97,6 +97,7 @@ export function Items() {
   const [editing, setEditing] = useState<ItemRow | 'new' | null>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
+  const [byBrand, setByBrand] = useState(false);
   // The product groups — the quotation's list — are the item's one category (2026-11-25).
   const [groups, setGroups] = useState<{ name: string }[]>([]);
 
@@ -216,8 +217,8 @@ export function Items() {
           ) : null
         }
         // The list's own tool lives in its ⋯ menu, as on the supplier list.
-        menuItems={
-          can('gchain.items.create')
+        menuItems={[
+          ...(can('gchain.items.create')
             ? [
                 {
                   label: 'Import items…',
@@ -229,8 +230,18 @@ export function Items() {
                   },
                 },
               ]
-            : []
-        }
+            : []),
+          // The items that arrived with a brand and no product group (2026-11-25): each brand, its suggested group, the person's call.
+          ...(can('gchain.items.edit_all') || can('gchain.items.edit_own')
+            ? [
+                {
+                  label: 'File under product groups by brand…',
+                  hint: 'Every brand whose items have no product group yet, with the group suggested for it — nothing is filed until you say',
+                  onSelect: () => setByBrand(true),
+                },
+              ]
+            : []),
+        ]}
       />
 
       {editing && (
@@ -239,6 +250,16 @@ export function Items() {
           onClose={close}
           onSaved={() => {
             close();
+            setReload((r) => r + 1);
+          }}
+        />
+      )}
+
+      {byBrand && (
+        <GroupByBrandModal
+          onClose={() => setByBrand(false)}
+          onFiled={() => {
+            setByBrand(false);
             setReload((r) => r + 1);
           }}
         />
@@ -313,6 +334,117 @@ function ItemBulkActions({ ctx, groups }: { ctx: BulkContext<ItemRow>; groups: {
         </span>
       )}
     </>
+  );
+}
+
+interface BrandRow {
+  key: string;
+  brand: string | null;
+  items: number;
+  suggest: string | null;
+}
+
+/**
+ * File items under product groups by their brand (2026-11-25, the owner's
+ * call). Every brand whose items have no group, the group suggested for it
+ * preselected, "— leave —" where there is none; Save files only the brands
+ * given a group, and only items still without one.
+ */
+function GroupByBrandModal({ onClose, onFiled }: { onClose: () => void; onFiled: () => void }) {
+  const toast = useToast();
+  const [data, setData] = useState<{ brands: BrandRow[]; groups: string[]; total: number } | null>(null);
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    api
+      .get<{ brands: BrandRow[]; groups: string[]; total: number }>('/items/group-by-brand')
+      .then((d) => {
+        setData(d);
+        setChoices(Object.fromEntries(d.brands.filter((b) => b.suggest).map((b) => [b.key, b.suggest as string])));
+      })
+      .catch(setError);
+  }, []);
+
+  const chosen = (data?.brands ?? []).filter((b) => choices[b.key]);
+  const items = chosen.reduce((n, b) => n + b.items, 0);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post<{ total: number }>('/items/group-by-brand', { choices: Object.fromEntries(chosen.map((b) => [b.key, choices[b.key]])) });
+      toast('ok', `${r.total.toLocaleString('en-US')} item${r.total === 1 ? '' : 's'} filed under product groups`);
+      onFiled();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      wide
+      title="File items under product groups by brand"
+      onClose={onClose}
+      footer={
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !items}>
+            {busy ? 'Filing…' : items ? `File ${items.toLocaleString('en-US')} item${items === 1 ? '' : 's'}` : 'Nothing chosen'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      {data && (
+        <>
+          <p className="muted">
+            {data.total.toLocaleString('en-US')} item{data.total === 1 ? ' has' : 's have'} no product group, across {data.brands.length} brand
+            {data.brands.length === 1 ? '' : 's'}. A group is preselected where the brand names one; leave a brand as it is, or pick OTHERS. Only items
+            still without a group are filed.
+          </p>
+          {data.brands.length === 0 ? (
+            <p className="collection-empty">Every item has a product group.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Brand</th>
+                    <th className="right">Items</th>
+                    <th>File under</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.brands.map((b) => (
+                    <tr key={b.key}>
+                      <td>{b.brand ?? <span className="faint">No brand on the item</span>}</td>
+                      <td className="right mono">{b.items.toLocaleString('en-US')}</td>
+                      <td>
+                        <select
+                          aria-label={`Product group for ${b.brand ?? 'items with no brand'}`}
+                          value={choices[b.key] ?? ''}
+                          onChange={(e) => setChoices({ ...choices, [b.key]: e.target.value })}
+                        >
+                          <option value="">— leave —</option>
+                          {data.groups.map((g) => (
+                            <option key={g} value={g}>
+                              {g}
+                              {g === b.suggest ? ' (suggested)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </Modal>
   );
 }
 

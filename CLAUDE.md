@@ -1096,7 +1096,22 @@ accepted. Where this section and an older one disagree, this one holds.
   whoever has moved stock. The card under the inventory is a table — When,
   Item, In / out, Before, After, Document, Warehouse, By — with a "Moved by"
   picker and Show more. Viewing the inventory is not recorded.
-- verify-chain pins all of it (471 passed).
+- **Filing by brand** (the owner's follow-up the same day: "map the old
+  categories to product groups by brand"). Item Master › ⋯ › **File under
+  product groups by brand…** (`GroupByBrandModal`): `GET
+  /items/group-by-brand` lists every brand whose items have no group, how
+  many, and the group SUGGESTED — `suggestGroup()` in
+  `shared/itemGroupsByBrand.ts`, pure: the group whose name or brand is the
+  brand, a principal's other name (`BRAND_ALIASES`: Control Techniques →
+  NIDEC DRIVES), or the ONE group starting with the brand as a whole word
+  (KSB → KSB PUMPS); two that fit suggest nothing. `POST
+  /items/group-by-brand { choices: { <BRAND or none>: <group> } }` files only
+  the brands given a group and only items still without one (a listed group
+  or a 400; one transaction, one audit row). Both above `/:id`, the
+  warehouse's leads alone. Nothing is filed by the seed: a brand with no
+  suggestion, and items with no brand, are the person's call (leave, or
+  OTHERS).
+- verify-chain pins all of it (476 passed).
 
 ## The owner's batch of 2026-11-23
 

@@ -56,6 +56,7 @@ import { settleBorrowSlip, settleReceiving, settleStockIssue } from '../src/rout
 import { settlePullout } from '../src/routes/pullouts';
 import { runReorderCheck, reorderQuantity } from '../src/shared/reorder';
 import { searchTerms } from '../src/shared/itemSearch';
+import { suggestGroup } from '../src/shared/itemGroupsByBrand';
 import { stockRequestRoute, STOCK_LOCAL_OPTION, STOCK_IMPORT_OPTION } from '../src/shared/stockRequestRoute';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
@@ -7354,6 +7355,58 @@ async function odooMigration() {
       (await prisma.inventoryBalance.count({ where: { itemId: tape.id } })) === 0,
     `${byEditor.status} ${stocked.status} ${emptyOne.status}`,
   );
+
+  // Filing by brand (2026-11-25): a brand is suggested a group, never a guess between two.
+  const brandGroups = [
+    { name: 'OMEGA AIR', brand: 'OMEGA AIR' },
+    { name: 'KSB PUMPS', brand: 'KSB PUMPS' },
+    { name: 'NIDEC DRIVES', brand: 'NIDEC DRIVES (JAPAN)' },
+    { name: 'GRUNTECH SERVICES', brand: null },
+    { name: 'GRUNTECH INSTALLATION AND FABRICATION', brand: null },
+    { name: 'OTHERS', brand: null },
+  ];
+  check(
+    "a brand is suggested the group that is its name, its principal's, or the one group starting with it — and nothing where two would fit or none does",
+    suggestGroup('omega  air', brandGroups) === 'OMEGA AIR' &&
+      suggestGroup('KSB', brandGroups) === 'KSB PUMPS' &&
+      suggestGroup('Control Techniques', brandGroups) === 'NIDEC DRIVES' &&
+      suggestGroup('GRUNTECH', brandGroups) === null &&
+      suggestGroup('WILO', brandGroups) === null &&
+      suggestGroup(null, brandGroups) === null,
+    [suggestGroup('KSB', brandGroups), suggestGroup('Control Techniques', brandGroups), suggestGroup('GRUNTECH', brandGroups)].join('/'),
+  );
+  {
+    const brandName = `${TAG} BRANDCO`;
+    await prisma.quotationGroup.deleteMany({ where: { key: brandName.toLowerCase() } });
+    const g = await prisma.quotationGroup.create({ data: { name: brandName, key: brandName.toLowerCase(), brand: brandName } });
+    const was = await prisma.item.findUniqueOrThrow({ where: { id: pump.id }, select: { brand: true, productGroup: true } });
+    try {
+      await prisma.item.update({ where: { id: pump.id }, data: { brand: brandName.toLowerCase(), productGroup: null } });
+      const asked = await api(token, 'GET', '/items/group-by-brand');
+      const row = ((asked.body.brands ?? []) as { key: string; items: number; suggest: string | null }[]).find((r) => r.key === brandName);
+      const stranger = await api(editorToken, 'GET', '/items/group-by-brand');
+      const bad = await api(token, 'POST', '/items/group-by-brand', { choices: { [brandName]: 'ZZ NO SUCH GROUP' } });
+      const done = await api(token, 'POST', '/items/group-by-brand', { choices: { [brandName]: brandName } });
+      const after = await prisma.item.findUniqueOrThrow({ where: { id: pump.id }, select: { productGroup: true } });
+      const again = await api(token, 'POST', '/items/group-by-brand', { choices: { [brandName]: brandName } });
+      check(
+        "the items with no group are listed by brand with the suggestion; only the warehouse's leads file them, a group off the list is refused, and a second run files nothing",
+        asked.status === 200 &&
+          row?.items === 1 &&
+          row.suggest === brandName &&
+          stranger.status === 403 &&
+          bad.status === 400 &&
+          done.status === 200 &&
+          done.body.total === 1 &&
+          after.productGroup === brandName &&
+          again.status === 400,
+        `${asked.status} ${JSON.stringify(row ?? null)} stranger ${stranger.status} bad ${bad.status} done ${done.status}/${done.body.total} → ${after.productGroup}; again ${again.status}`,
+      );
+    } finally {
+      await prisma.item.update({ where: { id: pump.id }, data: was });
+      await prisma.quotationGroup.delete({ where: { id: g.id } });
+    }
+  }
 
   // The warehouse's purchase request takes its own route (2026-11-25): the
   // Purchasing Manager alone, or with the Cost Controller and the CEO where a
