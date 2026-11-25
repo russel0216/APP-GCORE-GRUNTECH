@@ -2461,7 +2461,9 @@ billRoutes.get(
 
 billRoutes.get(
   '/:id',
-  requireView('gfin', 'ap'),
+  // An approver with no A/P right opens the bill while it waits on them
+  // (help ticket GT-HT-2026-0030), as every routed document does.
+  requireAnyOrDecider('gfin.ap.view_all', 'gfin.ap.view_team', 'gfin.ap.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await prisma.supplierBill.findUnique({
@@ -2479,11 +2481,13 @@ billRoutes.get(
       },
     });
     if (!row) throw notFound('Supplier bill not found');
+    const decider = await mayDecide(me.id, 'supplier_bill', [row.id]);
+    if (res.locals.deciderOnly && !decider) throw forbidden('You may not open that bill');
     // View Own reads the bills one entered; Edit Own changes them (2026-10-18).
-    assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
+    if (!decider) assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
     res.json({
       ...presentBill(row),
-      canEdit: mayEdit(me, 'gfin', 'ap', row.createdById === me.id, row.createdById),
+      canEdit: !res.locals.deciderOnly && mayEdit(me, 'gfin', 'ap', row.createdById === me.id, row.createdById),
       // Charged to an office budget line (2026-11-10): where that line stands.
       budget: await billOffice(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
@@ -2502,7 +2506,7 @@ billRoutes.get(
  */
 billRoutes.get(
   '/:id/pdf',
-  requireView('gfin', 'ap'),
+  requireAnyOrDecider('gfin.ap.view_all', 'gfin.ap.view_team', 'gfin.ap.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await prisma.supplierBill.findUnique({
@@ -2510,7 +2514,9 @@ billRoutes.get(
       include: { ...billInclude, createdBy: { select: { id: true, name: true } }, allocations: { include: { payment: { select: { number: true, paymentDate: true, method: true, reference: true } } }, orderBy: { createdAt: 'asc' } } },
     });
     if (!row) throw notFound('Supplier bill not found');
-    assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
+    const decider = await mayDecide(me.id, 'supplier_bill', [row.id]);
+    if (res.locals.deciderOnly && !decider) throw forbidden('You may not open that bill');
+    if (!decider) assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
     const bill = presentBill(row);
     const currency = await companyCurrency();
     const money = (n: number) => formatMoney(n, currency);

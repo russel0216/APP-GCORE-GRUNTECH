@@ -1,6 +1,7 @@
 import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
 import { routePurchaseRequestsByProject } from '../src/shared/prTechnicalManager';
 import { clearListLayoutNudges } from '../src/shared/listLayoutNudges';
+import { clearDecidedApprovalBells } from '../src/shared/approvalBells';
 import { markScoroCancelledQuotations } from '../src/shared/scoroCancelled';
 import { syncCatalogue } from '../src/shared/catalogue';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
@@ -1543,6 +1544,9 @@ async function main() {
   if (scoroCancelled) console.log(`  ${scoroCancelled}`);
   const nudgesCleared = await clearListLayoutNudges();
   if (nudgesCleared) console.log(`  ✓ Layout (${nudgesCleared})`);
+  // Decided approvals' "please decide" bells marked read, once (GT-HT-2026-0025, 2026-11-26).
+  const bellsCleared = await clearDecidedApprovalBells();
+  if (bellsCleared) console.log(`  ✓ ${bellsCleared} old approval bell(s) marked read`);
   // Every item on the Inventory list, stocked or not (2026-10-25): a
   // placeholder line in the main warehouse for an item with none anywhere.
   const catalogue = await syncCatalogue();

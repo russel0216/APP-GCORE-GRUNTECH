@@ -2735,9 +2735,24 @@ serviceReportRoutes.get(
       orderBy: { uploadedAt: 'asc' },
     });
 
-    res.json({ ...row, photos });
+    // A paper report scanned and filed under `<report id>~scan` (GT-HT-2026-0024).
+    const scanned = await hasPaperScan(row.id);
+    res.json({ ...row, photos, scanned });
   }),
 );
+
+/**
+ * The SCANNED PAPER REPORT (help ticket GT-HT-2026-0024, 2026-11-26: "an
+ * option where we can upload a scanned service report"). A report filled on
+ * paper on site is filed as an attachment under `<report id>~scan`; with one
+ * on file, submit does not ask for the template's required fields — the paper
+ * carries them, and the approver reads it. Who signed for it on site is still
+ * asked: the approver is told whose wet signature is on the scan.
+ */
+export const SCAN_SUFFIX = '~scan';
+async function hasPaperScan(reportId: string): Promise<boolean> {
+  return (await prisma.attachment.count({ where: { entityType: 'service_report', entityId: reportId + SCAN_SUFFIX } })) > 0;
+}
 
 const reportSchema = z.object({
   /** Defaults to the visit's kind when written against a visit. */
@@ -2944,16 +2959,17 @@ serviceReportRoutes.post(
     // Checked here rather than on every keystroke: a report is written on site,
     // often on bad signal, and a form that refuses to save half-finished work
     // gets filled in afterwards from memory instead.
+    // A scanned paper report carries its own fields (GT-HT-2026-0024).
     const sections = report.template.sections as unknown as TemplateSection[];
-    const missing = missingRequired(sections, report.data as Record<string, unknown>);
+    const missing = (await hasPaperScan(report.id)) ? [] : missingRequired(sections, report.data as Record<string, unknown>);
     if (missing.length) {
       throw badRequest(
-        `${missing.length} required field${missing.length === 1 ? '' : 's'} not filled in: ${missing.slice(0, 5).join('; ')}${missing.length > 5 ? '…' : ''}`,
+        `${missing.length} required field${missing.length === 1 ? '' : 's'} not filled in: ${missing.slice(0, 5).join('; ')}${missing.length > 5 ? '…' : ''} — or attach the scanned paper report`,
       );
     }
     if (!report.customerSignedBy) {
       throw badRequest(
-        'Nobody has signed for this on site. A service report the customer has not acknowledged is an assertion, not a record.',
+        'Nobody has signed for this on site. A service report the customer has not acknowledged is an assertion, not a record — on a scanned paper report, type the name of whoever signed it.',
       );
     }
 

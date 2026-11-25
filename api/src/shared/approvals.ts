@@ -2,7 +2,7 @@ import { Prisma, type ApprovalRequest, type ApprovalStep } from '@prisma/client'
 import { prisma } from '../prisma';
 import { projectTeamOf, teamOfRequester, teamPostHolders } from './teamPosts';
 import { badRequest, conflict, forbidden, notFound } from '../http/kit';
-import { notify } from './notifications';
+import { clearApprovalBells, notify } from './notifications';
 import { audit } from './audit';
 import { mailConfig, sendMail } from './mail';
 import { env } from '../env';
@@ -1246,6 +1246,17 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     });
   }
 
+  // The decided step's "please decide" bells are done with (GT-HT-2026-0025):
+  // everyone's once the step moved on, the agreeing manager's own while a
+  // project agreement keeps it open for the others. Before the next step's
+  // bells go out, so those stay unread.
+  await clearApprovalBells(
+    settled.link,
+    at,
+    prisma,
+    stillWaiting ? [input.userId, ...(decider.onBehalfOfId ? [decider.onBehalfOfId] : [])] : undefined,
+  );
+
   if (settled.status === 'PENDING') {
     // An agreement that leaves the step open tells nobody new: the others were told when it opened.
     if (!stillWaiting) await notifyCurrentStep(settled);
@@ -1309,6 +1320,8 @@ export async function cancelOpenRequest(
       include: { workflow: { include: { steps: true } } },
     });
     const step = workflow?.steps.find((s) => s.sequence === request.currentSequence);
+    // Nothing is left to decide: its bells are done with (GT-HT-2026-0025).
+    await clearApprovalBells(request.link, new Date(), tx);
     await audit(
       {
         entityType: documentType,

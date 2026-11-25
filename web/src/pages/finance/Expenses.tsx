@@ -434,6 +434,14 @@ export function ExpenseClaimDetail() {
                 {liquidation ? 'Reimburse the excess' : 'Reimburse'}
               </button>
             )}
+            {/* A rejected or cancelled claim is closed for good; its purpose and
+                receipts start a NEW draft instead of being typed again
+                (GT-HT-2026-0031). Nothing is written until that page's Save. */}
+            {(row.status === 'REJECTED' || row.status === 'CANCELLED') && mine && can('gfin.expenses.create') && (
+              <Link className="btn btn-primary" to={`/g-fin/expenses/new?copyFrom=${row.id}`}>
+                Copy to a new draft
+              </Link>
+            )}
           </>
         }
         print={`/api/expense-claims/${row.id}/pdf`}

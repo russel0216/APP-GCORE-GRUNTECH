@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, type ListResult, openPdf } from '../../lib/api';
+import { api, type ListResult, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -952,6 +952,26 @@ function RowGroup({ children }: { children: ReactNode }) {
 
 // ── One request ──────────────────────────────────────────────────────────────
 
+/**
+ * "Copy to a new draft": the editor opened on the request's own source — fixed,
+ * as when opened from that record — with `copyFrom` filling the rest.
+ */
+const COPY_SOURCE_KEY = {
+  project: 'jobId',
+  sales_order: 'salesOrderId',
+  quotation: 'quotationId',
+  costing: 'costingId',
+  office: 'officeBudgetLineId',
+} as const;
+function copyLink(row: { id: string; isTravel?: boolean | null; split?: boolean | null; job: { id: string } | null; for: RequestSource | null }): string {
+  const source = row.job ? { kind: 'project' as const, id: row.job.id } : row.split ? null : row.for;
+  return `/g-ops/budget-requests/new${qs({
+    copyFrom: row.id,
+    kind: row.isTravel ? 'travel' : undefined,
+    ...(source ? { [COPY_SOURCE_KEY[source.kind]]: source.id } : {}),
+  })}`;
+}
+
 export function BudgetRequestDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -1088,6 +1108,16 @@ export function BudgetRequestDetail() {
                 Submit for approval
               </button>
             )}
+            {/* A cancelled or rejected request is closed for good; its purpose and
+                breakdown start a NEW draft instead of being typed again
+                (GT-HT-2026-0023). Nothing is written until that page's Save. */}
+            {(row.status === 'CANCELLED' || row.status === 'REJECTED') &&
+              row.requestedBy.id === me?.user.id &&
+              can('gops.budget_requests.create') && (
+                <Link className="btn btn-primary" to={copyLink(row)}>
+                  Copy to a new draft
+                </Link>
+              )}
             {row.canBook && !booking && (
               <button className="btn btn-primary" onClick={() => setBooking(true)}>
                 Book and pay directly

@@ -104,6 +104,36 @@ export async function notify(
   });
 }
 
+/**
+ * The "please decide" bells of a request are done with once the step they
+ * asked about is decided or withdrawn (help ticket GT-HT-2026-0025: "once
+ * approved it should disappear from the notifications"). Marks read every
+ * unread `approval.required` / `approval.follow_up` bell pointing at the
+ * document, sent before `before` — so the next step's bells, sent after, stay
+ * — for `userIds` only when given (a project agreement leaves the step open
+ * for the others). The rows are kept: the bell's All list still shows them.
+ */
+export async function clearApprovalBells(
+  link: string | null | undefined,
+  before: Date,
+  tx: Prisma.TransactionClient = prisma,
+  userIds?: string[],
+): Promise<number> {
+  if (!link) return 0;
+  if (userIds && !userIds.length) return 0;
+  const done = await tx.notification.updateMany({
+    where: {
+      link,
+      isRead: false,
+      type: { in: ['approval.required', 'approval.follow_up'] },
+      createdAt: { lte: before },
+      ...(userIds ? { userId: { in: userIds } } : {}),
+    },
+    data: { isRead: true, readAt: new Date() },
+  });
+  return done.count;
+}
+
 export async function unreadCount(userId: string): Promise<number> {
   return prisma.notification.count({ where: { userId, isRead: false } });
 }

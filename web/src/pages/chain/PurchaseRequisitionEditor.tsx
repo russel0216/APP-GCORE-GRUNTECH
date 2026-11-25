@@ -207,6 +207,9 @@ export function PurchaseRequisitionEditor() {
   const presetSalesOrderId = params.get('salesOrder');
   // Opened from a quotation's "Request purchase" (2026-11-10): bought ahead of the order.
   const presetQuotationId = params.get('quotation');
+  // "Copy to a new draft" (GT-HT-2026-0026): a rejected or cancelled request's
+  // header and lines on a NEW request — nothing is written until Save.
+  const copyFrom = id ? null : params.get('copyFrom');
   const [header, setHeader] = useState<Header>({
     kind: presetSalesOrderId ? 'SALES_ORDER' : presetQuotationId ? 'QUOTATION' : 'DIRECT_TO_JOB',
     jobId: presetJobId ?? '',
@@ -238,10 +241,11 @@ export function PurchaseRequisitionEditor() {
         setWarehouses(whs);
         let h = header;
         let ls = lines;
-        if (id) {
-          const pr = await api.get<ExistingPr>(`/purchase-requests/${id}`);
+        if (id || copyFrom) {
+          const pr = await api.get<ExistingPr>(`/purchase-requests/${id ?? copyFrom}`);
           if (!live) return;
-          setExisting(pr);
+          if (id) setExisting(pr);
+          const neededBy = pr.neededBy ? pr.neededBy.slice(0, 10) : '';
           h = {
             kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' || pr.kind === 'QUOTATION' ? pr.kind : 'DIRECT_TO_JOB',
             jobId: pr.job?.id ?? '',
@@ -249,13 +253,15 @@ export function PurchaseRequisitionEditor() {
             salesOrderId: pr.salesOrder?.id ?? '',
             warehouseId: pr.warehouse?.id ?? '',
             purpose: pr.purpose,
-            neededBy: pr.neededBy ? pr.neededBy.slice(0, 10) : '',
+            // A copy whose date has passed asks a week out again.
+            neededBy: !id && neededBy && neededBy < daysFromToday(0) ? daysFromToday(7) : neededBy,
             notes: pr.notes ?? '',
             preferredSupplier: pr.preferredSupplier ?? '',
           };
           ls = pr.items.map((i) => ({
             key: newKey(),
-            id: i.id,
+            // A copy's lines are new lines.
+            id: id ? i.id : null,
             itemId: i.item?.id ?? null,
             partNumber: i.partNumber ?? '',
             name: i.name ?? i.description,
@@ -291,7 +297,7 @@ export function PurchaseRequisitionEditor() {
     };
     // Loaded once per page; the header and lines are the page's from then on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, copyFrom]);
 
   const direct = header.kind === 'DIRECT_TO_JOB';
   const forOrder = header.kind === 'SALES_ORDER';

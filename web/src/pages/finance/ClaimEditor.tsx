@@ -108,6 +108,9 @@ export function ClaimEditor() {
   const editing = Boolean(id);
   const advanceId = params.get('advance');
   const budgetRequestId = params.get('budgetRequest');
+  // "Copy to a new draft" (GT-HT-2026-0031): a rejected or cancelled claim's
+  // purpose and receipts, on a NEW claim — nothing is written until Save.
+  const copyFrom = id ? null : params.get('copyFrom');
   const today = todayLocal();
 
   const [existing, setExisting] = useState<Claim | null>(null);
@@ -132,10 +135,10 @@ export function ClaimEditor() {
         let h = header;
         let ls = lines;
         let src: Source | null = null;
-        if (id) {
-          const row = await api.get<Claim>(`/expense-claims/${id}`);
+        if (id || copyFrom) {
+          const row = await api.get<Claim>(`/expense-claims/${id ?? copyFrom}`);
           if (!live) return;
-          setExisting(row);
+          if (id) setExisting(row);
           const from = row.advance ?? row.budgetRequest;
           if (from) {
             src = {
@@ -151,7 +154,7 @@ export function ClaimEditor() {
               split: !!from.split,
             };
           }
-          h = { claimDate: row.claimDate.slice(0, 10), purpose: row.purpose, jobId: row.job?.id ?? '', costCategoryId: row.costCategory?.id ?? '', officeBudgetLineId: row.officeBudgetLine?.id ?? '' };
+          h = { claimDate: id ? row.claimDate.slice(0, 10) : today, purpose: row.purpose, jobId: row.job?.id ?? '', costCategoryId: row.costCategory?.id ?? '', officeBudgetLineId: row.officeBudgetLine?.id ?? '' };
           ls = row.lines.length
             ? row.lines.map((l) => ({
                 key: newKey(),
@@ -204,7 +207,7 @@ export function ClaimEditor() {
             split: !!b.split,
           };
         }
-        if (src && !id) h = { ...h, purpose: `Liquidation of ${src.number} — ${src.purpose}` };
+        if (src && !id && !copyFrom) h = { ...h, purpose: `Liquidation of ${src.number} — ${src.purpose}` };
         if (!src || src.split) {
           // Not /jobs/lookup: naming the project you spent money on is not the
           // same right as project-management access, and the filing roles hold none.
@@ -231,7 +234,7 @@ export function ClaimEditor() {
     };
     // Loaded once per page; the header and lines are the page's from then on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, advanceId, budgetRequestId]);
+  }, [id, advanceId, budgetRequestId, copyFrom]);
 
   const sent = lines.filter((l) => !isBlank(l));
   // Each receipt's place (2026-11-11): its own, else the claim's "Charge to".

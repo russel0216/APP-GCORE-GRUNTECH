@@ -852,6 +852,15 @@ async function main() {
     where: { userId: employee.id, type: 'approval.approved' },
   });
   check('the requester is told the outcome', requesterNotified > 0);
+  // GT-HT-2026-0025: once decided, the "please decide" bell is read — kept, not deleted.
+  const decidedBell = await prisma.notification.findFirst({
+    where: { userId: supervisor.id, type: 'approval.required', link: '/g-hr/leave/verify-1' },
+  });
+  check(
+    'the approver’s “please decide” bell is marked read once decided',
+    !!decidedBell && decidedBell.isRead && !!decidedBell.readAt,
+    decidedBell ? `isRead ${decidedBell.isRead}` : 'no bell',
+  );
 
   await expectRejection(
     'a decided request cannot be decided twice',

@@ -138,6 +138,8 @@ interface Report {
   template: Template;
   performedBy: { id: string; name: string };
   photos?: { id: string; fileName: string; caption: string | null }[];
+  /** A scanned paper report is on file (`<id>~scan`, GT-HT-2026-0024). */
+  scanned?: boolean;
 }
 
 /**
@@ -629,8 +631,12 @@ export function ServiceReportDetail() {
     load();
   }, [load]);
 
+  // A scanned paper report carries its own fields (GT-HT-2026-0024): with one
+  // filed, the template's required fields are not asked — as the API's submit.
+  const [scanCount, setScanCount] = useState<number | null>(null);
+  const scanned = scanCount !== null ? scanCount > 0 : !!row?.scanned;
   const missing = useMemo(() => {
-    if (!row) return [];
+    if (!row || scanned) return [];
     const out: string[] = [];
     for (const section of row.template.sections) {
       const filled = draft[section.key] ?? {};
@@ -641,7 +647,7 @@ export function ServiceReportDetail() {
       }
     }
     return out;
-  }, [row, draft]);
+  }, [row, draft, scanned]);
 
   if (error) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
@@ -782,6 +788,15 @@ export function ServiceReportDetail() {
           A draft saves without any of this, so fill it in on site and finish later.
         </div>
       )}
+
+      <Attachments
+        entityType="service_report"
+        entityId={`${row.id}~scan`}
+        title="Scanned paper report"
+        hint="Filled in on paper on site? Attach the scan here — the form's required fields are then not asked. Type who signed it on site below."
+        canEdit={editable}
+        onCount={setScanCount}
+      />
 
       <div className="alert info">
         Filled in on <strong>{row.template.name}</strong> v{row.template.version}.

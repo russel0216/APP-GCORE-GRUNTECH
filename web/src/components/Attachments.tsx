@@ -164,12 +164,15 @@ export function Attachments({
   title = 'Attachments',
   hint,
   canEdit = true,
+  onCount,
 }: {
   entityType: string;
   entityId: string;
   title?: string;
   hint?: string;
   canEdit?: boolean;
+  /** Told how many files are on it, after each load (a page that reads "is anything filed?"). */
+  onCount?: (count: number) => void;
 }) {
   const { me } = useAuth();
   const toast = useToast();
@@ -187,6 +190,10 @@ export function Attachments({
   }, [entityType, entityId]);
 
   useEffect(load, [load]);
+  useEffect(() => {
+    if (rows) onCount?.(rows.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
 
   async function upload(files: FileList | File[]) {
     const list = [...files];

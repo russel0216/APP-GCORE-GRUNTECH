@@ -455,6 +455,13 @@ export function PurchaseRequestDetail() {
                 Raise order
               </button>
             )}
+            {/* A rejected or cancelled request is closed for good; it starts a
+                NEW draft instead of being typed again (GT-HT-2026-0026). */}
+            {(pr.status === 'REJECTED' || pr.status === 'CANCELLED') && can('gchain.purchase_requests.create') && (
+              <Link className="btn btn-primary" to={`${base}/new?copyFrom=${pr.id}`}>
+                Copy to a new draft
+              </Link>
+            )}
           </>
         }
         print={`/api/purchase-requests/${pr.id}/pdf`}

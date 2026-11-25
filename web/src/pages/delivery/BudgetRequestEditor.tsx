@@ -119,6 +119,10 @@ export function BudgetRequestEditor() {
   const preset = (Object.entries(SOURCE_KEY) as [SourceKind, string][]).find(([, key]) => params.get(key)) ?? null;
   const presetKind = preset?.[0] ?? null;
   const presetId = preset ? params.get(preset[1]) : null;
+  // "Copy to a new draft" (GT-HT-2026-0023): a cancelled or rejected request's
+  // purpose and breakdown on a NEW request — nothing is written until Save.
+  // The link names its source too, so the source is fixed as when opened from it.
+  const copyFrom = id ? null : params.get('copyFrom');
 
   const [existing, setExisting] = useState<BudgetRequest | null>(null);
   const [choices, setChoices] = useState<{ id: string; number: string; name: string; sub?: string; project?: { id: string; number: string } | null }[]>([]);
@@ -148,17 +152,19 @@ export function BudgetRequestEditor() {
       try {
         let h = header;
         let ls = lines;
-        if (id) {
-          const row = await api.get<BudgetRequest>(`/budget-requests/${id}`);
+        if (id || copyFrom) {
+          const row = await api.get<BudgetRequest>(`/budget-requests/${id ?? copyFrom}`);
           if (!live) return;
-          setExisting(row);
+          if (id) setExisting(row);
+          const today = new Date().toISOString().slice(0, 10);
           const raised = row.raisedOn ?? row.for;
           h = {
             kind: row.job ? 'project' : row.split ? 'project' : (raised?.kind ?? 'project'),
             sourceId: row.job?.id ?? raised?.id ?? '',
             costCategoryId: row.costCategory.id,
             reason: row.reason,
-            neededBy: row.neededBy?.slice(0, 10) ?? '',
+            // A copy whose date has passed asks for a new one.
+            neededBy: !id && row.neededBy && row.neededBy.slice(0, 10) < today ? '' : (row.neededBy?.slice(0, 10) ?? ''),
             notes: row.notes ?? '',
             travelMode: row.travelMode ?? 'AIR',
             travelFrom: row.travelFrom ?? '',
@@ -185,7 +191,7 @@ export function BudgetRequestEditor() {
     };
     // Loaded once per page; the header and lines are the page's from then on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, copyFrom]);
 
   const officeBudgets = useOfficeLines();
   // Where an item may be charged (2026-11-11): the running projects and every budget line.

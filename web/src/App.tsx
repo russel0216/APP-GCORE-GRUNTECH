@@ -1456,11 +1456,9 @@ function Routed() {
         />
         <Route
           path="/g-fin/ap/:id"
-          element={
-            <Guard permission="gfin.ap.view_all">
-              <BillDetail />
-            </Guard>
-          }
+          // No Guard: the API decides — an approver with no A/P right
+          // reads the bill while it waits on them (GT-HT-2026-0030).
+          element={<BillDetail />}
         />
         <Route
           path="/g-fin/expenses"
