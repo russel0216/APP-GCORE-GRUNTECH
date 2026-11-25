@@ -4710,6 +4710,14 @@ appearing to superior". Four causes, four changes:
   step then takes its fallback (the role, else HR) as a request with no
   "Reports to" does. A "Reports to" naming the person themself is left as it
   is, so submit still refuses it naming the cause.
+- **A step naming ONLY the requester goes to their "Reports to"**
+  (2026-11-25, GT-PS-2026-0017: an administrator's route named three people,
+  the middle one the warehouse officer who raised the slip, and it stopped
+  at "nobody can approve this step"). `approversForStep()` gives such a step
+  to `activeSupervisor()` — the money documents' rule, for every document;
+  with nobody above them it stays and the panel says so. A route with
+  "The preparer signs the steps they hold" signs it at submit instead.
+  verify-foundation pins it.
 - **The Leave and Overtime lists show a superior what is theirs.** View Own
   listed one's own filings only; now (`myHrListScope()` in routes/hr.ts) it
   lists one's own, one's DIRECT REPORTS' ("Reports to" is me) and every

@@ -348,6 +348,17 @@ export async function approversForStep(
   ctx: ApprovalContext = {},
 ): Promise<string[]> {
   const ids = await stepHolders(step, requesterId, tx, ctx);
+  // A step whose ONLY approver is the requester (2026-11-25, GT-PS-2026-0017:
+  // a route edited to three named people, the middle one the warehouse
+  // officer who raised the slip) is a dead end — nobody approves their own
+  // document — so it goes to the person they report to, as a money
+  // document's held step does. With nobody above them, it stays as it is
+  // and the panel says nobody can approve it.
+  if (ids.length && ids.every((id) => id === requesterId)) {
+    const up = await activeSupervisor(requesterId, tx);
+    if (up && up !== requesterId) return [up];
+    return ids;
+  }
   // A money document's step the requester holds goes to the person they
   // report to, ALONE (`MONEY_DOCUMENTS`, 2026-11-21; the owner's call the same
   // day on GT-TR-2026-0002: Salvador, GIB's only Technical Manager, saw his

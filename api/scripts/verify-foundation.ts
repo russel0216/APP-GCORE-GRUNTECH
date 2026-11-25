@@ -909,6 +909,18 @@ async function main() {
   const plainFallback = await approversForStep(supervisorElse(null), salesHead.id);
   check('a supervisor step naming no role still falls back to HR', plainFallback.includes(hrPerson.id) && !plainFallback.includes(salesHead.id));
 
+  // A step naming only the requester goes to their "Reports to" (2026-11-25,
+  // GT-PS-2026-0017: the warehouse officer named on the route raised the slip).
+  const namesUser = (userId: string) => ({ approverType: 'USER', roleId: null, userId }) as unknown as ApprovalStep;
+  const ownStep = await approversForStep(namesUser(employee.id), employee.id);
+  const otherStep = await approversForStep(namesUser(employee.id), hrPerson.id);
+  const nobodyAbove = await approversForStep(namesUser(salesHead.id), salesHead.id);
+  check(
+    'a step naming only the requester goes to the person they report to; named for someone else it stays theirs',
+    ownStep.length === 1 && ownStep[0] === supervisor.id && otherStep.length === 1 && otherStep[0] === employee.id && nobodyAbove[0] === salesHead.id,
+    JSON.stringify({ ownStep, otherStep, nobodyAbove }),
+  );
+
   // Back Support decides for the teams it supports (2026-10-12): the
   // holders on the preparer's team, else those naming no team, else all.
   const [kat, hit] = await Promise.all(
