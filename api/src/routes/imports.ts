@@ -26,6 +26,7 @@ import { scoroInvoicesImport } from './imports/scoroInvoices';
 import { odooInventoryImport, odooAssetsImport } from './imports/odoo';
 import { exhibitionVisitorsImport } from './imports/exhibitionVisitors';
 import { odooPicturesImport, PICTURE_UPLOAD_MB } from './imports/odooPictures';
+import { odooMovesImport } from './imports/odooMoves';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
@@ -47,7 +48,7 @@ const upload = multer({
   limits: { fileSize: IMPORT_UPLOAD_MB * 1024 * 1024 },
 });
 /** Imports fed by a whole Odoo export: its pictures, its products and its assets. */
-const LARGE_IMPORTS = new Set(['odoo_pictures', 'odoo_inventory', 'odoo_assets']);
+const LARGE_IMPORTS = new Set(['odoo_pictures', 'odoo_inventory', 'odoo_assets', 'odoo_moves']);
 // Odoo's pictures ride in the CSV as base64 (2026-10-25): a batch of a few
 // hundred products is tens of MB, so that one import takes the larger ceiling.
 const pictureUpload = multer({
@@ -592,6 +593,8 @@ const REGISTRY: Record<string, Registered> = {
   odoo_assets: odooAssetsImport,
   // Odoo's product pictures (2026-10-25), base64 in the CSV, onto the items and assets.
   odoo_pictures: odooPicturesImport,
+  // Odoo's product moves (2026-11-25): history on the stock card, stock untouched.
+  odoo_moves: odooMovesImport,
   // Exhibition visitors from a spreadsheet (2026-10-27, Marketing: PSECE's Day 1).
   exhibition_visitors: exhibitionVisitorsImport,
 };

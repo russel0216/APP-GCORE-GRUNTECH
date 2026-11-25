@@ -12,6 +12,7 @@ import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState,
 import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
 import { isSiteWarehouse, siteWarehouse } from '../shared/siteWarehouse';
+import { odooHistory, withDocuments } from '../shared/stockCardHistory';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { receiveQuoteStock, unreceiveQuoteStock } from '../shared/quotationBuying';
 import { BASE_CURRENCY, exchangeRates, storedRate } from '../shared/exchangeRates';
@@ -5395,7 +5396,7 @@ inventoryRoutes.get(
           averageCost: num(b.averageCost),
           value: cents(num(b.quantity) * num(b.averageCost)),
         })),
-        movements: moves.map((m) => ({ ...m, quantity: num(m.quantity), unitCost: num(m.unitCost), balanceAfter: num(m.balanceAfter) })),
+        movements: (await withDocuments(moves)).map((m) => ({ ...m, quantity: num(m.quantity), unitCost: num(m.unitCost), balanceAfter: num(m.balanceAfter) })),
       });
       return;
     }
@@ -5427,7 +5428,7 @@ inventoryRoutes.get(
           averageCost: num(b.averageCost),
           value: cents(num(b.quantity) * num(b.averageCost)),
         })),
-        movements: moves.map((m) => ({ ...m, quantity: num(m.quantity), unitCost: num(m.unitCost), balanceAfter: num(m.balanceAfter) })),
+        movements: (await withDocuments(moves)).map((m) => ({ ...m, quantity: num(m.quantity), unitCost: num(m.unitCost), balanceAfter: num(m.balanceAfter) })),
       });
       return;
     }
@@ -5452,11 +5453,15 @@ inventoryRoutes.get(
           createdBy: { select: { id: true, name: true } },
         },
         orderBy: { occurredAt: 'desc' },
-        take: 200,
+        // The newest 200 unless the card asks for them all (`?all=true`, 5,000 at most).
+        take: req.query.all === 'true' ? 5_000 : 200,
       }),
     ]);
     if (!item) throw notFound('Item not found');
     assertStockVisible(me, item);
+    const movementsTotal = await prisma.inventoryTransaction.count({
+      where: { itemId: item.id, jobId: null, salesOrderId: null, ...(warehouseId ? { warehouseId } : {}) },
+    });
 
     res.json({
       // Edit All places any stock line in a bin; Edit Own the items one added (2026-10-18).
@@ -5475,12 +5480,16 @@ inventoryRoutes.get(
         averageCost: num(b.averageCost),
         value: cents(num(b.quantity) * num(b.averageCost)),
       })),
-      movements: moves.map((m) => ({
+      // Each movement with its slip or report as a link, and where the goods came from and went (2026-11-25).
+      movements: (await withDocuments(moves)).map((m) => ({
         ...m,
         quantity: num(m.quantity),
         unitCost: num(m.unitCost),
         balanceAfter: num(m.balanceAfter),
       })),
+      movementsTotal,
+      // Where the product moved in Odoo before G-CORE — history only, never stock.
+      odooHistory: await odooHistory(item.id),
     });
   }),
 );

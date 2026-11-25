@@ -5,7 +5,6 @@ import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
-  Empty,
   ErrorBox,
   Field,
   Loading,
@@ -14,7 +13,6 @@ import {
   ProductPicture,
   StatusBadge,
   formatDate,
-  formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
@@ -26,8 +24,8 @@ import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps,
 import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
 import { PhotoCard } from '../../components/PhotoCard';
-import { label } from './PurchaseRequests';
 import { SearchSelect } from '../../components/SearchSelect';
+import { OdooHistoryCard, StockMovements, type OdooHistory, type StockMovement } from './StockCardHistory';
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
@@ -1151,6 +1149,15 @@ export function Inventory() {
                       });
                     },
                   },
+                  {
+                    label: 'Import product moves from Odoo…',
+                    hint: "Odoo's Product Moves export (.xlsx or .csv) — kept as history on each item's stock card; stock on hand is not touched and no slip is made",
+                    onSelect: () => {
+                      void loadImportSpec('odoo_moves').then((spec) => {
+                        if (spec) setImporting({ entity: 'odoo_moves', ...(spec as { label: string; columns: never[] }) });
+                      });
+                    },
+                  },
                 ]
               : []
           }
@@ -1384,15 +1391,17 @@ export function StockCard() {
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  // The card lists the newest 200 movements until asked for them all (2026-11-25).
+  const [allMoves, setAllMoves] = useState(false);
 
   useEffect(() => {
     if (!itemId) return;
     api
-      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId, jobId, salesOrderId })}`)
+      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId, jobId, salesOrderId, all: allMoves ? 'true' : undefined })}`)
       .then(setData)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [itemId, warehouseId, jobId, salesOrderId]);
+  }, [itemId, warehouseId, jobId, salesOrderId, allMoves]);
 
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
@@ -1421,18 +1430,7 @@ export function StockCard() {
       setError(err);
     }
   }
-  const movements = data.movements as {
-    id: string;
-    type: string;
-    quantity: number;
-    unitCost: number;
-    balanceAfter: number;
-    sourceType: string;
-    sourceNumber: string | null;
-    occurredAt: string;
-    warehouse: { name: string };
-    createdBy: { name: string } | null;
-  }[];
+  const movements = data.movements as StockMovement[];
 
   return (
     <div>
@@ -1518,52 +1516,8 @@ export function StockCard() {
         ))}
       </div>
 
-      <div className="card">
-        <h3 className="card-title">Movements</h3>
-        {movements.length === 0 ? (
-          <Empty title="No movements yet" />
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th className="proc-col-when">When</th>
-                  <th>Type</th>
-                  <th>Reference</th>
-                  <th>Warehouse</th>
-                  <th className="right">In / out</th>
-                  <th className="right">Unit cost</th>
-                  <th className="right">Balance</th>
-                  <th>By</th>
-                </tr>
-              </thead>
-              <tbody>
-                {movements.map((m) => (
-                  <tr key={m.id}>
-                    <td className="muted">{formatDateTime(m.occurredAt)}</td>
-                    <td>
-                      <span
-                        className={`badge ${m.quantity > 0 ? 'ok' : m.type === 'BORROW' ? 'warn' : ''}`}
-                      >
-                        {label(m.type)}
-                      </span>
-                    </td>
-                    <td className="mono faint">{m.sourceNumber ?? m.sourceType}</td>
-                    <td>{m.warehouse.name}</td>
-                    <td className={`right mono ${m.quantity > 0 ? 'proc-best' : 'proc-over'}`}>
-                      {m.quantity > 0 ? '+' : ''}
-                      {m.quantity}
-                    </td>
-                    <td className="right mono">{formatMoney(m.unitCost)}</td>
-                    <td className="right mono">{m.balanceAfter}</td>
-                    <td className="faint">{m.createdBy?.name ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      <StockMovements movements={movements} total={data.movementsTotal as number | undefined} showingAll={allMoves} onShowAll={() => setAllMoves(true)} />
+      {!jobId && !salesOrderId && <OdooHistoryCard history={data.odooHistory as OdooHistory | null | undefined} unit={item.unit} />}
     </div>
   );
 }

@@ -4803,6 +4803,51 @@ alone, and Odoo's pictures imported from its CSV export).
   MB stored. One audit row per run; a file sharp cannot read is named, the
   rest go on.
 
+## Odoo's product moves as history, and the stock card's movements (2026-11-25)
+
+The owner's Odoo "Product Moves" export (stock.move.line: Date, Reference,
+Product, From, To, Contact, Quantity, Unit, Status, Created by) and his call:
+"view the product movement once I click the product in the inventory list;
+don't create a pull-out slip — we just want to know where the product moved;
+for the future pull-out slip in G-CORE, it should reflect the pull-out slip
+and incoming". His answers: a card of its own, zero-quantity rows skipped.
+
+- **`OdooStockMove` is HISTORY ONLY** (item, `occurredAt`, reference, `kind`,
+  `direction` +1 / −1 / 0, from, to, contact as Odoo wrote it — never linked
+  to a customer — quantity, unit, who, `importKey`; unique item × key). No
+  balance, average cost, report, reorder check or slip reads it; G-CORE's own
+  movements stay `InventoryTransaction`. Never write Odoo's moves there.
+- **The rules are `shared/odooMoves.ts`**, pure: `moveProductNames()` (Odoo
+  shows "[Internal Reference] Name", and G-CORE keeps Odoo's Name WHOLE as
+  the part number — the cut after the first "] ", then the last, then the
+  whole text), `moveKind()` (read off the two locations: Partner
+  Locations/Vendors → warehouse a RECEIPT, warehouse → Customers a DELIVERY,
+  either back a return, a Virtual Location an ADJUSTMENT, warehouse to
+  warehouse a TRANSFER), `moveDate()` (Odoo's wall clock read as Manila's)
+  and `readMoves()` — a row with quantity 0 ("Product Quantity Confirmed")
+  or a Status other than Done is counted and left out; the once-only key is
+  the line's own facts plus its place among lines alike in every fact.
+- **The import** is `odoo_moves` (`routes/imports/odooMoves.ts`,
+  `gchain.items.create`, Inventory ⋯ "Import product moves from Odoo…", a
+  LARGE import): rows grouped by Product, ONE result per product; a product
+  G-CORE has no item for is listed as skipped (a tool or vehicle kept in
+  G-HR has no stock card); a re-run adds nothing (`createMany …
+  skipDuplicates`). The check's facts say what it adds, in and out, what was
+  left out, and — with a table — the moves dated AFTER the item's G-CORE
+  opening balance (`odoo_opening`), which G-CORE's stock does not include
+  unless they were entered in G-CORE too.
+- **The stock card** (`shared/stockCardHistory.ts`, `pages/chain/
+  StockCardHistory.tsx`): `withDocuments()` gives every G-CORE movement its
+  slip or report as a `link` (Incoming, Outgoing, Pull-out Slip, Borrow Slip)
+  and its two ends (`from` / `to`: the supplier → the warehouse; the
+  warehouse → the destination, requester, project or sales order), on the
+  company's, a project's and a sales order's card alike; the newest 200
+  unless `?all=true` (`movementsTotal`, "Show all"). `odooHistory()` is the
+  company card's second card, "Movement history from Odoo": received and
+  delivered in Odoo, then the newest 20 (Show all, 1,000 at most listed).
+- verify-chain pins the readings, the import, the untouched stock, the
+  re-run and the card.
+
 ## Sales › Marketing: exhibition visitors (2026-10-27)
 
 The owner's call during PSECE 2026 ("G-CORE › Sales › Marketing; a bar graph;

@@ -67,7 +67,7 @@ function chunks<T>(list: T[], size = CHUNK): T[][] {
  * the database again itself, so a stale answer only mislabels a row.
  */
 let partCache: { at: number; map: Promise<Map<string, { id: string; code: string }>> } | null = null;
-function partNumbers(): Promise<Map<string, { id: string; code: string }>> {
+export function partNumbers(): Promise<Map<string, { id: string; code: string }>> {
   if (!partCache || Date.now() - partCache.at > 30_000) {
     partCache = {
       at: Date.now(),

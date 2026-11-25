@@ -35,6 +35,8 @@ import { attachmentPath, deleteAttachment, deleteAttachmentsOf } from '../src/sh
 import { placeOnShelf } from '../src/shared/catalogue';
 import { receiveStock } from '../src/shared/inventory';
 import { odooPicturesSpec, odooPicturesWrite } from '../src/routes/imports/odooPictures';
+import { odooMovesSpec, odooMovesWrite } from '../src/routes/imports/odooMoves';
+import { moveDate, moveKind, moveProductNames } from '../src/shared/odooMoves';
 import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import { submitForApproval, act, pickWorkflow, reopenApproved, byHighestRole, withoutCoSignedRepeats, approversForStep, holdsStep, type ApprovalSlot } from '../src/shared/approvals';
@@ -7064,6 +7066,82 @@ async function odooMigration() {
     'the file run again files nothing: a picture already on file is kept',
     picAgain.created === 0 && (await prisma.item.findUniqueOrThrow({ where: { id: pump.id } })).photoId === pumpPic.photoId,
     JSON.stringify({ created: picAgain.created }),
+  );
+  // Odoo's product moves (2026-11-25): history on the stock card, never stock.
+  console.log('\nOdoo product moves');
+  check(
+    "a Product cell is read as \"[description] part number\", a bracket inside either part allowed for; a move's kind is read off its two locations; Odoo's clock is Manila's",
+    moveProductNames('[Schneider, Miniature Relay] SRC - RXM4LB2P7')[0] === 'SRC - RXM4LB2P7' &&
+      moveProductNames('[A [x] B] P/N 1').includes('P/N 1') &&
+      moveProductNames('PLAIN NAME')[0] === 'PLAIN NAME' &&
+      moveKind('Partner Locations/Vendors', 'WH/Stock').kind === 'RECEIPT' &&
+      moveKind('Partner Locations/Vendors', 'WH/Stock').direction === 1 &&
+      moveKind('WH/Stock', 'Partner Locations/Customers').kind === 'DELIVERY' &&
+      moveKind('WH/Stock', 'Partner Locations/Customers').direction === -1 &&
+      moveKind('Partner Locations/Customers', 'WH/Stock').kind === 'RETURN_IN' &&
+      moveKind('WH/Stock', 'Virtual Locations/Inventory adjustment').kind === 'ADJUSTMENT' &&
+      moveKind('WH/Stock', 'WH/Stock/Shelf 1').kind === 'TRANSFER' &&
+      moveDate('2026-11-19 14:21:20').toISOString() === '2026-11-19T06:21:20.000Z' &&
+      moveDate('11/19/2026 2:21 PM').toISOString() === '2026-11-19T06:21:00.000Z',
+    JSON.stringify([moveProductNames('[A [x] B] P/N 1'), moveKind('WH/Stock', 'Partner Locations/Customers'), moveDate('2026-11-19 14:21:20').toISOString()]),
+  );
+  const movesCsv = [
+    'Date,Reference,Product,From,To,Contact,Quantity,Unit,Status,Created by',
+    `2026-01-05 09:00:00,WH/IN/${TAG}1,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",Partner Locations/Vendors,WH/Stock,${TAG} SUPPLIER,10.00,Units,Done,Someone`,
+    `2026-02-06 15:30:00,WH/OUT/${TAG}2,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,4.00,Units,Done,Someone`,
+    `2026-02-06 15:30:00,WH/OUT/${TAG}2,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,4.00,Units,Done,Someone`,
+    `2025-12-01 08:00:00,Product Quantity Confirmed,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Virtual Locations/Inventory adjustment,,0.00,Units,Done,`,
+    `2026-03-01 08:00:00,WH/OUT/${TAG}3,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,9.00,Units,Waiting,Someone`,
+    `2026-03-02 08:00:00,WH/OUT/${TAG}4,"[NOBODY HAS THIS] ${TAG} ODOO NOT ON FILE",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,1.00,Units,Done,Someone`,
+  ].join('\n');
+  const movesDry = await runImport(movesCsv, odooMovesSpec, false, () => Promise.resolve());
+  check(
+    'the moves check: the pump found by its part number, the product G-CORE has no item for listed as skipped, nothing refused',
+    movesDry.created === 1 && movesDry.errors === 0 && movesDry.skipped === 1 && movesDry.rows.filter((r) => r.action === 'skip').length === 1,
+    JSON.stringify(movesDry.rows),
+  );
+  await runImport(movesCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
+  const history = await prisma.odooStockMove.findMany({ where: { itemId: pump.id }, orderBy: { occurredAt: 'asc' } });
+  const pumpAfterMoves = await prisma.item.findUniqueOrThrow({ where: { id: pump.id }, include: { balances: true, stockMoves: true } });
+  check(
+    'the done moves are kept as history — a receipt of 10 and two deliveries of 4 alike in every fact, both kept — the zero-quantity count and the move not done left out',
+    history.length === 3 &&
+      history[0].kind === 'RECEIPT' &&
+      Number(history[0].quantity) === 10 &&
+      history[0].direction === 1 &&
+      history[1].kind === 'DELIVERY' &&
+      history[1].contact === `${TAG} CUSTOMER` &&
+      history[1].importKey !== history[2].importKey,
+    JSON.stringify(history.map((h) => [h.kind, Number(h.quantity), h.reference])),
+  );
+  check(
+    'and the stock is not touched: still 3 on hand at 1,300.00, still the one opening movement, no slip and no pull-out made',
+    Number(pumpAfterMoves.balances[0].quantity) === 3 &&
+      Number(pumpAfterMoves.balances[0].averageCost) === 1300 &&
+      pumpAfterMoves.stockMoves.length === 1 &&
+      (await prisma.pulloutItem.count({ where: { itemId: pump.id } })) === 0,
+    JSON.stringify({ bal: pumpAfterMoves.balances, moves: pumpAfterMoves.stockMoves.length }),
+  );
+  await runImport(movesCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
+  check('the moves file run again adds nothing', (await prisma.odooStockMove.count({ where: { itemId: pump.id } })) === 3);
+  const cardRead = await api(signToken(admin.id, admin.email), 'GET', `/inventory/${pump.id}/card`);
+  const card = cardRead.body as {
+    movementsTotal?: number;
+    movements?: { from: string | null; to: string | null; link: string | null }[];
+    odooHistory?: { total: number; received: number; delivered: number; rows: { reference: string; contact: string | null; kindLabel: string }[] } | null;
+  };
+  check(
+    "the stock card shows it: G-CORE's one movement with where it came from and went, and Odoo's history apart — 10 received, 8 delivered, newest first",
+    cardRead.status === 200 &&
+      card.movementsTotal === 1 &&
+      card.movements?.[0]?.from === 'Odoo — opening balance' &&
+      card.movements?.[0]?.to === warehouse!.name &&
+      card.odooHistory?.total === 3 &&
+      card.odooHistory.received === 10 &&
+      card.odooHistory.delivered === 8 &&
+      card.odooHistory.rows[0].kindLabel === 'Delivery' &&
+      card.odooHistory.rows[2].reference === `WH/IN/${TAG}1`,
+    JSON.stringify({ status: cardRead.status, total: card.movementsTotal, first: card.movements?.[0], odoo: card.odooHistory && { ...card.odooHistory, rows: card.odooHistory.rows.length } }),
   );
   // The photo routes, and delete for a super admin alone.
   const editorRole = await makeRole('zzchain_itemeditor', 'ZZ Item editor', ['gchain.items.view_all', 'gchain.items.edit_all']);

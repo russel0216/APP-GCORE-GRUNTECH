@@ -1179,6 +1179,7 @@ model Item {
   quotationStock       QuotationStock[]
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
+  odooMoves            OdooStockMove[]
   installedAssets      InstalledAsset[]
   /// Technical documents filed against the model (2026-10-20) — every machine of it reads them.
   serviceDocuments     ServiceDocument[]
@@ -3864,6 +3865,38 @@ model InventoryTransaction {
   @@index([salesOrderId])
   @@index([itemId, warehouseId, occurredAt])
   @@index([sourceType, sourceId])
+}
+
+/// Where a product moved in Odoo before G-CORE (2026-11-25, the owner's
+/// "Product Moves" export): HISTORY ONLY, read on the stock card. It never
+/// touches a balance, an average cost, a report or a slip — G-CORE's own
+/// movements are InventoryTransaction.
+model OdooStockMove {
+  id     String @id @default(cuid())
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  occurredAt   DateTime
+  /// Odoo's document: WH/OUT/04895, WH/IN/02323, "Product Quantity Updated".
+  reference    String
+  /// RECEIPT | DELIVERY | RETURN_IN | RETURN_OUT | ADJUSTMENT | TRANSFER | OTHER
+  kind         String
+  /// +1 into the warehouse, -1 out of it, 0 inside it.
+  direction    Int      @default(0)
+  fromLocation String
+  toLocation   String
+  /// The customer, supplier or project name as Odoo wrote it — never linked.
+  contact      String?
+  quantity     Decimal  @db.Decimal(18, 3)
+  unit         String?
+  createdByName String?
+  /// The once-only key: the same line imported twice adds nothing.
+  importKey    String
+
+  createdAt DateTime @default(now())
+
+  @@unique([itemId, importKey])
+  @@index([itemId, occurredAt])
 }
 
 // ════════════════════════════════════════════════════════════════════
