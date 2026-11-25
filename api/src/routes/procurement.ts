@@ -1,6 +1,7 @@
 import { QUOTATION_CURRENCY_CODES, quotationTotals } from '../shared/quotation';
 import { noRateMessage, orderInPesos, orderLandedTotal, rateForOrder, receiptUnitCost, restateReceiptLine, RESTATE_SELECT, basisWords, discountFactor } from '../shared/receiptCost';
 import { Router } from 'express';
+import { stockRequestRoute } from '../shared/stockRequestRoute';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -672,11 +673,21 @@ purchaseRequestRoutes.get(
     if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
     const requestId = req.query.requestId ? String(req.query.requestId) : null;
     const pr = requestId
-      ? await prisma.purchaseRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true } })
+      ? await prisma.purchaseRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true, kind: true, items: { select: { itemId: true } } } })
       : null;
     if (requestId && !pr) throw notFound('Purchase request not found');
     const jobId = pr?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
-    res.json({ route: await routeBrief('purchase_request', amount, pr?.requestedById ?? me.id, null, { jobId }) });
+    // A warehouse request's own route (2026-11-25) — as the page stands
+    // (`kind`, `itemIds`), else as the request is saved.
+    const kind = req.query.kind ? String(req.query.kind) : (pr?.kind ?? 'DIRECT_TO_JOB');
+    const itemIds = req.query.itemIds !== undefined ? String(req.query.itemIds).split(',').filter(Boolean).slice(0, 500) : (pr?.items.map((i) => i.itemId) ?? []);
+    const stock = await stockRequestRoute(kind, itemIds);
+    res.json({
+      route:
+        (stock.optionId ? await routeBrief('purchase_request', amount, pr?.requestedById ?? me.id, stock.optionId, { jobId }) : null) ??
+        (await routeBrief('purchase_request', amount, pr?.requestedById ?? me.id, null, { jobId })),
+      stockRoute: stock.route,
+    });
   }),
 );
 
@@ -762,6 +773,13 @@ purchaseRequestRoutes.get(
       canWithdraw: pr.status === 'PENDING_APPROVAL' && mayEditPr(me, pr),
       // POST /:id/cancel's own rule, short of the canvass check it makes itself.
       canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status) && pr.orders.length === 0 && mayEditPr(me, pr),
+      // DELETE /:id's own rule. A warehouse request is never deleted (2026-11-25).
+      canDelete:
+        pr.kind !== 'STOCK_REPLENISHMENT' &&
+        ['DRAFT', 'REJECTED', 'CANCELLED'].includes(pr.status) &&
+        can(me, 'gchain.purchase_requests.delete') &&
+        mayDeleteDocument(me, pr.requestedById),
+      kept: pr.kind === 'STOCK_REPLENISHMENT',
     });
   }),
 );
@@ -1394,11 +1412,16 @@ purchaseRequestRoutes.post(
     });
     if (!claimed.count) throw badRequest('This request has already been submitted');
 
+    // The warehouse's request takes its own route — the Purchasing Manager
+    // alone, or with the Cost Controller and the CEO where a line is an
+    // imported brand's (2026-11-25).
+    const stockRoute = await stockRequestRoute(pr.kind, pr.items.map((i) => i.itemId));
     try {
       await submitForApproval({
         documentType: 'purchase_request',
         documentId: pr.id,
         documentNumber: pr.number,
+        optionId: stockRoute.optionId,
         subject: `${pr.job ? `${pr.job.number} — ` : pr.salesOrder ? `${pr.salesOrder.number} — ` : ''}${pr.purpose}`,
         amount: total,
         link: `/g-chain/purchase-requests/${pr.id}`,
@@ -1722,6 +1745,10 @@ purchaseRequestRoutes.delete(
     });
     if (!pr) throw notFound('Purchase request not found');
     assertMayDelete(currentUser(req), pr.requestedById, pr.number);
+    // The warehouse's requests are a record of what the shelf asked for
+    // (2026-11-25, the owner's call: "no delete even if the purchase request
+    // has been cancelled") — cancelled with its reason, kept.
+    if (pr.kind === 'STOCK_REPLENISHMENT') throw badRequest(STOCK_REQUEST_KEPT(pr.number));
     if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED' && pr.status !== 'CANCELLED') {
       throw badRequest('Only a draft, rejected or cancelled request can be deleted — cancel it first');
     }
@@ -1744,6 +1771,12 @@ purchaseRequestRoutes.delete(
 // ════════════════════════════════════════════════════════════════════
 
 export const canvassRoutes = Router();
+
+/** Why a warehouse request has no Delete. */
+function STOCK_REQUEST_KEPT(number: string) {
+  return `${number} is a warehouse stock request, and those are kept — cancel it with its reason instead`;
+}
+
 canvassRoutes.use(authenticate);
 
 /*
@@ -4996,7 +5029,9 @@ purchaseRequestRoutes.get(
     const slots = await approvalSlots(
       'purchase_request',
       pr.id,
-      pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById, jobId: pr.jobId } : undefined,
+      pr.status === 'DRAFT'
+        ? { amount: estimatedTotal, requesterId: pr.requestedById, jobId: pr.jobId, optionId: (await stockRequestRoute(pr.kind, pr.items.map((i) => i.itemId))).optionId }
+        : undefined,
     );
     const signatories: Signatory[] = [
       { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: preparedAt(slots) ?? pr.createdAt },

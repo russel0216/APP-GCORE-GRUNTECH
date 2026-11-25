@@ -240,6 +240,8 @@ interface PrDetail {
   quotation?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
+  /** DELETE's own rule; false on a warehouse stock request, which is kept (2026-11-25). */
+  canDelete?: boolean;
   items: PrItem[];
   canvasses: { id: string; number: string; status: string; createdAt: string }[];
   rfqs: { id: string; number: string; status: string; createdAt: string; _count: { suppliers: number; items: number } }[];
@@ -358,7 +360,9 @@ export function PurchaseRequestDetail() {
 
   const sourcing = pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED';
   // The API's own rule: a draft or rejected request with no order raised from it.
+  // A warehouse stock request is kept, cancelled or not (2026-11-25): the API says so in `canDelete`.
   const deletable =
+    pr.canDelete !== false &&
     (pr.status === 'DRAFT' || pr.status === 'REJECTED' || pr.status === 'CANCELLED') &&
     pr.orders.length === 0 &&
     can('gchain.purchase_requests.delete') &&

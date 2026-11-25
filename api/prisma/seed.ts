@@ -166,6 +166,33 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // The WAREHOUSE's purchase request (2026-11-25, the owner's call): the
+    // automatic reorder, consumables and local buying go to the Purchasing
+    // Manager (Local) alone. Marked by its option label, which a standard
+    // pick never lands on — `stockRequestRoute()` asks for it by that label
+    // for every stock replenishment (shared/stockRequestRoute.ts).
+    documentType: 'purchase_request',
+    name: 'Purchase Request — warehouse stock, local (purchasing manager)',
+    optionLabel: 'Warehouse stock — local purchase',
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Purchasing Manager (Local)', approverType: 'ROLE', roleKey: 'purchasing_manager' }],
+  },
+  {
+    // … and with the Cost Controller and the CEO / President where a line is
+    // an imported brand's (a product group ticked "Imported brand").
+    documentType: 'purchase_request',
+    name: 'Purchase Request — warehouse stock, imported (purchasing manager, cost controller, CEO)',
+    optionLabel: 'Warehouse stock — imported brand',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Purchasing Manager (Local)', approverType: 'ROLE', roleKey: 'purchasing_manager' },
+      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
     // BUDGET REQUEST (project cash): Team Leader, Admin Back Support (the
     // holders supporting the preparer's team), Finance Manager, and the CEO /
     // President above ₱100,000. The project manager's step of 2026-10-07 is
@@ -1225,6 +1252,17 @@ async function main() {
     if (added) console.log(`  · Added ${added} quotation group(s) from the lines that use them`);
     // The owner's twelve, with what each covers and its brand; blanks filled, nothing overwritten.
     const owned = await seedOwnerGroups();
+    // The brands the owner named as imported (2026-11-25: "international like
+    // omega, prevost"), ticked ONCE — the rest are his to tick on Admin ›
+    // Categories › Quotation groups, and one he unticks stays unticked.
+    {
+      const MARK = 'seed.importedGroups20261125';
+      if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+        const { count } = await prisma.quotationGroup.updateMany({ where: { key: { in: ['omega air', 'prevost'] } }, data: { isImported: true } });
+        await prisma.setting.create({ data: { key: MARK, value: { at: new Date().toISOString(), marked: count } } });
+        if (count) console.log(`  · Marked ${count} product group(s) as imported brands`);
+      }
+    }
     if (owned) console.log(`  · Seeded ${owned} of the owner's quotation group(s)`);
   }
 

@@ -23,6 +23,8 @@ import fs from 'fs';
 import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/attachments';
 import { clearPhoto, setPhoto } from '../shared/catalogue';
 import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/middleware';
+import { groupWhere, itemSearchWhere } from '../shared/itemSearch';
+import { ITEM_MANAGER_REFUSAL, mayManageItems } from '../shared/itemManagers';
 import { can } from '../permissions/resolve';
 import { requireSupplierPicker } from '../shared/pickers';
 import { audit } from '../shared/audit';
@@ -679,7 +681,7 @@ itemRoutes.use(authenticate);
 
 function itemNumbers(row: Record<string, unknown>): Record<string, unknown> {
   const out = { ...row };
-  for (const f of ['standardCost', 'lastCost', 'listPrice', 'minStock', 'reorderLevel']) {
+  for (const f of ['standardCost', 'lastCost', 'listPrice', 'minStock', 'reorderLevel', 'maxStock']) {
     if (out[f] != null) out[f] = Number(out[f]);
   }
   return out;
@@ -691,17 +693,11 @@ const ITEM_SORTS = ['code', 'name', 'createdAt'];
 export function itemListWhere(q: ListQuery): Prisma.ItemWhereInput {
   const and: Prisma.ItemWhereInput[] = [];
   const f = q.filters;
-  if (q.search) {
-    and.push({
-      OR: [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { partNumber: { contains: q.search, mode: 'insensitive' } },
-        { brand: { contains: q.search, mode: 'insensitive' } },
-        { description: { contains: q.search, mode: 'insensitive' } },
-      ],
-    });
-  }
+  // Several searches at once, a comma between them (2026-11-25).
+  const found = itemSearchWhere(q.search);
+  if (found) and.push(found);
+  const group = groupWhere(f.group);
+  if (group) and.push(group);
   if (f.isActive) {
     if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is one of Active, Inactive');
     and.push({ isActive: f.isActive === 'true' });
@@ -723,6 +719,8 @@ itemRoutes.get(
     const q = listQuery(req);
     // View Own lists the items the caller added (2026-10-18).
     const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), (ids) => ({ createdById: { in: ids } }));
+    // Changing or deleting one is the warehouse's leads' alone (2026-11-25).
+    const lead = await mayManageItems(me);
 
     const [rows, total] = await Promise.all([
       prisma.item.findMany({
@@ -741,7 +739,10 @@ itemRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({ ...(itemNumbers(r) as typeof r), canEdit: mayEdit(me, 'gchain', 'items', r.createdById === me.id, r.createdById) })),
+        rows.map((r) => {
+          const canEdit = lead && mayEdit(me, 'gchain', 'items', r.createdById === me.id, r.createdById);
+          return { ...(itemNumbers(r) as typeof r), canEdit, canDelete: canEdit };
+        }),
         total,
         q,
       ),
@@ -775,12 +776,11 @@ itemRoutes.get(
           itemType: true,
           unit: true,
           standardCost: true,
-          listPrice: true,
-          listPriceCurrency: true,
+          minStock: true,
           reorderLevel: true,
+          maxStock: true,
           isActive: true,
-          category: { select: { name: true } },
-          costCategory: { select: { name: true } },
+          productGroup: true,
         },
         orderBy: orderBy(q, ITEM_SORTS, { name: 'asc' }),
         take: LIST_CAP,
@@ -790,11 +790,12 @@ itemRoutes.get(
       f.categoryId ? prisma.itemCategory.findUnique({ where: { id: f.categoryId }, select: { name: true } }) : null,
       f.costCategoryId ? prisma.costCategory.findUnique({ where: { id: f.costCategoryId }, select: { name: true } }) : null,
     ]);
+    void costCategory;
     const reference = listReference(count, rows.length, ['item', 'items'], [
       q.search && `search "${q.search}"`,
       f.itemType && `type ${statusLabel(f.itemType)}`,
+      f.group && (f.group === 'none' ? 'no product group' : `product group ${f.group}`),
       f.categoryId && `category ${category?.name ?? 'not found'}`,
-      f.costCategoryId && `cost bucket ${costCategory?.name ?? 'not found'}`,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' && 'inactive',
       f.ids && 'the rows selected',
     ]);
@@ -809,18 +810,17 @@ itemRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Item', 'Type', 'Category', 'Cost bucket', 'Unit', `Standard cost (${currency})`, 'List price', 'Reorder at', 'Status'],
-          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+          head: ['Code', 'Item', 'Product group', 'Unit', `Standard cost (${currency})`, 'Minimum', 'Reorder at', 'Maximum', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'left'],
           rows: rows.map((i) => [
             i.code,
             { title: i.name, body: [i.brand, i.partNumber].filter(Boolean).join(' · ') || undefined },
-            statusLabel(i.itemType),
-            i.category?.name ?? '',
-            i.costCategory?.name ?? '',
+            i.productGroup ?? '',
             i.unit,
             i.standardCost == null ? '' : formatAmount(Number(i.standardCost)),
-            i.listPrice == null ? '' : formatMoney(Number(i.listPrice), i.listPriceCurrency?.trim() || currency),
+            i.minStock == null ? '' : quantity(i.minStock),
             i.reorderLevel == null ? '' : quantity(i.reorderLevel),
+            i.maxStock == null ? '' : quantity(i.maxStock),
             i.isActive ? 'Active' : 'Inactive',
           ]),
         },
@@ -877,9 +877,11 @@ itemRoutes.get(
     if (!item) throw notFound('Item not found');
     // View Own reads only the items the caller added (2026-10-18).
     assertCanView(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
+    const canEdit = (await mayManageItems(me)) && mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
     res.json({
       ...itemNumbers(item),
-      canEdit: mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById),
+      canEdit,
+      canDelete: canEdit,
       stockBalances: [],
       movements: [],
     });
@@ -924,12 +926,36 @@ const itemSchema = z.object({
   isStocked: z.boolean().default(true),
   minStock: z.number().nonnegative().optional().nullable(),
   reorderLevel: z.number().nonnegative().optional().nullable(),
+  /** What the automatic reorder tops the shelf up to (2026-11-25); blank is the reorder level. */
+  maxStock: z.number().nonnegative().optional().nullable(),
   preferredSupplierId: z.string().optional().nullable(),
   isActive: z.boolean().default(true),
   notes: z.string().optional().nullable(),
 });
 
 const dec = (v: number | null | undefined) => (v != null ? new Prisma.Decimal(v) : null);
+
+/**
+ * The three levels in order (2026-11-25): minimum ≤ reorder level ≤ maximum,
+ * wherever two of them are set. A maximum under the reorder level would ask
+ * the automatic reorder for nothing.
+ */
+function checkLevels(l: { minStock: number | null; reorderLevel: number | null; maxStock: number | null }) {
+  if (l.minStock != null && l.reorderLevel != null && l.minStock > l.reorderLevel) {
+    throw badRequest('Minimum stock cannot be more than the reorder level');
+  }
+  if (l.maxStock != null && l.reorderLevel != null && l.maxStock < l.reorderLevel) {
+    throw badRequest('Maximum stock cannot be less than the reorder level');
+  }
+  if (l.maxStock != null && l.minStock != null && l.maxStock < l.minStock) {
+    throw badRequest('Maximum stock cannot be less than the minimum stock');
+  }
+}
+
+/** The budget line a new item lands in when the form names none: Materials (2026-11-25, the box left the form). */
+async function defaultCostCategory(): Promise<string | null> {
+  return (await prisma.costCategory.findFirst({ where: { code: 'MAT' }, select: { id: true } }))?.id ?? null;
+}
 
 itemRoutes.post(
   '/',
@@ -938,6 +964,8 @@ itemRoutes.post(
     const me = currentUser(req);
     const body = parseBody(itemSchema, req.body);
     const productGroup = await itemProductGroup(body.productGroup);
+    checkLevels({ minStock: body.minStock ?? null, reorderLevel: body.reorderLevel ?? null, maxStock: body.maxStock ?? null });
+    const costCategoryId = body.costCategoryId || (await defaultCostCategory());
 
     const item = await prisma.$transaction(async (tx) => {
       const code = body.code || (await nextNumber('item', tx));
@@ -954,7 +982,7 @@ itemRoutes.post(
           itemType: body.itemType,
           categoryId: body.categoryId || null,
           productGroup,
-          costCategoryId: body.costCategoryId || null,
+          costCategoryId,
           unit: body.unit,
           standardCost: dec(body.standardCost),
           listPrice: dec(body.listPrice),
@@ -963,6 +991,7 @@ itemRoutes.post(
           isStocked: body.isStocked,
           minStock: dec(body.minStock),
           reorderLevel: dec(body.reorderLevel),
+          maxStock: dec(body.maxStock),
           preferredSupplierId: body.preferredSupplierId || null,
           isActive: body.isActive,
           notes: body.notes || null,
@@ -998,6 +1027,9 @@ itemRoutes.patch(
     if (!before) throw notFound('Item not found');
     // Edit Own changes only the items the caller added (2026-10-18).
     assertCanEdit(me, 'gchain', 'items', before.createdById === me.id, before.createdById);
+    if (!(await mayManageItems(me))) throw forbidden(ITEM_MANAGER_REFUSAL);
+    const level = (f: 'minStock' | 'reorderLevel' | 'maxStock') => (body[f] !== undefined ? (body[f] ?? null) : before[f] == null ? null : Number(before[f]));
+    checkLevels({ minStock: level('minStock'), reorderLevel: level('reorderLevel'), maxStock: level('maxStock') });
 
     if (body.code && body.code !== before.code) {
       if (await prisma.item.findUnique({ where: { code: body.code } })) {
@@ -1020,7 +1052,7 @@ itemRoutes.patch(
     if (body.unit !== undefined) data.unit = body.unit;
     if (body.isStocked !== undefined) data.isStocked = body.isStocked;
     if (body.isActive !== undefined) data.isActive = body.isActive;
-    for (const f of ['standardCost', 'listPrice', 'minStock', 'reorderLevel'] as const) {
+    for (const f of ['standardCost', 'listPrice', 'minStock', 'reorderLevel', 'maxStock'] as const) {
       if (body[f] !== undefined) data[f] = dec(body[f]);
     }
     if (body.listPriceCurrency !== undefined) data.listPriceCurrency = body.listPriceCurrency || null;
@@ -1040,7 +1072,7 @@ itemRoutes.patch(
     );
     // A reorder level raised over what is on the shelf starts the automatic
     // reorder for it, wherever it is held.
-    if (body.reorderLevel !== undefined || body.isActive !== undefined || body.isStocked !== undefined) {
+    if (body.reorderLevel !== undefined || body.maxStock !== undefined || body.isActive !== undefined || body.isStocked !== undefined) {
       const held = await prisma.inventoryBalance.findMany({ where: { itemId: item.id }, select: { warehouseId: true } });
       for (const h of held) queueReorderCheck(item.id, h.warehouseId);
     }
@@ -1049,16 +1081,21 @@ itemRoutes.patch(
 );
 
 /**
- * Only a super admin deletes an item (2026-10-25, the owner's call), and only
- * one that never moved: an item with stock or any movement is history the
- * stock card and its documents read — deactivate it instead.
+ * An item is deleted by the warehouse's leads — the Warehouse Officer, the
+ * person they report to, the CEO / President — or a super admin (2026-11-25;
+ * a super admin alone since 2026-10-25), and only one that never moved: an
+ * item with stock or any movement is history the stock card and its
+ * documents read — deactivate it instead.
  */
 itemRoutes.delete(
   '/:id',
-  requireSuperAdmin,
+  requireEdit('gchain', 'items'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const item = await prisma.item.findUnique({ where: { id: req.params.id } });
     if (!item) throw notFound('Item not found');
+    assertCanEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
+    if (!(await mayManageItems(me))) throw forbidden(ITEM_MANAGER_REFUSAL);
     const [moves, held] = await Promise.all([
       prisma.inventoryTransaction.count({ where: { itemId: item.id } }),
       prisma.inventoryBalance.count({ where: { itemId: item.id, OR: [{ quantity: { not: 0 } }, { borrowedQty: { not: 0 } }] } }),
@@ -1092,6 +1129,7 @@ async function itemForPhoto(me: Me, id: string) {
   const item = await prisma.item.findUnique({ where: { id }, select: { id: true, code: true, name: true, createdById: true } });
   if (!item) throw notFound('Item not found');
   assertCanEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
+  if (!(await mayManageItems(me))) throw forbidden(ITEM_MANAGER_REFUSAL);
   return item;
 }
 
@@ -1672,6 +1710,8 @@ const quotationGroupSchema = z.object({
   brand: z.string().trim().max(120).optional().nullable(),
   sortOrder: z.number().int().default(0),
   isActive: z.boolean().default(true),
+  /** An imported brand: a warehouse request holding its items takes the longer route (2026-11-25). */
+  isImported: z.boolean().default(false),
 });
 
 referenceRoutes.post(

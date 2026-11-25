@@ -378,19 +378,26 @@ export function PurchaseRequisitionEditor() {
   }, [direct, header.jobId]);
 
   const total = useMemo(() => Math.round(lines.reduce((s, l) => s + amountOf(l) * 100, 0)) / 100, [lines]);
+  /** The items on the page, for the route: an imported brand's item lengthens a warehouse request's. */
+  const routeItems = useMemo(() => [...new Set(lines.map((l) => l.itemId).filter(Boolean))].join(','), [lines]);
+  const [stockRoute, setStockRoute] = useState<'standard' | 'local' | 'imported'>('standard');
 
   // The route submitting would take, as the request stands.
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(
-          `/purchase-requests/route${qs({ amount: String(total), jobId: direct ? header.jobId : '', requestId: id ?? '' })}`,
+        .get<{ route: Route | null; stockRoute?: 'standard' | 'local' | 'imported' }>(
+          // A warehouse request's route reads its kind and its items as the page stands (2026-11-25).
+          `/purchase-requests/route${qs({ amount: String(total), jobId: direct ? header.jobId : '', requestId: id ?? '', kind: header.kind, itemIds: routeItems })}`,
         )
-        .then((r) => setRoute(r.route))
+        .then((r) => {
+          setRoute(r.route);
+          setStockRoute(r.stockRoute ?? 'standard');
+        })
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [total, direct, header.jobId, id]);
+  }, [total, direct, header.jobId, header.kind, routeItems, id]);
 
   const dirty = saved !== null && snapshot(header, lines) !== saved;
   useUnsavedChanges(dirty && !busy);
@@ -1022,6 +1029,9 @@ export function PurchaseRequisitionEditor() {
             <p className="prq-hint">
               Requested by {existing?.requestedBy.name ?? 'you'}. The approvers come from the approval route (Admin ›
               Approval Workflows), never picked on the form.
+              {stockRoute === 'local' && ' A warehouse stock request goes to the Purchasing Manager (Local) alone.'}
+              {stockRoute === 'imported' &&
+                ' A line here is an imported brand’s, so this warehouse request also goes to the Cost Controller and the CEO / President.'}
             </p>
           </section>
 

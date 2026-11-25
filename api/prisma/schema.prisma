@@ -1156,6 +1156,9 @@ model Item {
   isStocked    Boolean  @default(true)
   minStock     Decimal? @db.Decimal(18, 3)
   reorderLevel Decimal? @db.Decimal(18, 3)
+  /// What the automatic reorder tops the shelf up TO (2026-11-25, the owner's
+  /// audit: a 300 reorder level asked for 600). Blank: up to the reorder level.
+  maxStock     Decimal? @db.Decimal(18, 3)
 
   preferredSupplierId String?
   preferredSupplier   Supplier? @relation("PreferredSupplier", fields: [preferredSupplierId], references: [id], onDelete: SetNull)
@@ -1947,6 +1950,10 @@ model QuotationGroup {
   sortOrder   Int      @default(0)
   /// Inactive: no longer suggested. Lines already filed under it keep it.
   isActive    Boolean  @default(true)
+  /// An IMPORTED brand (2026-11-25, the owner's call: "international like
+  /// omega, prevost"): a warehouse purchase request holding an item of such a
+  /// group takes the longer route — Purchasing Manager, Cost Controller, CEO.
+  isImported  Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.

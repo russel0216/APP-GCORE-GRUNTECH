@@ -54,7 +54,9 @@ import {
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
 import { settleBorrowSlip, settleReceiving, settleStockIssue } from '../src/routes/warehouse';
 import { settlePullout } from '../src/routes/pullouts';
-import { runReorderCheck } from '../src/shared/reorder';
+import { runReorderCheck, reorderQuantity } from '../src/shared/reorder';
+import { searchTerms } from '../src/shared/itemSearch';
+import { stockRequestRoute, STOCK_LOCAL_OPTION, STOCK_IMPORT_OPTION } from '../src/shared/stockRequestRoute';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -2559,10 +2561,19 @@ async function main() {
     await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: true } });
     const delCancelled = await api(requesterToken, 'DELETE', `/purchase-requests/${big.id}`);
     await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: false } });
+    // A WAREHOUSE request is never deleted, cancelled or not (2026-11-25).
+    await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: true } });
+    const keptFlags = await api(requesterToken, 'GET', `/purchase-requests/${big.id}`);
+    await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: false } });
     check(
-      'a cancelled request is deleted with the delete right, not without it',
-      delNoRight.status === 403 && delCancelled.status === 200 && !(await prisma.purchaseRequest.findUnique({ where: { id: big.id } })),
-      `${delNoRight.status} ${delCancelled.status}`,
+      'a cancelled warehouse stock request is kept: no Delete even for a super admin, and the page is told so',
+      delNoRight.status === 403 &&
+        delCancelled.status === 400 &&
+        /kept/.test(JSON.stringify(delCancelled.body)) &&
+        keptFlags.body.canDelete === false &&
+        keptFlags.body.kept === true &&
+        !!(await prisma.purchaseRequest.findUnique({ where: { id: big.id } })),
+      `${delNoRight.status} ${delCancelled.status} canDelete ${keptFlags.body.canDelete}`,
     );
 
     // ── The printed request once it is refused ──────────────────────────
@@ -6150,9 +6161,24 @@ async function main() {
     });
     const bltLine = autoPrs.flatMap((pr) => pr.items).find((i) => i.itemId === blt.id);
     const bltBalance = await prisma.inventoryBalance.findUniqueOrThrow({ where: { itemId_warehouseId: { itemId: blt.id, warehouseId: warehouse.id } } });
-    const expectedQty = Math.ceil(2 * 5 - (num(bltBalance.quantity) - num(bltBalance.borrowedQty)));
+    // Up to the reorder level while the item names no maximum (2026-11-25).
+    const expectedQty = Math.max(1, Math.ceil(5 - (num(bltBalance.quantity) - num(bltBalance.borrowedQty))));
     check(
-      'the automatic reorder adds a fallen item to its warehouse\'s one draft replenishment (twice the level less what is there), never twice, never an item over its level, and never submits it',
+      'the reorder quantity tops up to the maximum stock, else to the reorder level, less what is there and on the way — the owner\'s 300 m level asks 300, or 600 with a 600 maximum',
+      reorderQuantity({ reorderLevel: 300, maxStock: null, available: 0, coming: 0 }) === 300 &&
+        reorderQuantity({ reorderLevel: 300, maxStock: 600, available: 0, coming: 0 }) === 600 &&
+        reorderQuantity({ reorderLevel: 300, maxStock: 600, available: 120, coming: 80 }) === 400 &&
+        reorderQuantity({ reorderLevel: 300, maxStock: 200, available: 0, coming: 0 }) === 300 &&
+        reorderQuantity({ reorderLevel: 300, maxStock: null, available: 300, coming: 0 }) === 1 &&
+        reorderQuantity({ reorderLevel: 2.5, maxStock: 10, available: 0.75, coming: 0 }) === 10,
+      [
+        reorderQuantity({ reorderLevel: 300, maxStock: null, available: 0, coming: 0 }),
+        reorderQuantity({ reorderLevel: 300, maxStock: 600, available: 0, coming: 0 }),
+        reorderQuantity({ reorderLevel: 300, maxStock: 600, available: 120, coming: 80 }),
+      ].join('/'),
+    );
+    check(
+      'the automatic reorder adds a fallen item to its warehouse\'s one draft replenishment (up to its level less what is there), never twice, never an item over its level, and never submits it',
       firstAdd.length === 1 &&
         firstAdd[0].itemId === blt.id &&
         secondAdd.length === 0 &&
@@ -7149,16 +7175,87 @@ async function odooMigration() {
     data: { email: 'itemeditor@verifyc.local', name: `${TAG} Item Editor`, passwordHash: 'x', roles: { create: { roleId: editorRole.id } } },
   });
   const editorToken = signToken(editor.id, editor.email);
+  // Changing an item is the warehouse's leads' (2026-11-25): the Warehouse
+  // Officer role beside the edit right — the right alone changes nothing.
+  const officerRole = await prisma.role.findUniqueOrThrow({ where: { key: 'warehouse_supervisor' } });
+  const lead = await prisma.user.create({
+    data: {
+      email: 'itemlead@verifyc.local',
+      name: `${TAG} Item Lead`,
+      passwordHash: 'x',
+      roles: { create: [{ roleId: editorRole.id }, { roleId: officerRole.id }] },
+    },
+  });
+  const leadToken = signToken(lead.id, lead.email);
   const form = new FormData();
   form.append('file', new Blob([Buffer.from(png, 'base64')], { type: 'image/png' }), 'pump.png');
-  const up = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${editorToken}` }, body: form });
+  const form2 = new FormData();
+  form2.append('file', new Blob([Buffer.from(png, 'base64')], { type: 'image/png' }), 'pump.png');
+  const upRefused = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${editorToken}` }, body: form2 });
+  const up = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${leadToken}` }, body: form });
   const tapeAfter = await prisma.item.findUniqueOrThrow({ where: { id: tape.id } });
-  const off = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'DELETE', headers: { Authorization: `Bearer ${editorToken}` } });
+  const off = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'DELETE', headers: { Authorization: `Bearer ${leadToken}` } });
   const tapeOff = await prisma.item.findUniqueOrThrow({ where: { id: tape.id } });
   check(
-    "whoever may change the item sets and removes its photo; the photo's file goes with it",
-    up.ok && !!tapeAfter.photoId && off.ok && tapeOff.photoId === null && !(await prisma.attachment.findUnique({ where: { id: tapeAfter.photoId! } })),
-    `${up.status} ${off.status}`,
+    "the warehouse's lead sets and removes an item's photo — the edit right alone does not; the photo's file goes with it",
+    upRefused.status === 403 && up.ok && !!tapeAfter.photoId && off.ok && tapeOff.photoId === null && !(await prisma.attachment.findUnique({ where: { id: tapeAfter.photoId! } })),
+    `${upRefused.status} ${up.status} ${off.status}`,
+  );
+  const patchRefused = await api(editorToken, 'PATCH', `/items/${tape.id}`, { notes: 'not mine to change' });
+  const badLevels = await api(leadToken, 'PATCH', `/items/${tape.id}`, { minStock: 150, reorderLevel: 300, maxStock: 200 });
+  const goodLevels = await api(leadToken, 'PATCH', `/items/${tape.id}`, { minStock: 150, reorderLevel: 300, maxStock: 600 });
+  const editorRead = await api(editorToken, 'GET', `/items/${tape.id}`);
+  const leadRead = await api(leadToken, 'GET', `/items/${tape.id}`);
+  check(
+    'an item is changed by the Warehouse Officer (or whoever they report to), never on the edit right alone; a maximum under the reorder level is refused, and the three levels are kept',
+    patchRefused.status === 403 &&
+      badLevels.status === 400 &&
+      goodLevels.status === 200 &&
+      Number(goodLevels.body.maxStock) === 600 &&
+      editorRead.body.canEdit === false &&
+      editorRead.body.canDelete === false &&
+      leadRead.body.canEdit === true &&
+      leadRead.body.canDelete === true,
+    `${patchRefused.status} ${badLevels.status} ${goodLevels.status} max ${goodLevels.body.maxStock}; editor ${editorRead.body.canEdit}, lead ${leadRead.body.canEdit}`,
+  );
+  await prisma.item.update({ where: { id: tape.id }, data: { minStock: null, reorderLevel: null, maxStock: null } });
+
+  // Several searches at once, the product group as the category, and who moved it (2026-11-25).
+  const both = await api(token, 'GET', `/inventory?search=${encodeURIComponent(`${pump.partNumber}, ${tape.partNumber}`)}&pageSize=50`);
+  const one = await api(token, 'GET', `/inventory?search=${encodeURIComponent(String(pump.partNumber))}&pageSize=50`);
+  const bothIds = new Set(((both.body.rows ?? []) as { item: { id: string } }[]).map((r) => r.item.id));
+  const oneIds = new Set(((one.body.rows ?? []) as { item: { id: string } }[]).map((r) => r.item.id));
+  check(
+    'a comma separates searches: two part numbers list both items, one lists its own — and the terms are read once each, blanks dropped',
+    both.status === 200 &&
+      bothIds.has(pump.id) &&
+      bothIds.has(tape.id) &&
+      oneIds.has(pump.id) &&
+      !oneIds.has(tape.id) &&
+      searchTerms(' Contactor ,, wire , CONTACTOR ').join('|') === 'Contactor|wire',
+    `${both.status}: both ${bothIds.has(pump.id)}/${bothIds.has(tape.id)}, one ${oneIds.has(pump.id)}/${oneIds.has(tape.id)}; ${searchTerms(' Contactor ,, wire , CONTACTOR ').join('|')}`,
+  );
+  const pumpRow = await prisma.item.findUniqueOrThrow({ where: { id: pump.id }, select: { productGroup: true } });
+  const tiles = (one.body.summary?.categories ?? []) as { id: string; name: string; items: number }[];
+  const pumpGroup = pumpRow.productGroup ?? 'none';
+  const byGroup = await api(token, 'GET', `/inventory?search=${encodeURIComponent(String(pump.partNumber))}&group=${encodeURIComponent(pumpGroup)}&pageSize=50`);
+  const otherGroup = await api(token, 'GET', `/inventory?search=${encodeURIComponent(String(pump.partNumber))}&group=${encodeURIComponent('ZZ NO SUCH GROUP')}&pageSize=50`);
+  check(
+    "the inventory's tiles are the quotation's product groups: the item's group is a tile, filters to it, and another group lists nothing",
+    tiles.some((t) => t.id === pumpGroup && t.items >= 1) && byGroup.body.total >= 1 && otherGroup.body.total === 0,
+    `group ${pumpGroup}; tiles ${tiles.map((t) => `${t.id}:${t.items}`).join(', ')}; ${byGroup.body.total}/${otherGroup.body.total}`,
+  );
+  const moves = await api(token, 'GET', `/inventory/movements?itemId=${pump.id}&limit=20`);
+  const moveRows = (moves.body ?? []) as { quantity: number; balanceBefore: number; balanceAfter: number; createdBy: { id: string; name: string } | null }[];
+  const movers = await api(token, 'GET', '/inventory/movements/people');
+  check(
+    'the movement log says who moved it and what the shelf held before and after, and lists the people to narrow to',
+    moves.status === 200 &&
+      moveRows.length >= 1 &&
+      moveRows.every((m) => Math.abs(m.balanceBefore + m.quantity - m.balanceAfter) < 0.0005 && 'createdBy' in m) &&
+      movers.status === 200 &&
+      Array.isArray(movers.body),
+    `${moves.status} ${moveRows.length} row(s), first ${JSON.stringify(moveRows[0] ?? null)}; people ${movers.status}`,
   );
   // A big Odoo export (2026-10-25, the owner's report: "Something went wrong
   // on our side"): past the ordinary 8 MB the Odoo imports still read it, and
@@ -7200,7 +7297,7 @@ async function odooMigration() {
   const stocked = await fetch(`${BASE}/items/${pump.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
   const emptyOne = await fetch(`${BASE}/items/${tape.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
   check(
-    'an item is deleted by a super admin alone, and only while it has no stock and no movements — its catalogue line goes with it',
+    "an item is deleted by the warehouse's leads or a super admin — never on the edit right alone — and only while it has no stock and no movements; its catalogue line goes with it",
     byEditor.status === 403 &&
       stocked.status === 400 &&
       emptyOne.ok &&
@@ -7208,6 +7305,74 @@ async function odooMigration() {
       (await prisma.inventoryBalance.count({ where: { itemId: tape.id } })) === 0,
     `${byEditor.status} ${stocked.status} ${emptyOne.status}`,
   );
+
+  // The warehouse's purchase request takes its own route (2026-11-25): the
+  // Purchasing Manager alone, or with the Cost Controller and the CEO where a
+  // line's item is an imported brand's. Routes and a group of the script's own.
+  console.log("\nThe warehouse request's route");
+  const roleId = async (key: string) => (await prisma.role.findUnique({ where: { key }, select: { id: true } }))?.id ?? null;
+  const groupName = `${TAG} IMPORTED BRAND`;
+  const importedGroup = await prisma.quotationGroup.create({ data: { name: groupName, key: groupName.toLowerCase(), isImported: true } });
+  const localRoute = await prisma.approvalWorkflow.create({
+    data: {
+      documentType: 'purchase_request',
+      name: `${TAG} warehouse local`,
+      optionLabel: STOCK_LOCAL_OPTION,
+      steps: { create: [{ sequence: 1, name: 'Purchasing Manager (Local)', approverType: 'ROLE', roleId: await roleId('purchasing_manager') }] },
+    },
+  });
+  const importRoute = await prisma.approvalWorkflow.create({
+    data: {
+      documentType: 'purchase_request',
+      name: `${TAG} warehouse imported`,
+      optionLabel: STOCK_IMPORT_OPTION,
+      steps: {
+        create: [
+          { sequence: 1, name: 'Purchasing Manager (Local)', approverType: 'ROLE', roleId: await roleId('purchasing_manager') },
+          { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleId: await roleId('cost_controller') },
+          { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleId: await roleId('ceo') },
+        ],
+      },
+    },
+  });
+  const pumpGroupWas = (await prisma.item.findUniqueOrThrow({ where: { id: pump.id }, select: { productGroup: true } })).productGroup;
+  try {
+    await prisma.item.update({ where: { id: pump.id }, data: { productGroup: groupName } });
+    const forProject = await stockRequestRoute('DIRECT_TO_JOB', [pump.id]);
+    const local = await stockRequestRoute('STOCK_REPLENISHMENT', [null]);
+    const imported = await stockRequestRoute('STOCK_REPLENISHMENT', [null, pump.id]);
+    const seen = await api(token, 'GET', `/purchase-requests/route?amount=1000&kind=STOCK_REPLENISHMENT&itemIds=${pump.id}`);
+    const seenLocal = await api(token, 'GET', '/purchase-requests/route?amount=1000&kind=STOCK_REPLENISHMENT&itemIds=');
+    const seenProject = await api(token, 'GET', `/purchase-requests/route?amount=1000&kind=DIRECT_TO_JOB&itemIds=${pump.id}`);
+    check(
+      "a warehouse stock request takes the Purchasing Manager's route — the longer one with the Cost Controller and the CEO once a line's item is an imported brand's; a project request never does",
+      forProject.route === 'standard' &&
+        forProject.optionId === null &&
+        local.route === 'local' &&
+        !!local.optionId &&
+        imported.route === 'imported' &&
+        !!imported.optionId &&
+        imported.optionId !== local.optionId &&
+        seen.body.stockRoute === 'imported' &&
+        (seen.body.route?.steps ?? []).length === 3 &&
+        seenLocal.body.stockRoute === 'local' &&
+        (seenLocal.body.route?.steps ?? []).length === 1 &&
+        seenProject.body.stockRoute === 'standard',
+      `${forProject.route}/${local.route}/${imported.route}; page ${seen.body.stockRoute} ${(seen.body.route?.steps ?? []).length} step(s), ${seenLocal.body.stockRoute} ${(seenLocal.body.route?.steps ?? []).length}, ${seenProject.body.stockRoute}`,
+    );
+    await prisma.approvalWorkflow.updateMany({ where: { id: { in: [localRoute.id, importRoute.id] } }, data: { isActive: false } });
+    const seededToo = await prisma.approvalWorkflow.count({ where: { documentType: 'purchase_request', isActive: true, optionLabel: { in: [STOCK_LOCAL_OPTION, STOCK_IMPORT_OPTION] } } });
+    const fallback = await stockRequestRoute('STOCK_REPLENISHMENT', [pump.id]);
+    check(
+      'with the warehouse routes switched off the request falls back to the standard route rather than stalling',
+      seededToo > 0 || (fallback.route === 'standard' && fallback.optionId === null),
+      `${seededToo} seeded route(s) active; ${fallback.route}`,
+    );
+  } finally {
+    await prisma.item.update({ where: { id: pump.id }, data: { productGroup: pumpGroupWas } });
+    await prisma.approvalWorkflow.deleteMany({ where: { id: { in: [localRoute.id, importRoute.id] } } });
+    await prisma.quotationGroup.delete({ where: { id: importedGroup.id } });
+  }
   await cleanupOdoo();
 }
 

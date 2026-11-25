@@ -37,7 +37,7 @@ async function overview(range: Range): Promise<Report> {
   const [balances, moves, overdue] = await Promise.all([
     prisma.inventoryBalance.findMany({
       include: {
-        item: { select: { id: true, code: true, name: true, isActive: true, reorderLevel: true, minStock: true, category: { select: { name: true } } } },
+        item: { select: { id: true, code: true, name: true, isActive: true, reorderLevel: true, minStock: true, productGroup: true } },
         warehouse: { select: { id: true, name: true } },
       },
     }),
@@ -66,7 +66,7 @@ async function overview(range: Range): Promise<Report> {
     else if (m.type === 'RETURN') series.add(m.occurredAt, 5, q);
   }
   const byWarehouse = tally(live, (b) => b.warehouse.name, (b) => [1, valueOf(b)]);
-  const byCategory = tally(live, (b) => b.item.category?.name ?? 'Uncategorised', (b) => [1, valueOf(b)]);
+  const byCategory = tally(live, (b) => b.item.productGroup?.trim() || 'No group', (b) => [1, valueOf(b)]);
   return {
     kind: 'overview',
     title: 'Supply Chain Overview',
@@ -81,7 +81,7 @@ async function overview(range: Range): Promise<Report> {
     series: series.done(),
     tables: [
       table('Stock by warehouse', [{ label: 'Warehouse' }, { label: 'Item lines', align: 'right' }, { label: 'Value', money: true }], byValue(byWarehouse, 1, 50).map(([k, v]) => [k, v[0], cents(v[1])])),
-      table('Stock by category', [{ label: 'Category' }, { label: 'Item lines', align: 'right' }, { label: 'Value', money: true }], byValue(byCategory, 1, 50).map(([k, v]) => [k, v[0], cents(v[1])])),
+      table('Stock by product group', [{ label: 'Product group' }, { label: 'Item lines', align: 'right' }, { label: 'Value', money: true }], byValue(byCategory, 1, 50).map(([k, v]) => [k, v[0], cents(v[1])])),
       table(
         'Needs reordering',
         [{ label: 'Item' }, { label: 'Warehouse' }, { label: 'Available', align: 'right' }, { label: 'Reorder at', align: 'right' }],
@@ -582,7 +582,7 @@ async function inventory(range: Range): Promise<Report> {
   const [balances, moves] = await Promise.all([
     prisma.inventoryBalance.findMany({
       include: {
-        item: { select: { id: true, code: true, name: true, isActive: true, brand: true, category: { select: { name: true } } } },
+        item: { select: { id: true, code: true, name: true, isActive: true, brand: true, productGroup: true } },
         warehouse: { select: { name: true } },
       },
     }),
@@ -619,7 +619,7 @@ async function inventory(range: Range): Promise<Report> {
     } else if (m.type === 'RETURN') series.add(m.occurredAt, 5, q);
   }
   const slow = live.filter((b) => num(b.quantity) > 0 && !movedOut.has(`${b.itemId}|${b.warehouseId}`)).sort((a, b) => valueOf(b) - valueOf(a));
-  const byCategory = tally(live, (b) => b.item.category?.name ?? 'Uncategorised', (b) => [1, num(b.quantity), valueOf(b)]);
+  const byCategory = tally(live, (b) => b.item.productGroup?.trim() || 'No group', (b) => [1, num(b.quantity), valueOf(b)]);
   // By brand (2026-10-25, the owner's call): one spelling per brand, case-blind; none is Trading.
   const brandName = new Map<string, string>();
   const byBrand = tally(
@@ -646,7 +646,7 @@ async function inventory(range: Range): Promise<Report> {
     ],
     series: series.done(),
     tables: [
-      table('Valuation by category', [{ label: 'Category' }, { label: 'Item lines', align: 'right' }, { label: 'On hand', align: 'right' }, { label: 'Value', money: true }], byValue(byCategory, 2, 30).map(([k, v]) => [k, v[0], round3(v[1]), cents(v[2])])),
+      table('Valuation by product group', [{ label: 'Product group' }, { label: 'Item lines', align: 'right' }, { label: 'On hand', align: 'right' }, { label: 'Value', money: true }], byValue(byCategory, 2, 30).map(([k, v]) => [k, v[0], round3(v[1]), cents(v[2])])),
       table('Valuation by brand', [{ label: 'Brand' }, { label: 'Item lines', align: 'right' }, { label: 'On hand', align: 'right' }, { label: 'Value', money: true }], byValue(byBrand, 2, 40).map(([k, v]) => [k, v[0], round3(v[1]), cents(v[2])])),
       table('Top movers out', [{ label: 'Item' }, { label: 'Issued', align: 'right' }, { label: 'Value', money: true }], byValue(outByItem, 1, 15).map(([k, v]) => [k, round3(v[0]), cents(v[1])])),
       table(

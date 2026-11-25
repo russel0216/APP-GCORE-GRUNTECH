@@ -13,9 +13,11 @@ import {
   ProductPicture,
   StatusBadge,
   formatDate,
+  formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { label } from './PurchaseRequests';
 import { BarList, Panel, Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -842,6 +844,8 @@ interface InventorySummary {
   onOrder?: number;
   pendingOrders?: number;
   categories?: CategoryTile[];
+  /** Whether the viewer may change an item — the warehouse's leads (2026-11-25). */
+  canManageItems?: boolean;
   /** The valuation by brand (2026-10-25): every brand holding stock lines; `none` is Trading. */
   brands?: BrandTile[];
   /** On the company list: the projects' own goods on the shelves. */
@@ -859,6 +863,11 @@ interface Movement {
   sourceNumber: string | null;
   occurredAt: string;
   link: string | null;
+  /** What the shelf held before and after it. */
+  balanceBefore?: number;
+  balanceAfter?: number;
+  /** Who made it (2026-11-25). */
+  createdBy?: { id: string; name: string } | null;
   item: { id: string; code: string; name: string; unit: string };
   warehouse: { id: string; name: string };
   /** A move of a project's own stock. */
@@ -883,36 +892,84 @@ function since(at: string) {
  */
 function InventoryFoot() {
   const [rows, setRows] = useState<Movement[] | null>(null);
+  // Who moved it (2026-11-25, the owner's audit): a person to narrow to, and more rows on request.
+  const [people, setPeople] = useState<{ id: string; name: string; movements: number }[]>([]);
+  const [userId, setUserId] = useState('');
+  const [limit, setLimit] = useState(10);
   useEffect(() => {
-    api.get<Movement[]>('/inventory/movements?limit=8').then(setRows).catch(() => setRows([]));
+    api.get<typeof people>('/inventory/movements/people').then(setPeople).catch(() => setPeople([]));
   }, []);
+  useEffect(() => {
+    api.get<Movement[]>(`/inventory/movements${qs({ limit, userId: userId || undefined })}`).then(setRows).catch(() => setRows([]));
+  }, [limit, userId]);
   return (
     <div className="inv-foot">
       <section className="card" aria-labelledby="inv-moves">
-        <h2 id="inv-moves" className="card-title">Recent stock movement</h2>
+        <div className="card-head">
+          <h2 id="inv-moves" className="card-title">Stock movement</h2>
+          <SearchSelect aria-label="Moved by" value={userId} onChange={(e) => setUserId(e.target.value)}>
+            <option value="">Moved by anyone</option>
+            {people.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.movements})
+              </option>
+            ))}
+            <option value="none">No person on record</option>
+          </SearchSelect>
+        </div>
         {!rows ? (
           <Loading />
         ) : !rows.length ? (
-          <p className="collection-empty">Nothing has moved yet.</p>
+          <p className="collection-empty">{userId ? 'Nothing moved by this person.' : 'Nothing has moved yet.'}</p>
         ) : (
-          <ul className="inv-moves">
-            {rows.map((m) => {
-              const into = m.quantity > 0;
-              const line = (
-                <>
-                  <span className={`inv-move-dir ${into ? 'is-in' : 'is-out'}`}>{into ? 'IN' : 'OUT'}</span>
-                  <span className="inv-move-what">
-                    {Math.abs(m.quantity)} {m.item.unit} {m.item.name} <span className="faint mono">({m.item.code})</span>
-                  </span>
-                  <span className="inv-move-where faint">
-                    {m.sourceNumber ?? m.type.toLowerCase()} · {m.warehouse.name}
-                    {m.job ? ` · ${m.job.number}'s stock` : ''} · {since(m.occurredAt)}
-                  </span>
-                </>
-              );
-              return <li key={m.id}>{m.link ? <Link to={m.link} className="inv-move">{line}</Link> : <div className="inv-move">{line}</div>}</li>;
-            })}
-          </ul>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Item</th>
+                  <th className="right">In / out</th>
+                  <th className="right">Before</th>
+                  <th className="right">After</th>
+                  <th>Document</th>
+                  <th>Warehouse</th>
+                  <th>By</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((m) => {
+                  const into = m.quantity > 0;
+                  return (
+                    <tr key={m.id}>
+                      <td className="muted" title={formatDateTime(m.occurredAt)}>
+                        {since(m.occurredAt)}
+                      </td>
+                      <td>
+                        <Link to={`/g-chain/inventory/${m.item.id}`}>{m.item.name}</Link> <span className="faint mono">({m.item.code})</span>
+                        {m.job ? <div className="faint">{m.job.number}'s stock</div> : null}
+                      </td>
+                      <td className={`right mono ${into ? 'proc-best' : 'proc-over'}`}>
+                        {into ? '+' : ''}
+                        {m.quantity} {m.item.unit}
+                      </td>
+                      <td className="right mono">{m.balanceBefore ?? '—'}</td>
+                      <td className="right mono">{m.balanceAfter ?? '—'}</td>
+                      <td>{m.link ? <Link to={m.link} className="mono">{m.sourceNumber ?? label(m.type)}</Link> : <span className="mono faint">{m.sourceNumber ?? label(m.type)}</span>}</td>
+                      <td>{m.warehouse.name}</td>
+                      <td>{m.createdBy?.name ?? <span className="faint">—</span>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {rows && rows.length >= limit && limit < 200 && (
+          <div className="card-foot">
+            <button type="button" className="btn btn-sm" onClick={() => setLimit((n) => Math.min(200, n * 4))}>
+              Show more
+            </button>
+          </div>
         )}
       </section>
     </div>
@@ -957,7 +1014,9 @@ export function Inventory() {
   const [brands, setBrands] = useState<BrandTile[]>([]);
   const [importing, setImporting] = useState<{ entity: string; label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
-  const chosenCategory = params.get('categoryId') ?? '';
+  // The quotation's product groups are the inventory's categories (2026-11-25).
+  const chosenCategory = params.get('group') ?? '';
+  const [canManageItems, setCanManageItems] = useState(false);
   /** The list's own URL with the brand set — the valuation by brand's links. */
   const brandLink = (value: string) => {
     const p = new URLSearchParams(params);
@@ -973,8 +1032,8 @@ export function Inventory() {
   /** The list's own URL with the category set (or cleared, when it is the one chosen). */
   const categoryLink = (id: string) => {
     const p = new URLSearchParams(params);
-    if (chosenCategory === id) p.delete('categoryId');
-    else p.set('categoryId', id);
+    if (chosenCategory === id) p.delete('group');
+    else p.set('group', id);
     p.delete('page');
     return `/g-chain/inventory?${p.toString()}`;
   };
@@ -1034,7 +1093,7 @@ export function Inventory() {
         </div>
       ),
     },
-    { key: 'category', label: 'Category', render: (s) => s.item.category?.name ?? <span className="faint">—</span> },
+    { key: 'category', label: 'Product group', render: (s) => s.item.productGroup ?? <span className="faint">—</span> },
     { key: 'brand', label: 'Brand / OEM', render: (s) => s.item.brand ?? <span className="faint">—</span> },
     { key: 'warehouse', label: 'Warehouse', render: (s) => s.warehouse.name, optional: true },
     { key: 'bin', label: 'Bin / Rack', render: (s) => (s.location ? <span className="mono">{s.location.code}</span> : <span className="faint">—</span>) },
@@ -1091,7 +1150,7 @@ export function Inventory() {
         reportPath="/g-chain/reports?kind=inventory"
           columns={columns}
           rowKey={(s) => s.id}
-          searchPlaceholder="Search item name, code, part number…"
+          searchPlaceholder="Search items — a comma between several: contactor, wire"
           onRowClick={(s) =>
             navigate(
               `/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}${s.project ? `&jobId=${s.project.id}` : ''}${s.salesOrder ? `&salesOrderId=${s.salesOrder.id}` : ''}`,
@@ -1163,6 +1222,7 @@ export function Inventory() {
           }
           onSummary={(raw) => {
             setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[]);
+            setCanManageItems((raw as InventorySummary).canManageItems === true);
             setBrands((raw as InventorySummary).brands ?? []);
           }}
           summary={(raw) => {
@@ -1203,8 +1263,8 @@ export function Inventory() {
                 {tiles.length > 0 && (
                   <div className="inv-cats">
                     <div className="inv-cats-head">
-                      <span>Inventory categories</span>
-                      <span className="faint">{tiles.length} categor{tiles.length === 1 ? 'y' : 'ies'}</span>
+                      <span>Product groups</span>
+                      <span className="faint">{tiles.length} group{tiles.length === 1 ? '' : 's'}</span>
                     </div>
                     <div className="inv-cats-grid">
                       {tiles.map((t) => (
@@ -1237,9 +1297,9 @@ export function Inventory() {
               ],
             },
             {
-              key: 'categoryId',
-              label: 'Category',
-              options: [...categories.filter((c) => c.id !== 'none').map((c) => ({ value: c.id, label: c.name })), { value: 'none', label: 'Not categorised' }],
+              key: 'group',
+              label: 'Product group',
+              options: [...categories.filter((c) => c.id !== 'none').map((c) => ({ value: c.id, label: c.name })), { value: 'none', label: 'No group' }],
             },
             {
               key: 'brand',
@@ -1260,10 +1320,10 @@ export function Inventory() {
             { key: 'needsReorder', label: 'Reorder', options: [{ value: 'true', label: 'Below level' }] },
           ]}
           // Kanban (2026-10-25, gasiontech's cards): the same rows, query and pages, drawn as product cards.
-          renderRows={view === 'kanban' ? (rows) => <InventoryCards rows={rows} canEditItems={can('gchain.items.edit_all') || can('gchain.items.edit_own')} /> : undefined}
+          renderRows={view === 'kanban' ? (rows) => <InventoryCards rows={rows} canEditItems={canManageItems} /> : undefined}
         />
       {view === 'list' && categories.some((c) => c.value > 0) && (
-        <Panel title="Stock value by category" blurb="What each category holds, at moving average cost — and how many of its lines need reordering.">
+        <Panel title="Stock value by product group" blurb="What each product group holds, at moving average cost — and how many of its lines need reordering.">
           <BarList
             slices={categories.map((c) => ({
               label: `${c.name}${c.critical || c.low ? ` · ${[c.critical && `${c.critical} critical`, c.low && `${c.low} low`].filter(Boolean).join(', ')}` : ''}`,
@@ -1312,8 +1372,8 @@ export function Inventory() {
  * initials on its category's colour), the description, part number, group
  * and brand, the price a unit, what is on hand and coming in, who has it on
  * loan, and the stock state. The card opens the stock card; the pencil opens the item
- * for whoever may change it. No delete: an item is deleted on its own form,
- * by a super admin.
+ * for whoever may change it (the warehouse's leads). No delete: an item is
+ * deleted on its own form.
  */
 function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems: boolean }) {
   if (!rows.length) return null;
@@ -1324,7 +1384,7 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
         return (
           <article key={s.id} className="inv-tile">
             <Link to={href} className="inv-tile-main">
-              <ProductPicture photoId={s.item.photoId} name={s.item.name} toneKey={s.item.category?.name ?? s.item.brand} className="inv-tile-pic" />
+              <ProductPicture photoId={s.item.photoId} name={s.item.name} toneKey={s.item.productGroup ?? s.item.brand} className="inv-tile-pic" />
               <span className="inv-tile-body">
                 <span className="inv-tile-name" title={s.item.name}>{s.item.name}</span>
                 <span className="inv-tile-code mono">{s.item.partNumber ?? s.item.code}</span>
@@ -1332,7 +1392,7 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
                   <span className="inv-tile-loan">{s.loans.map((l) => `${l.quantity} on loan — ${l.borrower} (${l.number})`).join(' · ')}</span>
                 )}
                 <span className="inv-tile-group">
-                  {s.item.productGroup ?? s.item.category?.name ?? 'Not categorised'}
+                  {s.item.productGroup ?? 'No group'}
                   {s.item.brand ? ` · ${s.item.brand}` : ''}
                 </span>
                 <span className="inv-tile-price">
@@ -1406,7 +1466,20 @@ export function StockCard() {
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
 
-  const item = data.item as { code: string; name: string; unit: string; reorderLevel: number | null; photoId?: string | null; category?: { code: string } | null };
+  const item = data.item as {
+    code: string;
+    name: string;
+    description?: string | null;
+    partNumber?: string | null;
+    brand?: string | null;
+    productGroup?: string | null;
+    unit: string;
+    minStock?: number | null;
+    reorderLevel: number | null;
+    maxStock?: number | null;
+    photoId?: string | null;
+    category?: { code: string } | null;
+  };
   const balances = data.balances as {
     id: string;
     quantity: number;
@@ -1474,12 +1547,31 @@ export function StockCard() {
           shownOn="The cards and the stock card show"
           name={item.name}
           photoId={item.photoId ?? null}
-          toneKey={item.category?.code ?? null}
+          toneKey={item.productGroup ?? item.category?.code ?? null}
           canEdit={data.canEditPhoto === true}
           onChanged={(photoId) => setData({ ...data, item: { ...item, photoId } })}
           onError={setError}
         />
       )}
+
+      {/* What the item is (2026-11-25, the owner's audit: the list showed the description, its card did not). */}
+      <div className="card">
+        <h3 className="card-title">Item</h3>
+        <dl className="kv">
+          <dt>Description</dt>
+          <dd>{item.description && item.description !== item.name ? item.description : item.name}</dd>
+          <dt>Part number</dt>
+          <dd className="mono">{item.partNumber ?? '—'}</dd>
+          <dt>Product group</dt>
+          <dd>{item.productGroup ?? '—'}</dd>
+          <dt>Brand / OEM</dt>
+          <dd>{item.brand ?? '—'}</dd>
+          <dt>Stock levels</dt>
+          <dd>
+            Minimum {item.minStock ?? '—'} · Reorder at {item.reorderLevel ?? '—'} · Maximum {item.maxStock ?? '—'} {item.unit}
+          </dd>
+        </dl>
+      </div>
 
       <div className="kpi-grid proc-stats">
         {balances.map((b) => (

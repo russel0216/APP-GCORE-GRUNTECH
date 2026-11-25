@@ -25,8 +25,11 @@ import { usersInRole } from './approvals';
  * warehouse, or an issued purchase order for it still to arrive there — so a
  * falling item is requisitioned once, not on every issue.
  *
- * The quantity orders up to twice the reorder level: 2 × level − available −
- * what is on the way, at least one. The requester is the warehouse's
+ * The quantity tops the shelf up to the item's MAXIMUM STOCK (2026-11-25, the
+ * owner's audit: a 300 m reorder level asked for 600 m under the old "twice
+ * the level" rule) — `reorderQuantity()`: maximum − available − what is on
+ * the way, the reorder level standing in where no maximum is set, at least
+ * one. The requester is the warehouse's
  * supervisor (the first active Warehouse Supervisor), else the Purchasing
  * Manager; with neither, nothing is raised and the trail says why.
  */
@@ -53,6 +56,16 @@ export function queueReorderCheck(itemId: string, warehouseId: string) {
 const num = (v: Prisma.Decimal | number | null | undefined) => (v == null ? 0 : Number(v));
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 const cents = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * How much the automatic reorder asks for: up to the maximum stock, else up
+ * to the reorder level, less what is available and already on the way — a
+ * whole unit at least. Pure, pinned by verify-chain.
+ */
+export function reorderQuantity(i: { reorderLevel: number; maxStock: number | null; available: number; coming: number }): number {
+  const target = i.maxStock != null && i.maxStock >= i.reorderLevel ? i.maxStock : i.reorderLevel;
+  return Math.max(1, Math.ceil(round3(target - i.available - i.coming)));
+}
 
 /** Who raises the automatic requisition: a Warehouse Supervisor, else the Purchasing Manager. */
 async function reorderRequester(): Promise<string | null> {
@@ -107,6 +120,7 @@ export async function runReorderCheck(pairs: Pair[]): Promise<{ requestId: strin
           isActive: true,
           isStocked: true,
           reorderLevel: true,
+          maxStock: true,
           standardCost: true,
           lastCost: true,
           costCategoryId: true,
@@ -125,7 +139,7 @@ export async function runReorderCheck(pairs: Pair[]): Promise<{ requestId: strin
   for (const b of falling) {
     const level = num(b.item.reorderLevel);
     const coming = await onTheWay(b.itemId, b.warehouseId);
-    const quantity = Math.max(1, Math.ceil(round3(2 * level - availableOf(b) - coming)));
+    const quantity = reorderQuantity({ reorderLevel: level, maxStock: b.item.maxStock == null ? null : num(b.item.maxStock), available: availableOf(b), coming });
     // Something already on the way covers it: nothing to add.
     if (availableOf(b) + coming > level) continue;
 
@@ -148,7 +162,7 @@ export async function runReorderCheck(pairs: Pair[]): Promise<{ requestId: strin
       name: b.item.name,
       partNumber: b.item.partNumber,
       // Under the name, why it is here — what the person checking it needs.
-      description: `Automatic reorder: ${availableOf(b)} ${b.item.unit} available, reorder level ${level}`,
+      description: `Automatic reorder: ${availableOf(b)} ${b.item.unit} available, reorder level ${level}${b.item.maxStock == null ? '' : `, maximum ${num(b.item.maxStock)}`}`,
       quantity: new Prisma.Decimal(quantity),
       unit: b.item.unit,
       estimatedCost: new Prisma.Decimal(cents(estimate)),

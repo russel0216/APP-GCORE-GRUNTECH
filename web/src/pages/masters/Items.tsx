@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, ApiError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type BulkContext, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import {
   Checkbox,
@@ -11,20 +11,12 @@ import {
   Modal,
   ModalFoot,
   StatusBadge,
-  formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 
-const ITEM_TYPES = [
-  { value: 'MATERIAL', label: 'Material' },
-  { value: 'EQUIPMENT', label: 'Equipment' },
-  { value: 'CONSUMABLE', label: 'Consumable' },
-  { value: 'SERVICE', label: 'Service' },
-  { value: 'TOOL', label: 'Tool' },
-];
 
 interface Ref {
   id: string;
@@ -51,6 +43,8 @@ interface ItemRow {
   isStocked: boolean;
   minStock: number | null;
   reorderLevel: number | null;
+  /** What the automatic reorder tops the shelf up to (2026-11-25). */
+  maxStock?: number | null;
   isActive: boolean;
   notes: string | null;
   category: Ref | null;
@@ -60,6 +54,8 @@ interface ItemRow {
   preferredSupplier: Ref | null;
   /** Whether the viewer may change it — Edit All, or Edit Own on an item they added (2026-10-18). */
   canEdit?: boolean;
+  /** Whether the viewer may delete it — the warehouse's leads (2026-11-25). */
+  canDelete?: boolean;
 }
 
 /** What saving an item answers — enough for a picker to choose it. */
@@ -82,18 +78,10 @@ export function NewItemPopup({
   onClose: () => void;
   onSaved: (saved: SavedItem) => void;
 }) {
-  const [categories, setCategories] = useState<Ref[]>([]);
-  const [costCategories, setCostCategories] = useState<Ref[]>([]);
-  useEffect(() => {
-    api.get<Ref[]>('/reference/item-categories').then(setCategories).catch(() => {});
-    api.get<Ref[]>('/reference/cost-categories').then(setCostCategories).catch(() => {});
-  }, []);
   return (
     <ItemForm
       item={null}
       presetName={presetName}
-      categories={categories}
-      costCategories={costCategories}
       onClose={onClose}
       onSaved={(saved) => (saved ? onSaved(saved) : onClose())}
     />
@@ -109,12 +97,11 @@ export function Items() {
   const [editing, setEditing] = useState<ItemRow | 'new' | null>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
-  const [categories, setCategories] = useState<Ref[]>([]);
-  const [costCategories, setCostCategories] = useState<Ref[]>([]);
+  // The product groups — the quotation's list — are the item's one category (2026-11-25).
+  const [groups, setGroups] = useState<{ name: string }[]>([]);
 
   useEffect(() => {
-    api.get<Ref[]>('/reference/item-categories').then(setCategories).catch(() => {});
-    api.get<Ref[]>('/reference/cost-categories').then(setCostCategories).catch(() => {});
+    api.get<{ name: string }[]>('/reference/quotation-groups?active=true').then(setGroups).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -144,52 +131,18 @@ export function Items() {
       render: (i) => (
         <div>
           <div>{i.name}</div>
+          {i.description && i.description !== i.name && <div className="faint">{i.description}</div>}
           {(i.brand || i.partNumber) && <div className="faint">{[i.brand, i.partNumber].filter(Boolean).join(' · ')}</div>}
         </div>
       ),
     },
-    {
-      key: 'itemType',
-      label: 'Type',
-      render: (i) => (
-        <span className="badge">{ITEM_TYPES.find((t) => t.value === i.itemType)?.label ?? i.itemType}</span>
-      ),
-    },
     { key: 'productGroup', label: 'Product group', render: (i) => i.productGroup ?? <span className="faint">—</span> },
-    { key: 'category', label: 'Category', render: (i) => i.category?.name ?? '—' },
-    {
-      key: 'costCategory',
-      label: 'Cost bucket',
-      render: (i) =>
-        i.costCategory ? (
-          i.costCategory.name
-        ) : (
-          <span className="faint" title="Without this, a purchase of this item cannot be filed against a project budget">
-            not set
-          </span>
-        ),
-    },
     { key: 'unit', label: 'Unit', render: (i) => i.unit },
     {
       key: 'standardCost',
       label: 'Standard cost',
       align: 'right',
       render: (i) => (i.standardCost == null ? '—' : formatMoney(i.standardCost)),
-    },
-    {
-      key: 'listPrice',
-      label: 'List price',
-      align: 'right',
-      optional: true,
-      render: (i) =>
-        i.listPrice == null ? (
-          <span className="faint">—</span>
-        ) : (
-          <>
-            {formatMoney(i.listPrice, i.listPriceCurrency ?? 'PHP')}
-            {i.listPriceAsOf && <span className="m-subname">as of {formatDate(i.listPriceAsOf)}</span>}
-          </>
-        ),
     },
     {
       key: 'stocked',
@@ -202,6 +155,13 @@ export function Items() {
       label: 'Reorder at',
       align: 'right',
       render: (i) => (i.reorderLevel == null ? '—' : i.reorderLevel),
+      optional: true,
+    },
+    {
+      key: 'maxStock',
+      label: 'Maximum',
+      align: 'right',
+      render: (i) => (i.maxStock == null ? '—' : i.maxStock),
       optional: true,
     },
     { key: 'supplier', label: 'Preferred supplier', render: (i) => i.preferredSupplier?.name ?? '—', optional: true },
@@ -225,22 +185,19 @@ export function Items() {
         printPath="/api/items/pdf"
         columns={columns}
         rowKey={(i) => i.id}
-        searchPlaceholder="Search name, code, part number…"
+        searchPlaceholder="Search items — a comma between several: contactor, wire"
         reloadToken={reload}
+        selectable
+        // Set the product group of many at once (2026-11-25): the ordinary PATCH per row, which refuses anyone but the warehouse's leads.
+        bulkActions={(ctx) => (ctx.rows.some((i) => i.canEdit) ? <ItemBulkActions ctx={ctx} groups={groups} /> : null)}
         onRowClick={(i) => navigate(`/g-chain/items/${i.id}`)}
         emptyTitle="No items yet"
         emptyHint="Add what you buy and install regularly — you do not need every screw."
         filters={[
-          { key: 'itemType', label: 'Type', options: ITEM_TYPES },
           {
-            key: 'categoryId',
-            label: 'Category',
-            options: categories.map((c) => ({ value: c.id, label: c.name })),
-          },
-          {
-            key: 'costCategoryId',
-            label: 'Cost bucket',
-            options: costCategories.map((c) => ({ value: c.id, label: c.name })),
+            key: 'group',
+            label: 'Product group',
+            options: [...groups.map((g) => ({ value: g.name, label: g.name })), { value: 'none', label: 'No group' }],
           },
           {
             key: 'isActive',
@@ -279,8 +236,6 @@ export function Items() {
       {editing && (
         <ItemForm
           item={editing === 'new' ? null : editing}
-          categories={categories}
-          costCategories={costCategories}
           onClose={close}
           onSaved={() => {
             close();
@@ -302,24 +257,77 @@ export function Items() {
   );
 }
 
+/**
+ * The item list's mass action: file the ticked items under a product group
+ * (the Odoo items arrived with none). One `PATCH /items/:id` per row; what
+ * was refused stays ticked, with the reason.
+ */
+function ItemBulkActions({ ctx, groups }: { ctx: BulkContext<ItemRow>; groups: { name: string }[] }) {
+  const toast = useToast();
+  const [group, setGroup] = useState('');
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ code: string; why: string }[]>([]);
+  const go = ctx.rows.filter((i) => i.canEdit && (i.productGroup ?? '') !== group);
+
+  async function apply() {
+    if (!group || !go.length) return;
+    const failed: { row: ItemRow; why: string }[] = [];
+    let done = 0;
+    setRefused([]);
+    for (let n = 0; n < go.length; n++) {
+      setProgress({ done: n, of: go.length });
+      try {
+        await api.patch(`/items/${go[n].id}`, { productGroup: group });
+        done++;
+      } catch (err) {
+        failed.push({ row: go[n], why: err instanceof ApiError ? err.message : 'could not be changed' });
+      }
+    }
+    setProgress(null);
+    toast(done > 0 ? 'ok' : 'error', `${done} item${done === 1 ? '' : 's'} filed under ${group}${failed.length ? `; ${failed.length} unchanged` : ''}`);
+    setRefused(failed.map((f) => ({ code: f.row.code, why: f.why })));
+    setGroup('');
+    ctx.reload();
+    if (failed.length) ctx.keep(failed.map((f) => f.row.id));
+    else ctx.clear();
+  }
+
+  return (
+    <>
+      <select aria-label="File the selected items under a product group" value={group} disabled={!!progress} onChange={(e) => setGroup(e.target.value)}>
+        <option value="">Set product group…</option>
+        {groups.map((g) => (
+          <option key={g.name} value={g.name}>
+            {g.name}
+          </option>
+        ))}
+      </select>
+      {group && (
+        <button type="button" className="btn btn-sm btn-primary" disabled={!!progress || !go.length} onClick={() => void apply()}>
+          {progress ? `Saving ${progress.done + 1} of ${progress.of}…` : go.length ? `File ${go.length} under ${group}` : `Already ${group}`}
+        </button>
+      )}
+      {refused.length > 0 && (
+        <span className="faint" role="status">
+          Unchanged: {refused.map((r) => `${r.code} — ${r.why}`).join('; ')}
+        </span>
+      )}
+    </>
+  );
+}
+
 export function ItemForm({
   item,
   presetName,
-  categories,
-  costCategories,
   onClose,
   onSaved,
 }: {
   item: ItemRow | null;
   /** A new item's name to start with — what was typed in a picker. */
   presetName?: string;
-  categories: Ref[];
-  costCategories: Ref[];
   onClose: () => void;
   onSaved: (saved?: SavedItem) => void;
 }) {
-  const { me } = useAuth();
-  const isSuperAdmin = me?.user.isSuperAdmin === true;
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -341,18 +349,13 @@ export function ItemForm({
     brand: item?.brand ?? '',
     name: item?.name ?? presetName ?? '',
     description: item?.description ?? '',
-    itemType: item?.itemType ?? 'MATERIAL',
-    categoryId: item?.category?.id ?? '',
     productGroup: item?.productGroup ?? '',
-    costCategoryId: item?.costCategory?.id ?? '',
     unit: item?.unit ?? 'pcs',
     standardCost: item?.standardCost?.toString() ?? '',
-    listPrice: item?.listPrice?.toString() ?? '',
-    listPriceCurrency: item?.listPriceCurrency ?? '',
-    listPriceAsOf: item?.listPriceAsOf ? item.listPriceAsOf.slice(0, 10) : '',
     isStocked: item?.isStocked ?? true,
     minStock: item?.minStock?.toString() ?? '',
     reorderLevel: item?.reorderLevel?.toString() ?? '',
+    maxStock: item?.maxStock?.toString() ?? '',
     isActive: item?.isActive ?? true,
     notes: item?.notes ?? '',
   });
@@ -364,24 +367,22 @@ export function ItemForm({
     setBusy(true);
     setError(null);
     try {
+      // The type, the old category, the budget line and the partner's list
+      // price left the form (2026-11-25): never sent, so an item keeps what it
+      // has and a new one takes the server's defaults (Material, Materials).
       const payload = {
         code: form.code || undefined,
         partNumber: form.partNumber || null,
         brand: form.brand.trim() || null,
         name: form.name,
         description: form.description || null,
-        itemType: form.itemType,
-        categoryId: form.categoryId || null,
         productGroup: form.productGroup || null,
-        costCategoryId: form.costCategoryId || null,
         unit: form.unit,
         standardCost: form.standardCost === '' ? null : Number(form.standardCost),
-        listPrice: form.listPrice === '' ? null : Number(form.listPrice),
-        listPriceCurrency: form.listPriceCurrency.trim() ? form.listPriceCurrency.trim().toUpperCase() : null,
-        listPriceAsOf: form.listPriceAsOf || null,
         isStocked: form.isStocked,
         minStock: form.minStock === '' ? null : Number(form.minStock),
         reorderLevel: form.reorderLevel === '' ? null : Number(form.reorderLevel),
+        maxStock: form.maxStock === '' ? null : Number(form.maxStock),
         preferredSupplierId: preferredSupplier?.id ?? null,
         isActive: form.isActive,
         notes: form.notes || null,
@@ -408,8 +409,8 @@ export function ItemForm({
           cancelLabel={readOnly ? 'Close' : undefined}
           busy={busy}
           danger={
-            // Only a super admin deletes an item, and only one that never moved (2026-10-25).
-            item && isSuperAdmin
+            // The warehouse's leads delete an item, and only one that never moved (2026-11-25).
+            item && item.canDelete
               ? {
                   label: 'Delete',
                   question: `Delete ${item.name}? It cannot be undone.`,
@@ -457,15 +458,6 @@ export function ItemForm({
             onChange={(e) => setForm({ ...form, unit: e.target.value })}
           />
         </Field>
-        <Field label="Type">
-          <select value={form.itemType} onChange={(e) => setForm({ ...form, itemType: e.target.value })}>
-            {ITEM_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-        </Field>
         <Field label="Product group" hint={groups.find((g) => g.name === form.productGroup)?.description ?? 'The quotation’s product groups'}>
           <select value={form.productGroup} onChange={(e) => setForm({ ...form, productGroup: e.target.value })}>
             <option value="">— none —</option>
@@ -479,32 +471,6 @@ export function ItemForm({
             ))}
           </select>
         </Field>
-        <Field label="Category">
-          <select value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: e.target.value })}>
-            <option value="">— none —</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field
-          label="Cost bucket"
-          hint="Which line of a project budget a purchase of this lands in"
-        >
-          <select
-            value={form.costCategoryId}
-            onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-          >
-            <option value="">— not set —</option>
-            {costCategories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
         <Field label="Standard cost" hint="Used by costing as the starting estimate">
           <NumberInput
             kind="money"
@@ -513,36 +479,7 @@ export function ItemForm({
             onChange={(e) => setForm({ ...form, standardCost: e.target.value })}
           />
         </Field>
-        <Field
-          label="List price"
-          hint="The partner's published price — shown to Sales on the partner's price list. A price, not a cost."
-        >
-          <NumberInput
-            kind="money"
-            step="0.01"
-            min="0"
-            value={form.listPrice}
-            onChange={(e) => setForm({ ...form, listPrice: e.target.value })}
-          />
-        </Field>
-        <Field label="List price currency" hint="Three letters, e.g. USD — blank means pesos">
-          <input
-            className="mono"
-            maxLength={3}
-            value={form.listPriceCurrency}
-            onChange={(e) =>
-              setForm({ ...form, listPriceCurrency: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })
-            }
-          />
-        </Field>
-        <Field label="List price as of" hint="The date on the price list it came from">
-          <input
-            type="date"
-            value={form.listPriceAsOf}
-            onChange={(e) => setForm({ ...form, listPriceAsOf: e.target.value })}
-          />
-        </Field>
-        <Field label="Preferred supplier" hint="A partner's items appear on its price list in G-OPS › Partners">
+        <Field label="Preferred supplier" hint="Who it is usually bought from">
           <SupplierPicker value={preferredSupplier} onChange={setPreferredSupplier} onError={setError} />
         </Field>
       </div>
@@ -563,8 +500,8 @@ export function ItemForm({
       />
 
       {form.isStocked && (
-        <div className="grid grid-2 m-stock-grid">
-          <Field label="Minimum stock">
+        <div className="grid grid-3 m-stock-grid">
+          <Field label="Minimum stock" hint="At or below this it is Critical">
             <NumberInput
               kind="quantity"
               step="0.001"
@@ -572,12 +509,20 @@ export function ItemForm({
               onChange={(e) => setForm({ ...form, minStock: e.target.value })}
             />
           </Field>
-          <Field label="Reorder level" hint="Flagged for reordering at or below this">
+          <Field label="Reorder level" hint="At or below this a purchase request is raised">
             <NumberInput
               kind="quantity"
               step="0.001"
               value={form.reorderLevel}
               onChange={(e) => setForm({ ...form, reorderLevel: e.target.value })}
+            />
+          </Field>
+          <Field label="Maximum stock" hint="The reorder tops the shelf up to this — blank is the reorder level">
+            <NumberInput
+              kind="quantity"
+              step="0.001"
+              value={form.maxStock}
+              onChange={(e) => setForm({ ...form, maxStock: e.target.value })}
             />
           </Field>
         </div>

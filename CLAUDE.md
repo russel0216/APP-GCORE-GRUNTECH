@@ -1024,6 +1024,80 @@ this".
   renamed "Approved By" is not read as a step heading on the paper. 458
   pass on the laptop.
 
+## The inventory audit of 2026-11-25
+
+The owner's eight ("Inventory Category … same as quotation product group; no
+traceability of product movement; audit item modification; delete or
+modification only by warehouse supervisor and his manager; audit reordering —
+150 m minimum, 300 m reorder level, but the request is 600 m; purchase request
+approver for automatic reordering …; purchase request by warehouse no delete;
+inventory search, multiple, comma separated"), built on the defaults he
+accepted. Where this section and an older one disagree, this one holds.
+
+- **The product group is the inventory's ONE category.** The tiles over the
+  list, the filter (`?group=` — a group's NAME, case-blind, or `none`), the
+  column, the chart ("Stock value by product group"), the paper and G-CHAIN ›
+  Reports' inventory tables read `Item.productGroup` (`groupWhere()`,
+  `groupTileKey()`, `groupTiles()`): a tile per group that has items in the
+  master's order, a group items still carry though off the list, then "No
+  group". The old `ItemCategory` stays on the table, unread by Inventory and
+  the Item Master (`?categoryId=` still narrows an old link; the Incoming
+  keeps its optional category). Nothing maps a category to a group: the Odoo
+  items have none until someone files them — Item Master's mass action **Set
+  product group** (tick rows, the ordinary PATCH per row).
+- **Several searches at once**: `shared/itemSearch.ts` — `searchTerms()`
+  splits on commas (blanks and repeats dropped, twenty at most) and
+  `itemSearchWhere()` lists an item matching ANY term in its name,
+  description, part number, code, brand or product group. Inventory (company,
+  project and sales order stock), the Item Master and their papers.
+- **The reorder tops up to the MAXIMUM STOCK** (`Item.maxStock`, new):
+  `reorderQuantity()` in `shared/reorder.ts` — maximum − available − on the
+  way, the reorder level standing in where no maximum is set, one at least.
+  It replaces "twice the level" (300 asked 600). Still triggered at the
+  reorder level; the minimum only marks Critical. `checkLevels()` (create and
+  PATCH): minimum ≤ reorder level ≤ maximum, wherever two are set.
+- **The item form** lost Type, Category, Cost bucket and the three list-price
+  boxes (never sent, so an item keeps what it has; a new item with no budget
+  line takes Materials, `defaultCostCategory()`), and gained Maximum stock.
+  **The stock card shows the item** — description, part number, product
+  group, brand and the three levels: the card was never sent the
+  description the list showed.
+- **Who changes or deletes an item is `mayManageItems()`**
+  (`shared/itemManagers.ts`): the Warehouse Officer (`warehouse_supervisor`),
+  whoever they report to, the CEO / President, a super admin — the Outgoing
+  raisers' rule — beside Item Master's Edit right, which alone changes nothing
+  now. `PATCH` / `DELETE /items/:id` (delete was a super admin's alone; still
+  only an item that never moved), the photo routes and a stock line's bin
+  (`PATCH /inventory/balances/:id`) refuse anyone else
+  (`ITEM_MANAGER_REFUSAL`); rows and the item send `canEdit` / `canDelete`,
+  the inventory summary `canManageItems` (the card's pencil). ADDING an item
+  stays with Create — an Incoming files new items.
+- **A warehouse stock request is never deleted**: `DELETE
+  /purchase-requests/:id` refuses a `STOCK_REPLENISHMENT` (400, "kept —
+  cancel it with its reason"), at any status and for a super admin; the GET
+  sends `canDelete` and `kept`.
+- **The warehouse request's own route** (`shared/stockRequestRoute.ts`): a
+  stock replenishment never takes the project route. Two seeded
+  `purchase_request` workflows told apart by `optionLabel` (so a standard
+  pick never lands on one): "Warehouse stock — local purchase" — Purchasing
+  Manager (Local) alone — and "Warehouse stock — imported brand" — Purchasing
+  Manager (Local) › Cost Controller › CEO / President, both `preparerSigns`
+  and `standIns`. `stockRequestRoute(kind, itemIds)` picks: imported when any
+  line's item sits under a product group ticked **Imported brand**
+  (`QuotationGroup.isImported`, Admin › Categories › Quotation groups; OMEGA
+  AIR and PREVOST ticked once by the seed, `seed.importedGroups20261125` —
+  the rest are the owner's to tick). Submit passes the `optionId`; `GET
+  /purchase-requests/route` takes `kind` and `itemIds` and answers
+  `stockRoute`; the paper's draft slots read it. A route switched off, or its
+  label changed, falls back to the standard route rather than stalling.
+- **The movement log says who**: `GET /inventory/movements` sends
+  `createdBy`, `balanceBefore` and `balanceAfter`, takes `userId` (`none`
+  too), `itemId` and up to 200 rows; `GET /inventory/movements/people` lists
+  whoever has moved stock. The card under the inventory is a table — When,
+  Item, In / out, Before, After, Document, Warehouse, By — with a "Moved by"
+  picker and Show more. Viewing the inventory is not recorded.
+- verify-chain pins all of it (471 passed).
+
 ## The owner's batch of 2026-11-23
 
 - **The clock-out is ONE TAP, with no camera** (the owner's call: "remove

@@ -60,6 +60,8 @@ export interface QuotationGroup {
   brand: string | null;
   sortOrder: number;
   isActive: boolean;
+  /** An imported brand: a warehouse request holding its items takes the longer route (2026-11-25). */
+  isImported?: boolean;
   lineCount?: number;
 }
 
@@ -402,14 +404,15 @@ const QUOTATION_GROUPS: CategorySpec<QuotationGroup> = {
     { key: 'name', head: 'Name', render: (g) => g.name },
     { key: 'covers', head: 'Covers', render: (g) => g.description ?? <span className="faint">—</span> },
     { key: 'brand', head: 'Brand', render: (g) => g.brand ?? <span className="faint">—</span> },
+    { key: 'imported', head: 'Imported', render: (g) => (g.isImported ? <span className="badge info">Imported</span> : <span className="faint">—</span>) },
     { key: 'lines', head: 'Lines', headClass: 'right', cellClass: 'right', render: (g) => (g.lineCount ?? 0).toLocaleString('en-US') },
     { key: 'status', head: 'Status', render: (g) => activeBadge(g.isActive) },
   ],
   empty: { title: 'No quotation groups yet', hint: 'Add the groups a quotation line may be filed under.' },
   footnote:
-    "The quotation editor offers these for a line's Group, which every priced line must choose. A line keeps the group it was saved with, so renaming one here does not rewrite quotations already issued. Deleting a group moves the lines filed under it to OTHERS; OTHERS itself cannot be deleted. Picking a group with a brand fills the line's Brand box when it is empty.",
-  blank: { name: '', description: '', brand: '', sortOrder: 0, isActive: true },
-  fromRow: (g) => ({ name: g.name, description: g.description ?? '', brand: g.brand ?? '', sortOrder: g.sortOrder, isActive: g.isActive }),
+    "The quotation editor offers these for a line's Group, which every priced line must choose. A line keeps the group it was saved with, so renaming one here does not rewrite quotations already issued. Deleting a group moves the lines filed under it to OTHERS; OTHERS itself cannot be deleted. Picking a group with a brand fills the line's Brand box when it is empty. The same groups are the inventory's product groups; tick Imported brand on the ones bought from abroad.",
+  blank: { name: '', description: '', brand: '', sortOrder: 0, isActive: true, isImported: false },
+  fromRow: (g) => ({ name: g.name, description: g.description ?? '', brand: g.brand ?? '', sortOrder: g.sortOrder, isActive: g.isActive, isImported: g.isImported === true }),
   fields: () => [
     { kind: 'text', key: 'name', label: 'Name', hint: 'e.g. OMEGA AIR, GRUNTECH SERVICES', maxLength: 120 },
     {
@@ -422,6 +425,11 @@ const QUOTATION_GROUPS: CategorySpec<QuotationGroup> = {
     { kind: 'text', key: 'brand', label: 'Brand', hint: "Fills a line's Brand box when the group is picked; leave blank for a house group", maxLength: 120 },
     { kind: 'count', key: 'sortOrder', label: 'Sort order' },
     { kind: 'check', key: 'isActive', label: 'Active — an inactive group stays on its lines but is not suggested' },
+    {
+      kind: 'check',
+      key: 'isImported',
+      label: 'Imported brand — a warehouse purchase request with its items also goes to the Cost Controller and the CEO / President',
+    },
   ],
   payload: (f) => ({ ...f, description: text(f.description).trim() || null, brand: text(f.brand).trim() || null }),
   canSave: (f) => !!text(f.name).trim(),

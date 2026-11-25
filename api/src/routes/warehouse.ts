@@ -1,11 +1,13 @@
 import { Router } from 'express';
+import { ITEM_MANAGER_REFUSAL, mayManageItems } from '../shared/itemManagers';
+import { groupTileKey, groupWhere, itemSearchWhere, itemTermWhere, NO_GROUP_LABEL, searchTerms } from '../shared/itemSearch';
 import { z } from 'zod';
 import { Prisma, IssueStatus, BorrowStatus, BorrowType, ReturnCondition, ReceivingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
-import { requireView, requireEdit, ownOnly, viewScope, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
+import { requireView, requireEdit, ownOnly, viewScope, editScope, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
@@ -4611,6 +4613,37 @@ async function loansFor(keys: { itemId: string; warehouseId: string }[]): Promis
   return out;
 }
 
+/** The quotation's product groups, in the master's order — the inventory's tiles and filter. */
+function productGroups() {
+  return prisma.quotationGroup.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { name: true, description: true } });
+}
+
+/**
+ * The tiles in order: every listed group that has items, then a group items
+ * still carry though it is off the list, then "No group". A tile's id is the
+ * group's NAME — what `?group=` filters on.
+ */
+function groupTiles<T>(
+  groups: { name: string; description: string | null }[],
+  tiles: Map<string, { name: string }>,
+  tile: (key: string, name: string, description: string | null) => T,
+): (T & { id: string })[] {
+  const out: (T & { id: string })[] = [];
+  const done = new Set<string>();
+  for (const g of groups) {
+    const key = groupTileKey(g.name);
+    if (!tiles.has(key) || done.has(key)) continue;
+    done.add(key);
+    out.push({ ...tile(key, g.name, g.description), id: g.name });
+  }
+  for (const [key, t] of tiles) {
+    if (done.has(key) || key === 'none') continue;
+    out.push({ ...tile(key, t.name, null), id: t.name });
+  }
+  if (tiles.has('none')) out.push({ ...tile('none', NO_GROUP_LABEL, null), id: 'none' });
+  return out;
+}
+
 async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ base: Prisma.InventoryBalanceWhereInput; where: Prisma.InventoryBalanceWhereInput }> {
   const and: Prisma.InventoryBalanceWhereInput[] = [];
   // View Own reads the stock of the items one added (2026-10-18) — first, so
@@ -4618,23 +4651,15 @@ async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ bas
   const own = ownStockWhere(me);
   if (own) and.push(own);
   if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
-  if (q.search) {
-    and.push({
-      item: {
-        OR: [
-          { name: { contains: q.search, mode: 'insensitive' } },
-          { code: { contains: q.search, mode: 'insensitive' } },
-          { partNumber: { contains: q.search, mode: 'insensitive' } },
-          { brand: { contains: q.search, mode: 'insensitive' } },
-          { category: { name: { contains: q.search, mode: 'insensitive' } } },
-        ],
-      },
-    });
-  }
+  // Several searches at once, a comma between them (2026-11-25).
+  const found = itemSearchWhere(q.search);
+  if (found) and.push({ item: found });
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
   const base: Prisma.InventoryBalanceWhereInput = and.length ? { AND: [...and] } : {};
 
+  const group = groupWhere(q.filters.group);
+  if (group) and.push({ item: group });
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
   const brand = brandWhere(q.filters.brand);
   if (brand) and.push(brand);
@@ -4694,21 +4719,21 @@ function projectStockWhere(me: ResolvedUser, q: ListQuery): { base: Prisma.Proje
   if (own) and.push(own);
   if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
   if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
-  if (q.search) {
+  const terms = searchTerms(q.search);
+  if (terms.length) {
     and.push({
-      OR: [
-        { item: { name: { contains: q.search, mode: 'insensitive' } } },
-        { item: { code: { contains: q.search, mode: 'insensitive' } } },
-        { item: { partNumber: { contains: q.search, mode: 'insensitive' } } },
-        { item: { brand: { contains: q.search, mode: 'insensitive' } } },
-        { job: { number: { contains: q.search, mode: 'insensitive' } } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-      ],
+      OR: terms.flatMap((t) => [
+        ...itemTermWhere(t).map((item) => ({ item })),
+        { job: { number: { contains: t, mode: 'insensitive' as const } } },
+        { job: { name: { contains: t, mode: 'insensitive' as const } } },
+      ]),
     });
   }
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
   const base = { AND: [...and] };
+  const group = groupWhere(q.filters.group);
+  if (group) and.push({ item: group });
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
   const brand = brandWhere(q.filters.brand);
   if (brand) and.push(brand);
@@ -4753,13 +4778,13 @@ async function projectStockList(me: ResolvedUser, q: ListQuery) {
     }),
     prisma.projectStock.count({ where }),
     prisma.projectStock.findMany({ where, select: { jobId: true, itemId: true, quantity: true, averageCost: true } }),
-    prisma.projectStock.findMany({ where: base, select: { itemId: true, quantity: true, averageCost: true, item: { select: { categoryId: true } } } }),
-    prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, description: true } }),
+    prisma.projectStock.findMany({ where: base, select: { itemId: true, quantity: true, averageCost: true, item: { select: { productGroup: true } } } }),
+    productGroups(),
   ]);
-  const tiles = new Map<string, { items: Set<string>; value: Prisma.Decimal }>();
+  const tiles = new Map<string, { name: string; items: Set<string>; value: Prisma.Decimal }>();
   for (const b of inBase) {
-    const key = b.item.categoryId ?? 'none';
-    const t = tiles.get(key) ?? { items: new Set<string>(), value: new Prisma.Decimal(0) };
+    const key = groupTileKey(b.item.productGroup);
+    const t = tiles.get(key) ?? { name: b.item.productGroup?.trim() || NO_GROUP_LABEL, items: new Set<string>(), value: new Prisma.Decimal(0) };
     t.items.add(b.itemId);
     t.value = t.value.add(b.quantity.mul(b.averageCost));
     tiles.set(key, t);
@@ -4801,7 +4826,7 @@ async function projectStockList(me: ResolvedUser, q: ListQuery) {
       projects: new Set(everything.map((b) => b.jobId)).size,
       // What the projects paid for it — already on their ledgers.
       valuation: Number(value.toFixed(2)),
-      categories: categories.filter((c) => tiles.has(c.id)).map((c) => tile(c.id, c.name, c.description)).concat(tiles.has('none') ? [tile('none', 'Not categorised', null)] : []),
+      categories: groupTiles(categories, tiles, tile),
     },
   };
 }
@@ -4819,19 +4844,20 @@ function orderStockWhere(me: ResolvedUser, q: ListQuery): Prisma.SalesOrderStock
   if (own) and.push(own);
   if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
   if (q.filters.salesOrderId) and.push({ salesOrderId: q.filters.salesOrderId });
-  if (q.search) {
+  const terms = searchTerms(q.search);
+  if (terms.length) {
     and.push({
-      OR: [
-        { item: { name: { contains: q.search, mode: 'insensitive' } } },
-        { item: { code: { contains: q.search, mode: 'insensitive' } } },
-        { item: { partNumber: { contains: q.search, mode: 'insensitive' } } },
-        { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
-        { salesOrder: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ],
+      OR: terms.flatMap((t) => [
+        ...itemTermWhere(t).map((item) => ({ item })),
+        { salesOrder: { number: { contains: t, mode: 'insensitive' as const } } },
+        { salesOrder: { customer: { name: { contains: t, mode: 'insensitive' as const } } } },
+      ]),
     });
   }
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
+  const group = groupWhere(q.filters.group);
+  if (group) and.push({ item: group });
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
   const brand = brandWhere(q.filters.brand);
   if (brand) and.push(brand);
@@ -4998,9 +5024,9 @@ inventoryRoutes.get(
       // so every tile still shows when one is chosen.
       prisma.inventoryBalance.findMany({
         where: base,
-        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { categoryId: true, brand: true, reorderLevel: true, minStock: true } } },
+        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { productGroup: true, brand: true, reorderLevel: true, minStock: true } } },
       }),
-      prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, description: true } }),
+      productGroups(),
       prisma.purchaseOrder.count({ where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } }),
     ]);
     const onOrder = await itemsOnOrder([...new Set([...everything.map((r) => r.itemId), ...inBase.map((r) => r.itemId)])]);
@@ -5012,10 +5038,10 @@ inventoryRoutes.get(
     const states = everything.map((b) => stockState(b, onOrder.has(b.itemId)));
 
     // A tile per category: its items, value, and how many need reordering.
-    const tiles = new Map<string, { items: Set<string>; value: Prisma.Decimal; low: number; critical: number }>();
+    const tiles = new Map<string, { name: string; items: Set<string>; value: Prisma.Decimal; low: number; critical: number }>();
     for (const b of inBase) {
-      const key = b.item.categoryId ?? 'none';
-      const t = tiles.get(key) ?? { items: new Set<string>(), value: new Prisma.Decimal(0), low: 0, critical: 0 };
+      const key = groupTileKey(b.item.productGroup);
+      const t = tiles.get(key) ?? { name: b.item.productGroup?.trim() || NO_GROUP_LABEL, items: new Set<string>(), value: new Prisma.Decimal(0), low: 0, critical: 0 };
       t.items.add(b.itemId);
       t.value = t.value.add(b.quantity.mul(b.averageCost));
       const st = stockState(b, onOrder.has(b.itemId));
@@ -5083,16 +5109,15 @@ inventoryRoutes.get(
         outOfStock: states.filter((st) => st === 'OUT_OF_STOCK').length,
         onOrder: states.filter((st) => st === 'ON_ORDER').length,
         pendingOrders,
+        // Who may change an item or its bin (2026-11-25): the cards' pencil.
+        canManageItems: (await mayManageItems(me)) && editScope(me, 'gchain', 'items') !== null,
         // The projects' own goods on the shelves — their card links to `?stock=project`.
         projectStock: await projectStockCard(me),
         // The sales orders' own goods — their card links to `?stock=order` (2026-10-21).
         orderStock: await orderStockCard(me),
-        // The first eight categories always (the owner's eight lead the
-        // order), and any other that holds stock.
-        categories: [
-          ...categories.filter((c, n) => n < 8 || tiles.has(c.id)).map((c) => tile(c.id, c.name, c.description)),
-          ...(tiles.has('none') ? [tile('none', 'Not categorised', null)] : []),
-        ],
+        // A tile per PRODUCT GROUP that has items (2026-11-25: the quotation's
+        // groups are the inventory's categories), in the master's order.
+        categories: groupTiles(categories, tiles, tile),
         // Every brand holding stock lines, the largest value first.
         brands: [...brands.entries()]
           .map(([key, t]) => ({ value: key === 'none' ? 'none' : t.name, label: t.name, items: t.items.size, worth: Number(t.value.toFixed(2)) }))
@@ -5118,6 +5143,8 @@ inventoryRoutes.patch(
     if (!balance) throw notFound('Stock line not found');
     // Edit Own places the stock of the items one added (2026-10-18).
     assertCanEdit(currentUser(req), 'gchain', 'inventory', balance.item.createdById === currentUser(req).id, balance.item.createdById);
+    // Where an item sits is the warehouse's leads' to say (2026-11-25).
+    if (!(await mayManageItems(currentUser(req)))) throw forbidden(ITEM_MANAGER_REFUSAL);
     let code: string | null = null;
     if (body.locationId) {
       const loc = await prisma.location.findUnique({ where: { id: body.locationId }, select: { warehouseId: true, code: true } });
@@ -5146,16 +5173,26 @@ inventoryRoutes.get(
   '/movements',
   requireView('gchain', 'inventory'),
   handler(async (req, res) => {
-    const take = Math.min(30, Math.max(1, Number(req.query.limit) || 8));
+    const take = Math.min(200, Math.max(1, Number(req.query.limit) || 8));
+    // Who moved it (2026-11-25, the owner's audit: "no traceability of product
+    // movement"): every movement names the person, and the log narrows to one
+    // person (`userId`, `none` for a movement no person is on) or one item.
+    const and: Prisma.InventoryTransactionWhereInput[] = [];
+    const own = ownStockWhere(currentUser(req));
+    if (own) and.push(own);
+    const userId = req.query.userId ? String(req.query.userId) : '';
+    if (userId) and.push({ createdById: userId === 'none' ? null : userId });
+    if (req.query.itemId) and.push({ itemId: String(req.query.itemId) });
     const rows = await prisma.inventoryTransaction.findMany({
-      // View Own: the moves of the items one added (2026-10-18).
-      where: ownStockWhere(currentUser(req)) ?? {},
+      where: and.length ? { AND: and } : {},
       orderBy: { occurredAt: 'desc' },
       take,
       select: {
         id: true,
         type: true,
         quantity: true,
+        balanceAfter: true,
+        createdBy: { select: { id: true, name: true } },
         sourceType: true,
         sourceId: true,
         sourceNumber: true,
@@ -5175,8 +5212,29 @@ inventoryRoutes.get(
       rows.map((r) => ({
         ...r,
         quantity: num(r.quantity),
+        // What the shelf held before and after — the movement's own record.
+        balanceAfter: num(r.balanceAfter),
+        balanceBefore: Math.round((num(r.balanceAfter) - num(r.quantity)) * 1000) / 1000,
         link: r.sourceId && LINKS[r.sourceType] ? `${LINKS[r.sourceType]}${r.sourceId}` : null,
       })),
+    );
+  }),
+);
+
+/** Everyone who has moved stock — the movement log's "By" filter. Above `/:itemId/card`. */
+inventoryRoutes.get(
+  '/movements/people',
+  requireView('gchain', 'inventory'),
+  handler(async (_req, res) => {
+    const by = await prisma.inventoryTransaction.groupBy({ by: ['createdById'], _count: { _all: true } });
+    const ids = by.map((b) => b.createdById).filter((v): v is string => !!v);
+    const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+    const name = new Map(users.map((u) => [u.id, u.name]));
+    res.json(
+      by
+        .filter((b) => b.createdById && name.has(b.createdById))
+        .map((b) => ({ id: b.createdById!, name: name.get(b.createdById!)!, movements: b._count._all }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
     );
   }),
 );
@@ -5296,7 +5354,7 @@ inventoryRoutes.get(
       prisma.inventoryBalance.findMany({
         where,
         include: {
-          item: { select: { code: true, name: true, brand: true, unit: true, reorderLevel: true, minStock: true, category: { select: { name: true } } } },
+          item: { select: { code: true, name: true, brand: true, unit: true, reorderLevel: true, minStock: true, productGroup: true } },
           warehouse: { select: { name: true } },
           location: { select: { code: true } },
         },
@@ -5314,6 +5372,7 @@ inventoryRoutes.get(
     const reference = listReference(count, rows.length, ['stock line', 'stock lines'], [
       q.search && `search "${q.search}"`,
       f.warehouseId && `warehouse ${warehouse?.name ?? 'not found'}`,
+      f.group && (f.group === 'none' ? 'no product group' : `product group ${f.group}`),
       f.categoryId && (f.categoryId === 'none' ? 'not categorised' : `category ${category?.name ?? 'not found'}`),
       f.brand && `brand ${f.brand === 'none' ? NO_BRAND_LABEL : f.brand}`,
       f.state && `status ${STATE_WORDS[f.state as StockState] ?? f.state}`,
@@ -5331,11 +5390,11 @@ inventoryRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Item', 'Category', 'Warehouse', 'Bin', 'Available', 'On loan', 'Reorder at', `Avg. cost (${currency})`, `Value (${currency})`, 'Status'],
+          head: ['Item', 'Product group', 'Warehouse', 'Bin', 'Available', 'On loan', 'Reorder at', `Avg. cost (${currency})`, `Value (${currency})`, 'Status'],
           align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'left'],
           rows: rows.map((b) => [
             { title: b.item.name, body: [b.item.code, b.item.brand].filter(Boolean).join(' · ') },
-            b.item.category?.name ?? '',
+            b.item.productGroup ?? '',
             b.warehouse.name,
             b.location?.code ?? '',
             `${qty(availableOf(b))} ${b.item.unit}`,
@@ -5370,7 +5429,7 @@ inventoryRoutes.get(
     const salesOrderId = req.query.salesOrderId ? String(req.query.salesOrderId) : undefined;
     if (salesOrderId) {
       const [item, rows, moves] = await Promise.all([
-        prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
+        prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, description: true, partNumber: true, brand: true, productGroup: true, maxStock: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
         prisma.salesOrderStock.findMany({
           where: { itemId: req.params.itemId, salesOrderId, ...(warehouseId ? { warehouseId } : {}) },
           include: { warehouse: { select: { id: true, name: true } }, location: { select: { id: true, code: true, name: true } } },
@@ -5402,7 +5461,7 @@ inventoryRoutes.get(
     }
     if (jobId) {
       const [item, rows, moves] = await Promise.all([
-        prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
+        prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, description: true, partNumber: true, brand: true, productGroup: true, maxStock: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
         prisma.projectStock.findMany({
           where: { itemId: req.params.itemId, jobId, ...(warehouseId ? { warehouseId } : {}) },
           include: { warehouse: { select: { id: true, name: true } }, location: { select: { id: true, code: true, name: true } }, job: { select: { id: true, number: true, name: true } } },
@@ -5436,7 +5495,7 @@ inventoryRoutes.get(
     const [item, balances, moves] = await Promise.all([
       prisma.item.findUnique({
         where: { id: req.params.itemId },
-        select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true, photoId: true, category: { select: { code: true } } },
+        select: { id: true, code: true, name: true, description: true, partNumber: true, brand: true, productGroup: true, maxStock: true, unit: true, reorderLevel: true, minStock: true, createdById: true, photoId: true, category: { select: { code: true } } },
       }),
       prisma.inventoryBalance.findMany({
         where: { itemId: req.params.itemId, ...(warehouseId ? { warehouseId } : {}) },
@@ -5463,15 +5522,18 @@ inventoryRoutes.get(
       where: { itemId: item.id, jobId: null, salesOrderId: null, ...(warehouseId ? { warehouseId } : {}) },
     });
 
+    // The bin and the picture are the warehouse's leads' to change (2026-11-25).
+    const lead = await mayManageItems(me);
     res.json({
       // Edit All places any stock line in a bin; Edit Own the items one added (2026-10-18).
-      canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById),
+      canEdit: lead && mayEdit(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById),
       // The product's picture is the item master's (2026-10-25): its editors set it.
-      canEditPhoto: mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById),
+      canEditPhoto: lead && mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById),
       item: {
         ...item,
         reorderLevel: item.reorderLevel == null ? null : num(item.reorderLevel),
         minStock: item.minStock == null ? null : num(item.minStock),
+        maxStock: item.maxStock == null ? null : num(item.maxStock),
       },
       balances: balances.map((b) => ({
         ...b,
