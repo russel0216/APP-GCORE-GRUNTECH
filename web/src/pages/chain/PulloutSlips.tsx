@@ -1054,9 +1054,9 @@ export function PulloutEditor() {
                       <tr key={l.key}>
                         <td>{n + 1}</td>
                         <td>
-                          <select aria-label={`Item — line ${n + 1}`} value={l.itemId} onChange={(e) => setFreeLine(l.key, { itemId: e.target.value })}>
+                          <SearchSelect aria-label={`Item — line ${n + 1}`} placeholder="Type a part number or name…" value={l.itemId} onChange={(e) => setFreeLine(l.key, { itemId: e.target.value })}>
                             {itemOptions(l.itemId)}
-                          </select>
+                          </SearchSelect>
                         </td>
                         <td className="right mono">
                           {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
@@ -1144,9 +1144,9 @@ export function PulloutEditor() {
                         {l.left} {l.unit}
                       </td>
                       <td>
-                        <select aria-label={`Item for ${l.title}`} value={p.itemId} disabled={!p.include} onChange={(e) => setPick(l.id, { itemId: e.target.value })}>
+                        <SearchSelect aria-label={`Item for ${l.title}`} placeholder="Type a part number or name…" value={p.itemId} disabled={!p.include} onChange={(e) => setPick(l.id, { itemId: e.target.value })}>
                           {itemOptions(p.itemId)}
-                        </select>
+                        </SearchSelect>
                       </td>
                       <td className="right mono">
                         {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
