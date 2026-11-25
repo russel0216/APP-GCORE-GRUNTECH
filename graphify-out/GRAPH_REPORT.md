@@ -1,7 +1,7 @@
 # Graph Report - APP-GCORE GRUNTECH  (2026-11-26)
 
 ## Corpus Check
-- 526 files · ~1,753,915 words
+- 526 files · ~1,754,086 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 40 file(s) not represented in the graph (top: .css 32, (none) 2, .pptx 2)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `f3b47755`
+- Built from commit: `b70f8e94`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -322,10 +322,10 @@
   docs/UI-STYLE.md → web/src/components/Confirm.tsx
 - `2. Pickers you type in` --references--> `PersonSelect()`  [INFERRED]
   docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/components/People.tsx
-- `1. What to copy` --references--> `StatusBadge()`  [INFERRED]
-  docs/UI-STYLE.md → web/src/components/ui.tsx
-- `4. Files to copy or mirror` --references--> `PersonSelect()`  [INFERRED]
-  docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/components/People.tsx
+- `1. What to copy` --references--> `Panel()`  [INFERRED]
+  docs/UI-STYLE.md → web/src/components/charts.tsx
+- `1. What to copy` --references--> `BarList()`  [INFERRED]
+  docs/UI-STYLE.md → web/src/components/charts.tsx
 - `4. Files to copy or mirror` --references--> `SearchSelect()`  [INFERRED]
   docs/UI-ADJUSTMENTS-2026-11-18.md → web/src/components/SearchSelect.tsx
 
@@ -1386,7 +1386,7 @@ Cohesion: 0.67
 Nodes (3): Employee number list, ROLE sheet people-to-roles, ROLE REV1 role hierarchy
 
 ## Knowledge Gaps
-- **121 isolated node(s):** `RFC-5545`, `RFC-6266`, `RFC-2047`, `RFC-4180`, `RFC-4180` (+116 more)
+- **121 isolated node(s):** `RFC-5545`, `RFC-2047`, `RFC-6266`, `RFC-4180`, `RFC-4180` (+116 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2968 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **38 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
@@ -1395,15 +1395,15 @@ _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `day()` connect `formatDate` to `warehouse.ts`, `useAuth`, `parseDay`, `DataList.tsx`?**
   _High betweenness centrality (0.067) - this node is a cross-community bridge._
-- **What connects `RFC-5545`, `RFC-6266`, `RFC-2047` to the rest of the system?**
+- **What connects `RFC-5545`, `RFC-2047`, `RFC-6266` to the rest of the system?**
   _121 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `salesOrders.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.02456306093528578 - nodes in this community are weakly interconnected._
-- **Why does `formatDate()` connect `formatDate` to `ui.tsx`, `ui.tsx`, `qs`, `finance/Reports.tsx`, `CostingSheet.tsx`, `Suppliers.tsx`, `ProjectWorkspace.tsx`, `QuotationEditor.tsx`, `useAuth`, `BudgetRequests.tsx`, `ScanPanel`, `formatMoney`, `Hiring.tsx`, `react`, `QuotationEditor`, `ServiceDocuments.tsx`, `parseDay`, `service/Reports.tsx`, `PulloutSlips.tsx`, `Evaluations.tsx`, `Outgoing.tsx`, `Marketing.tsx / BarList() / Marketing()`, `Quotations.tsx`, `NumberInput.tsx`, `Pipeline.tsx`, `DecisionNote`, `react`, `MyRecords.tsx`, `openPdf`, `ServiceJobOrders.tsx`, `IncomingEditor.tsx`, `Meetings.tsx`, `Courses.tsx`, `SalesOrderReports.tsx`, `Navigation.tsx`, `JobOrders.tsx`, `humanise`, `OfficeBudgets.tsx`, `Receivables.tsx`, `Schedule.tsx`, `Partners.tsx`, `CostingSheet`, `Forecast.tsx`, `EvaluationRuns.tsx`, `Warehouse.tsx`, `ProjectGantt`, `Customer360.tsx`, `Memos.tsx`, `Outgoing.tsx`, `SalesOrders.tsx`, `InstalledBase.tsx`, `RecordHeader.tsx`, `PurchaseRequisitionEditor.tsx`, `Dashboard.tsx`, `Passport.tsx`, `CadJobOrders.tsx`, `CadJobOrders.tsx`, `useConfirm`, `NewBillModal`, `NumberInput`, `Clock.tsx`, `Rfq.tsx`, `todayLocal`, `PeopleFlow.tsx`, `usePeople`, `Contracts.tsx`, `App.tsx`, `ErrorBox`, `MeetingDetail`, `Payables.tsx`, `Field`, `Payments`, `EmployeeEvaluationsTab.tsx`, `Orders.tsx`, `StockCardHistory.tsx`, `RfqEditor`, `Canvass.tsx`, `ExamQuestions.tsx`, `HelpTickets.tsx`, `ServiceReportDetail`, `PurchaseRequests.tsx`, `DataList.tsx`?**
+- **Why does `prisma` connect `prisma.ts` to `salesOrders.ts`, `seed.ts`, `sales.ts / pipelineStages.ts / activityTypes.ts`, `verify-hr.ts`, `routes/hr.ts`, `verify-aftermarket.ts`, `scoroQuotes.ts / scoroInvoices.ts / seed-sample-`, `shared/insights.ts`, `routes/hiring.ts`, `pdfTemplates.ts`, `registry.ts`, `masters.ts`, `routes/aftermarket.ts`, `verify-sales.ts`, `paper.ts`, `procurement.ts`, `pullouts.ts`, `routes/academy.ts`, `verify-chain.ts`, `shared/peopleFlow.ts`, `pipelineStages.ts`, `notFound`, `exhibitionVisitors.ts`, `can`, `verify-evaluations.ts / manilaDate() / main()`, `idsFilter`, `approvals.ts`, `verify-academy.ts`, `progress.ts`, `salesReports.ts`, `verify-foundation.ts`, `chargeCards.ts`, `salesOrders.ts`, `builkImport.ts`, `verify-numbering.ts`, `exchangeRates.ts`, `clearance.ts`, `shared/holidays.ts`, `verify-accounts.ts`, `projectBudget.ts`, `shared/hr.ts`, `badRequest`, `shared/chain.ts`, `quotation.ts`, `verify-marketing.ts`, `shared/finance.ts`, `shared/marketing.ts`, `jobOrders.ts`, `warehouse.ts`, `inventory.ts`, `nextNumber`, `officeBudget.ts`, `myRecords.ts`, `statusLabel`, `orderStock.ts`, `stepHolders`, `rolesFromChart.ts`, `index.ts`, `stockCardHistory.ts`, `verify-pipeline.ts`, `verify-workspace.ts`, `finReports.ts`, `seed-sample-quotation.ts`, `ref_node_fs`, `plantilla.ts`, `billingInvoice.ts`, `budgetRequestSources.ts`, `renderSchedule`, `@prisma/client`, `verify-calendar.ts`, `verify-cad.ts`, `typedItemSplit.ts`, `orgChart.ts`, `quotationBuying.ts`, `audit`, `verify-finance.ts`?**
   _High betweenness centrality (0.055) - this node is a cross-community bridge._
 - **Should `seed.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.059322033898305086 - nodes in this community are weakly interconnected._
-- **Why does `prisma` connect `prisma.ts` to `salesOrders.ts`, `seed.ts`, `sales.ts / pipelineStages.ts / activityTypes.ts`, `verify-hr.ts`, `routes/hr.ts`, `verify-aftermarket.ts`, `scoroQuotes.ts / scoroInvoices.ts / seed-sample-`, `shared/insights.ts`, `routes/hiring.ts`, `pdfTemplates.ts`, `registry.ts`, `masters.ts`, `routes/aftermarket.ts`, `verify-sales.ts`, `paper.ts`, `procurement.ts`, `pullouts.ts`, `routes/academy.ts`, `verify-chain.ts`, `shared/peopleFlow.ts`, `pipelineStages.ts`, `notFound`, `exhibitionVisitors.ts`, `can`, `verify-evaluations.ts / manilaDate() / main()`, `idsFilter`, `approvals.ts`, `verify-academy.ts`, `progress.ts`, `salesReports.ts`, `verify-foundation.ts`, `chargeCards.ts`, `salesOrders.ts`, `builkImport.ts`, `verify-numbering.ts`, `exchangeRates.ts`, `clearance.ts`, `shared/holidays.ts`, `verify-accounts.ts`, `projectBudget.ts`, `shared/hr.ts`, `badRequest`, `shared/chain.ts`, `quotation.ts`, `verify-marketing.ts`, `shared/finance.ts`, `shared/marketing.ts`, `jobOrders.ts`, `warehouse.ts`, `inventory.ts`, `nextNumber`, `officeBudget.ts`, `myRecords.ts`, `statusLabel`, `orderStock.ts`, `stepHolders`, `rolesFromChart.ts`, `index.ts`, `stockCardHistory.ts`, `verify-pipeline.ts`, `verify-workspace.ts`, `finReports.ts`, `seed-sample-quotation.ts`, `ref_node_fs`, `plantilla.ts`, `billingInvoice.ts`, `budgetRequestSources.ts`, `renderSchedule`, `@prisma/client`, `verify-calendar.ts`, `verify-cad.ts`, `typedItemSplit.ts`, `orgChart.ts`, `quotationBuying.ts`, `audit`, `verify-finance.ts`?**
-  _High betweenness centrality (0.055) - this node is a cross-community bridge._
+- **Why does `DataList()` connect `useAuth` to `Receivables.tsx`, `Schedule.tsx`, `Partners.tsx`, `Warehouse.tsx`, `Customer360.tsx`, `Memos.tsx`, `Outgoing.tsx`, `ui.tsx`, `SalesOrders.tsx`, `InstalledBase.tsx`, `qs`, `RecordHeader.tsx`, `verify-foundation.ts`, `Dashboard.tsx`, `Suppliers.tsx`, `ProjectWorkspace.tsx`, `Items.tsx`, `BudgetRequests.tsx`, `CadJobOrders.tsx`, `CadJobOrders.tsx`, `StockMovements.tsx`, `useConfirm`, `Rfq.tsx`, `Hiring.tsx`, `react`, `todayLocal`, `PeopleFlow.tsx`, `ServiceDocuments.tsx`, `usePeople`, `react-router-dom`, `App.tsx`, `formatDate`, `ErrorBox`, `PulloutSlips.tsx`, `Contracts.tsx`, `Evaluations.tsx`, `service/Reports.tsx`, `Payables.tsx`, `Outgoing.tsx`, `Marketing.tsx / BarList() / Marketing()`, `Payments`, `Quotations.tsx`, `NumberInput.tsx`, `Pipeline.tsx`, `DecisionNote`, `react`, `MyRecords.tsx`, `Orders.tsx`, `openPdf`, `Canvass.tsx`, `ServiceJobOrders.tsx`, `HelpTickets.tsx`, `Meetings.tsx`, `PurchaseRequests.tsx`, `Courses.tsx`, `DataList.tsx`, `JobOrders.tsx`?**
+  _High betweenness centrality (0.050) - this node is a cross-community bridge._
 - **Should `sales.ts / pipelineStages.ts / activityTypes.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.029792429792429794 - nodes in this community are weakly interconnected._
