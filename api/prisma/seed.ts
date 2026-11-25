@@ -2,6 +2,7 @@ import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
 import { routePurchaseRequestsByProject } from '../src/shared/prTechnicalManager';
 import { clearListLayoutNudges } from '../src/shared/listLayoutNudges';
 import { clearDecidedApprovalBells } from '../src/shared/approvalBells';
+import { fixStandInOwners } from '../src/shared/directOrders';
 import { markScoroCancelledQuotations } from '../src/shared/scoroCancelled';
 import { syncCatalogue } from '../src/shared/catalogue';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
@@ -1547,6 +1548,9 @@ async function main() {
   // Decided approvals' "please decide" bells marked read, once (GT-HT-2026-0025, 2026-11-26).
   const bellsCleared = await clearDecidedApprovalBells();
   if (bellsCleared) console.log(`  ✓ ${bellsCleared} old approval bell(s) marked read`);
+  // Stand-in quotations take their order's salesperson, once (GT-HT-2026-0038, 2026-11-26).
+  const standIns = await fixStandInOwners();
+  if (standIns) console.log(`  ✓ ${standIns} stand-in quotation(s) moved to their order's salesperson`);
   // Every item on the Inventory list, stocked or not (2026-10-25): a
   // placeholder line in the main warehouse for an item with none anywhere.
   const catalogue = await syncCatalogue();

@@ -19,7 +19,7 @@ import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, routePreview, pickWorkflow } from '../src/shared/approvals';
 import { financeSettings, refreshSettlement, settleable, addDays, dayKey } from '../src/shared/finance';
 import { signToken } from '../src/auth/middleware';
-import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
+import { budgetPosition, sCurve, renewalTerm, projectOwnedBy } from '../src/routes/jobs';
 import { statusLabel } from '../src/shared/pdf';
 import { curveTicks } from '../../web/src/lib/sCurve';
 // Side-effect import: registers the budget_request approval subscriber.
@@ -1133,6 +1133,19 @@ async function main() {
       readBack?.body?.quotationRevision?.quotation?.number === quotation.number,
       JSON.stringify(readBack?.body?.quotationRevision ?? null),
     );
+    // GT-HT-2026-0037 (2026-11-26): the salesperson who owns the quotation a
+    // project was won from counts it as theirs (View Own, Mine), though they
+    // neither manage, engineer nor created it — and a stranger still does not.
+    const seller = await makeUser('Verify Seller', `seller-${Date.now()}@verifydelivery.local`, []);
+    const stranger = await makeUser('Verify Stranger', `stranger-${Date.now()}@verifydelivery.local`, []);
+    const soldQuote = await prisma.quotation.update({ where: { id: quotation.id }, data: { ownerId: seller.id }, select: { ownerId: true } });
+    const sellerSees = quotedJobId ? await prisma.job.count({ where: { id: quotedJobId, ...projectOwnedBy([seller.id]) } }) : 0;
+    const strangerSees = quotedJobId ? await prisma.job.count({ where: { id: quotedJobId, ...projectOwnedBy([stranger.id]) } }) : 0;
+    check('the quotation’s salesperson counts the project won from it as their own', sellerSees === 1 && soldQuote.ownerId === seller.id, String(sellerSees));
+    check('…and somebody with no part in it does not', strangerSees === 0, String(strangerSees));
+    await prisma.quotation.update({ where: { id: quotation.id }, data: { ownerId: pm.id } });
+    await prisma.user.deleteMany({ where: { id: { in: [seller.id, stranger.id] } } });
+
     const costingRead = await http(leadToken, 'GET', `/costings/${qCosting.id}`);
     check(
       'GET /costings/:id lists the job built on it',

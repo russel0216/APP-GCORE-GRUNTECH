@@ -45,7 +45,7 @@ export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderI
   const order = await tx.salesOrder.findUnique({
     where: { id: orderId },
     select: {
-      quotation: { select: { id: true, directOrder: true, revisions: { where: { revision: 0 }, select: { id: true } } } },
+      quotation: { select: { id: true, directOrder: true, ownerId: true, revisions: { where: { revision: 0 }, select: { id: true } } } },
     },
   });
   if (!order?.quotation.directOrder) return;
@@ -54,9 +54,15 @@ export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderI
   const orders = await tx.salesOrder.findMany({
     where: { quotationId: order.quotation.id },
     orderBy: [{ number: 'asc' }],
-    select: { id: true, discountPct: true, vatRate: true, vatInclusive: true, lines: { orderBy: { sortOrder: 'asc' } } },
+    select: { id: true, ownerId: true, discountPct: true, vatRate: true, vatInclusive: true, lines: { orderBy: { sortOrder: 'asc' } } },
   });
   const first = orders[0];
+  // The stand-in is its order's salesperson's (GT-HT-2026-0038): the SCORO
+  // import made it in the name of whoever ran the import, and the commission
+  // form named that person on the deal. The first order's salesperson.
+  if (first && first.ownerId !== order.quotation.ownerId) {
+    await tx.quotation.update({ where: { id: order.quotation.id }, data: { ownerId: first.ownerId } });
+  }
 
   await tx.salesOrderLine.updateMany({ where: { orderId: { in: orders.map((o) => o.id) } }, data: { quotationItemId: null } });
   await tx.quotationItem.deleteMany({ where: { revisionId } });
@@ -99,4 +105,46 @@ export async function dropStandIn(quotationId: string) {
   if (!q?.directOrder || q._count.salesOrders > 0) return false;
   await prisma.quotation.delete({ where: { id: quotationId } });
   return true;
+}
+
+/**
+ * Once (2026-11-26, GT-HT-2026-0038): every stand-in quotation whose owner is
+ * not its first order's salesperson — the SCORO import made them in the name
+ * of whoever ran it — takes that salesperson, one audit row each. Marked so
+ * it never runs again; the mirror keeps them right from now on.
+ */
+const STAND_IN_OWNER_MARK = 'seed.standInOwners20261126';
+export async function fixStandInOwners(): Promise<number | null> {
+  if (await prisma.setting.findUnique({ where: { key: STAND_IN_OWNER_MARK } })) return null;
+  const standIns = await prisma.quotation.findMany({
+    where: { directOrder: true },
+    select: {
+      id: true,
+      number: true,
+      ownerId: true,
+      owner: { select: { name: true } },
+      salesOrders: { orderBy: { number: 'asc' }, take: 1, select: { number: true, ownerId: true, owner: { select: { name: true } } } },
+    },
+  });
+  let moved = 0;
+  for (const q of standIns) {
+    const first = q.salesOrders[0];
+    if (!first || first.ownerId === q.ownerId) continue;
+    await prisma.$transaction(async (tx) => {
+      await tx.quotation.update({ where: { id: q.id }, data: { ownerId: first.ownerId } });
+      await tx.auditLog.create({
+        data: {
+          entityType: 'quotation',
+          entityId: q.id,
+          action: 'UPDATED',
+          summary: `Stand-in quotation ${q.number} moved from ${q.owner.name} to ${first.owner.name}, the salesperson of sales order ${first.number}`,
+          before: { ownerId: q.ownerId } as Prisma.InputJsonValue,
+          after: { ownerId: first.ownerId } as Prisma.InputJsonValue,
+        },
+      });
+    });
+    moved += 1;
+  }
+  await prisma.setting.create({ data: { key: STAND_IN_OWNER_MARK, value: { at: new Date().toISOString(), moved } } });
+  return moved;
 }

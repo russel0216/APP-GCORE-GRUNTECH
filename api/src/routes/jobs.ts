@@ -245,15 +245,35 @@ const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
  * paper never shows a different set from the screen it was printed off.
  * `?ids=` (the rows ticked) is ANDed with the visibility rule.
  */
+/**
+ * Whose project it is (View Own / Team / "Mine"): its Technical Manager, its
+ * Project Engineer, whoever created it — and, since 2026-11-26 (help tickets
+ * GT-HT-2026-0037 / 0028), the SALESPERSON who sold it: the owner of the
+ * quotation it was won from, or of a quotation costed from its costing (a
+ * project built before its quotation was approved links no revision).
+ */
+export function projectOwnedBy(ids: string[]): Prisma.JobWhereInput {
+  const sold = { quotation: { ownerId: { in: ids } } };
+  return {
+    OR: [
+      { projectManagerId: { in: ids } },
+      { projectEngineerId: { in: ids } },
+      { createdById: { in: ids } },
+      { quotationRevision: sold },
+      { costing: { quotationRevisions: { some: sold } } },
+    ],
+  };
+}
+
 export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
   const and: Prisma.JobWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
   // The Project Engineer is on the project too (2026-10-22).
-  if (q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { projectEngineerId: me.id }, { createdById: me.id }] });
+  if (q.scope === 'mine') and.push(projectOwnedBy([me.id]));
   else if (onlyOwn) {
     // View Team reads the projects its team manages or opened (2026-10-19).
     const ids = visibleOwners(me, 'gops', 'projects');
-    and.push({ OR: [{ projectManagerId: { in: ids } }, { projectEngineerId: { in: ids } }, { createdById: { in: ids } }] });
+    and.push(projectOwnedBy(ids));
   }
   if (q.search) {
     const term = q.search;
@@ -285,7 +305,7 @@ async function jobFilterLine(q: ListQuery): Promise<(string | null)[]> {
     f.status ? `status ${statusLabel(f.status)}` : null,
     f.type ? `type ${statusLabel(f.type)}` : null,
     named.customer ? `customer ${named.customer}` : null,
-    q.scope === 'mine' ? 'managed or created by me' : null,
+    q.scope === 'mine' ? 'managed, created or sold by me' : null,
     f.ids ? 'the rows selected' : null,
   ];
 }
@@ -1440,7 +1460,7 @@ jobRoutes.get(
     const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
     const ids = onlyOwn ? visibleOwners(me, 'gops', 'projects') : null;
     const job = await prisma.job.findFirst({
-      where: { id: req.params.id, ...(ids ? { OR: [{ projectManagerId: { in: ids } }, { projectEngineerId: { in: ids } }, { createdById: { in: ids } }] } : {}) },
+      where: { id: req.params.id, ...(ids ? projectOwnedBy(ids) : {}) },
       include: {
         customer: { select: { name: true } },
         site: { select: { name: true } },
