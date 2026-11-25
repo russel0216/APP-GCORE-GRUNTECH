@@ -1323,7 +1323,9 @@ async function main() {
       rfa.status === 201 &&
         rfa.body.status === 'DRAFT' &&
         /RFA/.test(String(rfa.body.number)) &&
-        rfaRoute.map((st) => st.name).join(' › ') === 'Technical Manager › Team Leader' &&
+        // By who each step goes to — an install may rename its steps ("Approved By").
+        rfaRoute.length === 2 &&
+        rfaRoute[0].approvers.some((p) => p.id === rfaTm.id) &&
         rfaRoute[1].approvers.some((p) => p.id === pm.id),
       `${rfa.status} ${rfa.body.number} ${rfaRoute.map((st) => st.name).join(' › ')}`,
     );
@@ -1337,11 +1339,16 @@ async function main() {
       `${rfaSent.status} ${rfaSent.body.status} ${rfaSent.body.amount}`,
     );
     check('its files are frozen while it is with the approvers (403)', (await attachRfa(rfaEngToken, rfaId, 'late.pdf')) === 403);
-    const rfaRoute2 = async (amount: number) => (await pickWorkflow('plan_approval', amount))?.steps.map((st) => st.name).join(' › ');
+    // By the step's kind and role key: an install may rename its steps ("Approved By").
+    const rfaRoute2 = async (amount: number) => {
+      const steps = (await pickWorkflow('plan_approval', amount))?.steps ?? [];
+      const keys = await prisma.role.findMany({ where: { id: { in: steps.map((st) => st.roleId).filter((v): v is string => !!v) } }, select: { id: true, key: true } });
+      return steps.map((st) => `${st.approverType}:${keys.find((k) => k.id === st.roleId)?.key ?? '-'}`).join(' › ');
+    };
+    const RFA_ROUTE = 'ROLE:technical_manager › SUPERVISOR:team_leader';
     check(
       'two signatures whatever the contract value — no CEO / President step (2026-10-20)',
-      (await rfaRoute2(1_000_000)) === 'Technical Manager › Team Leader' &&
-        (await rfaRoute2(50_000_000)) === 'Technical Manager › Team Leader',
+      (await rfaRoute2(1_000_000)) === RFA_ROUTE && (await rfaRoute2(50_000_000)) === RFA_ROUTE,
       `${await rfaRoute2(1_000_000)} | ${await rfaRoute2(50_000_000)}`,
     );
     const rfaReq = await rfaRequest(rfaId);
@@ -1969,6 +1976,13 @@ async function main() {
     // The requested-by filter is ANDed with "only their own", never written
     // over it: an engineer who sees only their own requests, naming the
     // project manager, lists and prints none of the manager's.
+    const ownOnlyRole = await makeRole('ownbr', ['gops.budget_requests.view_own', 'gops.budget_requests.create', 'gops.budget_requests.edit_own']);
+    const ownReader = await prisma.user.create({
+      data: { name: `${TAG} Own Reader`, email: 'ownreader@verifyd.local', passwordHash: await bcrypt.hash('x', 10), roles: { create: [{ roleId: ownOnlyRole.id }] } },
+    });
+    const ownRequest = await prisma.budgetRequest.create({
+      data: { number: `${TAG}-BR-OWN`, jobId: job.id, costCategoryId: materials.id, amount: d(500), reason: `${TAG} raised by the own reader`, requestedById: ownReader.id },
+    });
     const pmRequest = await prisma.budgetRequest.create({
       data: {
         number: `${TAG}-BR-PM`,
@@ -1980,10 +1994,11 @@ async function main() {
       },
     });
     const engToken = signToken(engineer.id, engineer.email);
-    const askedRows = await http(engToken, 'GET', `/budget-requests?requestedById=${pm.id}&pageSize=200`);
-    const askedPaper = await printed(engToken, `/budget-requests/pdf?requestedById=${pm.id}`);
+    const ownToken = signToken(ownReader.id, ownReader.email);
+    const askedRows = await http(ownToken, 'GET', `/budget-requests?requestedById=${pm.id}&pageSize=200`);
+    const askedPaper = await printed(ownToken, `/budget-requests/pdf?requestedById=${pm.id}`);
     const askedText = askedPaper.text;
-    const ownRows = await http(engToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=200`);
+    const ownRows = await http(ownToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=200`);
     check(
       'a requester who sees only their own, naming somebody else as the requester, lists and prints 0 requests',
       askedRows.status === 200 &&
@@ -1991,13 +2006,13 @@ async function main() {
         askedPaper.status === 200 &&
         !squash(askedText).includes(pmRequest.number) &&
         flat(askedText).includes('Reference: 0 ') &&
-        // Not vacuous: the engineer's own request is there without the filter, the manager's is not.
+        // Not vacuous: the reader's own request is there without the filter, the manager's is not.
         ownRows.status === 200 &&
-        (ownRows.body.rows ?? []).some((r: { id: string }) => r.id === br.id) &&
+        (ownRows.body.rows ?? []).some((r: { id: string }) => r.id === ownRequest.id) &&
         !(ownRows.body.rows ?? []).some((r: { id: string }) => r.id === pmRequest.id),
       `${askedRows.status} total ${askedRows.body.total} · ${askedPaper.status} ${flat(askedText).match(/Reference:.{0,100}/)?.[0] ?? ''}`,
     );
-    await prisma.budgetRequest.delete({ where: { id: pmRequest.id } });
+    await prisma.budgetRequest.deleteMany({ where: { id: { in: [pmRequest.id, ownRequest.id] } } });
 
     // The request page's breakdown (2026-10-19): lines, the amount their sum
     // (qty × unit cost to the centavo), replaced whole by a Modify, printed;
@@ -2686,10 +2701,13 @@ async function main() {
       const pickOrders = await http(engT, 'GET', `/budget-requests/sources?kind=sales_order&q=${encodeURIComponent(order.number)}`);
       const pickQuotes = await http(engT, 'GET', `/budget-requests/sources?kind=quotation&q=${encodeURIComponent(quotationB.number)}`);
       const builtNumber = String(built.body?.number ?? '');
+      // The picker lists them WITH that project (2026-11-24), so the page charges the project instead.
+      const pickedWith = (rows: unknown, id: string) =>
+        (rows as { id: string; project?: { number: string } | null }[]).some((r) => r.id === id && r.project?.number === builtNumber);
       check(
-        'once a project holds its budget, a sales order or quotation takes no new request — the refusal names the project, and the picker leaves them out',
+        'once a project holds its budget, a sales order or quotation takes no new request — the refusal names the project, and the picker lists them with it',
         lateOrder.status === 400 && String(lateOrder.body?.error).includes(builtNumber) && lateQuote.status === 400 && String(lateQuote.body?.error).includes(builtNumber) &&
-          !(pickOrders.body as { id: string }[]).some((r) => r.id === order.id) && !(pickQuotes.body as { id: string }[]).some((r) => r.id === quotationB.id),
+          pickedWith(pickOrders.body, order.id) && pickedWith(pickQuotes.body, quotationB.id),
         `${lateOrder.status} ${lateOrder.body?.error} · ${lateQuote.status} · ${JSON.stringify(pickOrders.body).slice(0, 80)}`,
       );
       // A costing the quotation counts for its INSTALLATION only (2026-11-14):
