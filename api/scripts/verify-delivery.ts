@@ -1136,15 +1136,33 @@ async function main() {
     // GT-HT-2026-0037 (2026-11-26): the salesperson who owns the quotation a
     // project was won from counts it as theirs (View Own, Mine), though they
     // neither manage, engineer nor created it — and a stranger still does not.
-    const seller = await makeUser('Verify Seller', `seller-${Date.now()}@verifydelivery.local`, []);
-    const stranger = await makeUser('Verify Stranger', `stranger-${Date.now()}@verifydelivery.local`, []);
+    // Projects › View Own and Edit Own alone — the Sales Engineer's projects rights.
+    const ownProjRole = await makeRole('ownproj', ['gops.projects.view_own', 'gops.projects.edit_own']);
+    const projUser = async (who: string) =>
+      prisma.user.create({
+        data: { name: `${TAG} ${who}`, email: `${who.toLowerCase()}@verifyd.local`, passwordHash: await bcrypt.hash('x', 10), roles: { create: [{ roleId: ownProjRole.id }] } },
+      });
+    const seller = await projUser('Seller');
+    const stranger = await projUser('Stranger');
     const soldQuote = await prisma.quotation.update({ where: { id: quotation.id }, data: { ownerId: seller.id }, select: { ownerId: true } });
     const sellerSees = quotedJobId ? await prisma.job.count({ where: { id: quotedJobId, ...projectOwnedBy([seller.id]) } }) : 0;
     const strangerSees = quotedJobId ? await prisma.job.count({ where: { id: quotedJobId, ...projectOwnedBy([stranger.id]) } }) : 0;
     check('the quotation’s salesperson counts the project won from it as their own', sellerSees === 1 && soldQuote.ownerId === seller.id, String(sellerSees));
     check('…and somebody with no part in it does not', strangerSees === 0, String(strangerSees));
+    // GT-HT-2026-0022: Edit Own modifies the projects that count as one's own — the
+    // route asked Edit All alone, so the box on Admin › Roles did nothing.
+    if (quotedJobId) {
+      const sellerToken = signToken(seller.id, seller.email);
+      const strangerToken = signToken(stranger.id, stranger.email);
+      const sellerRead = await http(sellerToken, 'GET', `/jobs/${quotedJobId}`);
+      const strangerRead = await http(strangerToken, 'GET', `/jobs/${quotedJobId}`);
+      check('the salesperson is offered Modify on it (canModify), a stranger is not', sellerRead.body?.canModify === true && strangerRead.body?.canModify === false, `${sellerRead.body?.canModify} / ${strangerRead.body?.canModify}`);
+      const sellerPatch = await http(sellerToken, 'PATCH', `/jobs/${quotedJobId}`, { notes: `${TAG} changed by its salesperson` });
+      check('Edit Own modifies one’s own project', sellerPatch.status === 200, `${sellerPatch.status} ${JSON.stringify(sellerPatch.body).slice(0, 160)}`);
+      const strangerPatch = await http(strangerToken, 'PATCH', `/jobs/${quotedJobId}`, { notes: `${TAG} changed by a stranger` });
+      check('…and is refused on somebody else’s', strangerPatch.status === 403, String(strangerPatch.status));
+    }
     await prisma.quotation.update({ where: { id: quotation.id }, data: { ownerId: pm.id } });
-    await prisma.user.deleteMany({ where: { id: { in: [seller.id, stranger.id] } } });
 
     const costingRead = await http(leadToken, 'GET', `/costings/${qCosting.id}`);
     check(
