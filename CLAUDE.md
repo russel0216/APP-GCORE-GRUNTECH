@@ -4921,6 +4921,34 @@ and incoming". His answers: a card of its own, zero-quantity rows skipped.
   delivered in Odoo, then the newest 20 (Show all, 1,000 at most listed).
 - verify-chain pins the readings, the import, the untouched stock, the
   re-run and the card.
+- **Stock Movements is a menu of its own** (the same day, the owner's call:
+  "remove the recent stock movement below Inventory; a separate menu between
+  Inventory and Pull-out Slips to view all the stock movement, with filters;
+  column selection"). The Warehouse strip is Incoming · Inventory · **Stock
+  Movements** · Pull-out Slips · Borrow Slips · Outgoing (verify-foundation
+  pins it); `gchain.stock_movements` (READ — View All is the whole right),
+  `/g-chain/stock-movements`, `routes/stockMovements.ts` at
+  `/api/stock-movements`, `pages/chain/StockMovements.tsx`.
+  `splitBorrowedRights()` (`stock-movements`) gave it once to whoever reads
+  Inventory at any level. **Read only, two views never mixed**: G-CORE's
+  movements (`InventoryTransaction` — the company's stock and a project's, a
+  sales order's and a quotation's own, the row saying whose), and
+  `?view=odoo`, the Odoo history (`OdooStockMove`); the page's switch keeps
+  each view's filters its own (`listKey` `stock-movements` /
+  `stock-movements-odoo`, so columns and saved views are per view). One
+  where-builder per view (`movementWhere`, `odooWhere`) feeds the rows, the
+  cards (movements, items moved, in, out — quantities are never summed, the
+  units differ) and the paper (`GET /stock-movements/pdf`, landscape,
+  audited `stock_movement` / `list`). Filters: item (a lookup, `GET
+  /stock-movements/items`), Date (`from` / `to`, Manila days), In or out,
+  Type, Document (Incoming, Outgoing, Pull-out slip, Borrow slip, Opening
+  balance from Odoo, anything else), Warehouse, Moved by, Product group,
+  Brand, Whose stock; `GET /stock-movements/options` feeds them. Columns are
+  DataList's own panel: When, Item, Type, Document (a link), From → to,
+  In / out, Before, After, By shown; Part number, Brand, Product group, Unit
+  cost, Value, Warehouse, Whose stock and Notes under Columns. The card
+  under Inventory (`InventoryFoot`) and `GET /inventory/movements[/people]`
+  are gone.
 
 ## Sales › Marketing: exhibition visitors (2026-10-27)
 

@@ -13,11 +13,9 @@ import {
   ProductPicture,
   StatusBadge,
   formatDate,
-  formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
-import { label } from './PurchaseRequests';
 import { BarList, Panel, Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -856,126 +854,6 @@ interface InventorySummary {
   orders?: number;
 }
 
-interface Movement {
-  id: string;
-  type: 'RECEIPT' | 'ISSUE' | 'BORROW' | 'RETURN' | 'ADJUSTMENT';
-  quantity: number;
-  sourceNumber: string | null;
-  occurredAt: string;
-  link: string | null;
-  /** What the shelf held before and after it. */
-  balanceBefore?: number;
-  balanceAfter?: number;
-  /** Who made it (2026-11-25). */
-  createdBy?: { id: string; name: string } | null;
-  item: { id: string; code: string; name: string; unit: string };
-  warehouse: { id: string; name: string };
-  /** A move of a project's own stock. */
-  job?: { id: string; number: string } | null;
-}
-
-/** "2h ago", "Yesterday", "Oct 9" — how long since a movement. */
-function since(at: string) {
-  const mins = Math.round((Date.now() - new Date(at).getTime()) / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  if (mins < 24 * 60) return `${Math.round(mins / 60)}h ago`;
-  if (mins < 48 * 60) return 'Yesterday';
-  return formatDate(at);
-}
-
-/**
- * Under the stock (2026-10-14, the owner's inventory screen): the latest
- * movements in and out, each linking to its document. Receiving is the
- * list's "+ New incoming" and the stock report its Report button and ⋯ ›
- * Print (2026-10-18, rule 9) — the "Quick operations" card is gone.
- */
-function InventoryFoot() {
-  const [rows, setRows] = useState<Movement[] | null>(null);
-  // Who moved it (2026-11-25, the owner's audit): a person to narrow to, and more rows on request.
-  const [people, setPeople] = useState<{ id: string; name: string; movements: number }[]>([]);
-  const [userId, setUserId] = useState('');
-  const [limit, setLimit] = useState(10);
-  useEffect(() => {
-    api.get<typeof people>('/inventory/movements/people').then(setPeople).catch(() => setPeople([]));
-  }, []);
-  useEffect(() => {
-    api.get<Movement[]>(`/inventory/movements${qs({ limit, userId: userId || undefined })}`).then(setRows).catch(() => setRows([]));
-  }, [limit, userId]);
-  return (
-    <div className="inv-foot">
-      <section className="card" aria-labelledby="inv-moves">
-        <div className="card-head">
-          <h2 id="inv-moves" className="card-title">Stock movement</h2>
-          <SearchSelect aria-label="Moved by" value={userId} onChange={(e) => setUserId(e.target.value)}>
-            <option value="">Moved by anyone</option>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.movements})
-              </option>
-            ))}
-            <option value="none">No person on record</option>
-          </SearchSelect>
-        </div>
-        {!rows ? (
-          <Loading />
-        ) : !rows.length ? (
-          <p className="collection-empty">{userId ? 'Nothing moved by this person.' : 'Nothing has moved yet.'}</p>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Item</th>
-                  <th className="right">In / out</th>
-                  <th className="right">Before</th>
-                  <th className="right">After</th>
-                  <th>Document</th>
-                  <th>Warehouse</th>
-                  <th>By</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((m) => {
-                  const into = m.quantity > 0;
-                  return (
-                    <tr key={m.id}>
-                      <td className="muted" title={formatDateTime(m.occurredAt)}>
-                        {since(m.occurredAt)}
-                      </td>
-                      <td>
-                        <Link to={`/g-chain/inventory/${m.item.id}`}>{m.item.name}</Link> <span className="faint mono">({m.item.code})</span>
-                        {m.job ? <div className="faint">{m.job.number}'s stock</div> : null}
-                      </td>
-                      <td className={`right mono ${into ? 'proc-best' : 'proc-over'}`}>
-                        {into ? '+' : ''}
-                        {m.quantity} {m.item.unit}
-                      </td>
-                      <td className="right mono">{m.balanceBefore ?? '—'}</td>
-                      <td className="right mono">{m.balanceAfter ?? '—'}</td>
-                      <td>{m.link ? <Link to={m.link} className="mono">{m.sourceNumber ?? label(m.type)}</Link> : <span className="mono faint">{m.sourceNumber ?? label(m.type)}</span>}</td>
-                      <td>{m.warehouse.name}</td>
-                      <td>{m.createdBy?.name ?? <span className="faint">—</span>}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {rows && rows.length >= limit && limit < 200 && (
-          <div className="card-foot">
-            <button type="button" className="btn btn-sm" onClick={() => setLimit((n) => Math.min(200, n * 4))}>
-              Show more
-            </button>
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
 /** Which view of the stock a viewer opened last — a per-browser convenience; a link's `?view=` wins. */
 const INVENTORY_VIEW_KEY = 'gcore_view_inventory';
 function storedInventoryView(): 'list' | 'kanban' {
@@ -1360,7 +1238,6 @@ export function Inventory() {
           onImported={() => setReload((r) => r + 1)}
         />
       )}
-      <InventoryFoot />
     </div>
   );
 }

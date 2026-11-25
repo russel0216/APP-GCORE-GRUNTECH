@@ -113,6 +113,8 @@ const SCREEN: Record<string, string> = {
   warehouse: '/g-chain/warehouses',
   // The stock-on-hand list's paper audits as EXPORTED under 'inventory'.
   inventory: '/g-chain/inventory',
+  // The stock movements list's paper audits as EXPORTED under 'stock_movement'.
+  stock_movement: '/g-chain/stock-movements',
   cost_category: '/admin/categories',
   // An exhibition is set up on Sales › Marketing; its brands on Admin › Categories.
   exhibition: '/g-ops/marketing',

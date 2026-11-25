@@ -69,6 +69,7 @@ import {
   StockCard,
   ChainDashboard,
 } from './pages/chain/Warehouse';
+import { StockMovements } from './pages/chain/StockMovements';
 import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';
 import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/PulloutSlips';
 import { Clock } from './pages/hr/Clock';
@@ -1033,6 +1034,14 @@ function Routed() {
           element={
             <Guard permission="gchain.inventory.view_all">
               <Inventory />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/stock-movements"
+          element={
+            <Guard permission="gchain.stock_movements.view_all">
+              <StockMovements />
             </Guard>
           }
         />

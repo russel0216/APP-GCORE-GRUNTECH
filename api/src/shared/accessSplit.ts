@@ -45,6 +45,11 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   { key: 'assets', from: 'ghr.employees.edit_all', to: ['ghr.assets.view_all', 'ghr.assets.create', 'ghr.assets.edit_all'] },
   // …and everyone who reads their own records reads the property issued to them.
   { key: 'assets-own', from: 'ghr.my_records.view_own', to: ['ghr.assets.view_own'] },
+  // Stock Movements (2026-11-25): the log left the foot of Inventory for a
+  // menu of its own — whoever reads Inventory, at any level, reads it.
+  { key: 'stock-movements', from: 'gchain.inventory.view_own', to: ['gchain.stock_movements.view_all'] },
+  { key: 'stock-movements-team', from: 'gchain.inventory.view_team', to: ['gchain.stock_movements.view_all'] },
+  { key: 'stock-movements-all', from: 'gchain.inventory.view_all', to: ['gchain.stock_movements.view_all'] },
   // The two charts in G-HR (2026-11-13): every employee reads them.
   { key: 'org-charts', from: 'ghr.my_records.view_own', to: ['ghr.org_chart.view_all', 'ghr.hierarchy_chart.view_all'] },
   // Evaluation runs (2026-11-13): HR — whoever edits every employee record — runs them.

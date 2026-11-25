@@ -31,7 +31,7 @@ export interface StockMovement {
 const qty = (n: number) => n.toLocaleString('en-PH', { maximumFractionDigits: 3 });
 
 /** "A → B", a side nobody recorded left as a dash. */
-function FromTo({ from, to }: { from?: string | null; to?: string | null }) {
+export function FromTo({ from, to }: { from?: string | null; to?: string | null }) {
   if (!from && !to) return <span className="faint">—</span>;
   return (
     <>

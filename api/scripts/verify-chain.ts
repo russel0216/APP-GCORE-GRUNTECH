@@ -7169,6 +7169,52 @@ async function odooMigration() {
       card.odooHistory.rows[2].reference === `WH/IN/${TAG}1`,
     JSON.stringify({ status: cardRead.status, total: card.movementsTotal, first: card.movements?.[0], odoo: card.odooHistory && { ...card.odooHistory, rows: card.odooHistory.rows.length } }),
   );
+  // G-CHAIN › Warehouse › Stock Movements (2026-11-25): the log as a menu, two views never mixed.
+  const smToken = signToken(admin.id, admin.email);
+  const smSince = new Date();
+  const sm = await api(smToken, 'GET', `/stock-movements?itemId=${pump.id}`);
+  const smRows = (sm.body.rows ?? []) as { from: string | null; to: string | null; balanceBefore: number; balanceAfter: number; item: { partNumber: string | null } }[];
+  const smSum = sm.body.summary as { items?: number; in?: number; out?: number } | undefined;
+  check(
+    "Stock Movements lists G-CORE's movements with the item filter: the pump's one opening movement, the same count as its stock card, where it came from and went, and the cards",
+    sm.status === 200 &&
+      sm.body.total === card.movementsTotal &&
+      smRows[0]?.from === 'Odoo — opening balance' &&
+      smRows[0]?.to === warehouse!.name &&
+      smRows[0]?.balanceBefore === 0 &&
+      smRows[0]?.balanceAfter === 3 &&
+      smSum?.items === 1 &&
+      smSum.in === 1 &&
+      smSum.out === 0,
+    JSON.stringify({ status: sm.status, total: sm.body.total, row: smRows[0], summary: smSum }),
+  );
+  const smOdoo = await api(smToken, 'GET', `/stock-movements?view=odoo&itemId=${pump.id}`);
+  const smIn = await api(smToken, 'GET', `/stock-movements?view=odoo&itemId=${pump.id}&direction=in`);
+  const smFeb = await api(smToken, 'GET', `/stock-movements?view=odoo&itemId=${pump.id}&from=2026-02-01&to=2026-02-28`);
+  const smSearch = await api(smToken, 'GET', `/stock-movements?view=odoo&search=${encodeURIComponent(`${TAG} CUSTOMER`)}`);
+  const smOut = await api(smToken, 'GET', `/stock-movements?itemId=${pump.id}&direction=out`);
+  check(
+    "the Odoo view is the history alone, under the same filters: three moves, one in, two in February, found by the customer's name — and nothing of it in G-CORE's view",
+    smOdoo.body.total === 3 && smIn.body.total === 1 && smFeb.body.total === 2 && smSearch.body.total === 2 && smOut.body.total === 0,
+    JSON.stringify([smOdoo.body.total, smIn.body.total, smFeb.body.total, smSearch.body.total, smOut.body.total]),
+  );
+  const smBadView = await api(smToken, 'GET', '/stock-movements?view=everything');
+  const smBadDay = await api(smToken, 'GET', '/stock-movements?from=2026-02-30');
+  const outsider = await prisma.user.create({ data: { email: 'nomoves@verifyc.local', name: `${TAG} No Moves`, passwordHash: 'x' } });
+  const smRefused = await api(signToken(outsider.id, outsider.email), 'GET', '/stock-movements');
+  const smPaper = await fetch(`${BASE}/stock-movements/pdf?itemId=${pump.id}`, { headers: { Authorization: `Bearer ${smToken}` } });
+  const smOdooPaper = await fetch(`${BASE}/stock-movements/pdf?view=odoo&itemId=${pump.id}`, { headers: { Authorization: `Bearer ${smToken}` } });
+  check(
+    'an unknown view or an impossible day is refused in words, a login without the right is kept out, and both views print',
+    smBadView.status === 400 &&
+      smBadDay.status === 400 &&
+      smRefused.status === 403 &&
+      smPaper.status === 200 &&
+      (smPaper.headers.get('content-type') ?? '').includes('pdf') &&
+      smOdooPaper.status === 200,
+    `${smBadView.status} ${smBadDay.status} ${smRefused.status} ${smPaper.status} ${smOdooPaper.status}`,
+  );
+  await prisma.auditLog.deleteMany({ where: { entityType: 'stock_movement', entityId: 'list', actorId: admin.id, at: { gte: smSince } } });
   // The photo routes, and delete for a super admin alone.
   const editorRole = await makeRole('zzchain_itemeditor', 'ZZ Item editor', ['gchain.items.view_all', 'gchain.items.edit_all']);
   const editor = await prisma.user.create({
@@ -7245,9 +7291,12 @@ async function odooMigration() {
     tiles.some((t) => t.id === pumpGroup && t.items >= 1) && byGroup.body.total >= 1 && otherGroup.body.total === 0,
     `group ${pumpGroup}; tiles ${tiles.map((t) => `${t.id}:${t.items}`).join(', ')}; ${byGroup.body.total}/${otherGroup.body.total}`,
   );
-  const moves = await api(token, 'GET', `/inventory/movements?itemId=${pump.id}&limit=20`);
-  const moveRows = (moves.body ?? []) as { quantity: number; balanceBefore: number; balanceAfter: number; createdBy: { id: string; name: string } | null }[];
-  const movers = await api(token, 'GET', '/inventory/movements/people');
+  // The log is its own menu since 2026-11-25 (Stock Movements); read as a super admin.
+  const movesToken = signToken(admin.id, admin.email);
+  const moves = await api(movesToken, 'GET', `/stock-movements?itemId=${pump.id}&pageSize=20`);
+  const moveRows = (moves.body.rows ?? []) as { quantity: number; balanceBefore: number; balanceAfter: number; createdBy: { id: string; name: string } | null }[];
+  const moversRead = await api(movesToken, 'GET', '/stock-movements/options');
+  const movers = { status: moversRead.status, body: moversRead.body.people };
   check(
     'the movement log says who moved it and what the shelf held before and after, and lists the people to narrow to',
     moves.status === 200 &&

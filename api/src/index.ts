@@ -101,6 +101,7 @@ import { advanceRoutes } from './routes/advances';
 import { jobOrderRoutes } from './routes/jobOrders';
 import { serviceJobOrderRoutes } from './routes/serviceJobOrders';
 import { serviceDocumentRoutes } from './routes/serviceDocuments';
+import { stockMovementRoutes } from './routes/stockMovements';
 import { marketingRoutes } from './routes/marketing';
 import { officeBudgetRoutes } from './routes/officeBudgets';
 import { procurementSettingsRoutes } from './routes/procurementSettings';
@@ -216,6 +217,7 @@ app.use('/api/pullout-slips', pulloutRoutes);
 app.use('/api/chain-reports', chainReportRoutes);
 app.use('/api/fin-reports', finReportRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api/stock-movements', stockMovementRoutes);
 app.use('/api/gchain', chainRoutes);
 
 // G-HR (Phase 6)

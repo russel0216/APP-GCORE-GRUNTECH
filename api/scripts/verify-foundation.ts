@@ -164,7 +164,7 @@ const TAG = '__verify__';
 /** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
 const PROCUREMENT_STRIP = 'Purchase Requests,RFQ,Canvass,Purchase Orders';
 // The owner's order of 2026-10-18: Incoming, Inventory, Pull-out Slips, Borrow Slips, Outgoing.
-const WAREHOUSE_STRIP = 'Incoming,Inventory,Pull-out Slips,Borrow Slips,Outgoing';
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Stock Movements,Pull-out Slips,Borrow Slips,Outgoing';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;
