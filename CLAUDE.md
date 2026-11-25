@@ -1009,9 +1009,19 @@ this".
   `SUPPLIER_PICKER_KEYS`: any create / edit key in either module, or a
   supplier View key) — it needed Suppliers › View All, so a warehouse hand
   raising an Incoming without a PO read "Suppliers could not be listed".
-- verify-chain pins all three (it stops earlier on this laptop, at the
-  purchase request's Technical Manager step of 2026-11-19 — line 561 submits
-  without the request's project; that predates this change).
+- verify-chain pins all three. **It sets the install's OWN purchase-request
+  routes aside for its run** (2026-11-25: the laptop's administrator-made
+  "cost controller, technical manager, team leader" route was picked over the
+  seeded one, and the script crashed at its first approval): every active
+  `purchase_request` route but the seeded one is switched off at the start
+  and back on by `cleanup()`, the ids parked in
+  `approvalWorkflows.purchase_request.__verify__` so a run that dies is put
+  right by the next. Its requisition submits pass the request's project
+  (`jobId`), as the route does since 2026-11-19, and the purchase order's
+  route is checked by role key, not step name. Twelve checks still fail on
+  the laptop for its own data — the pull-out slip route edited to two named
+  people, and real Purchasing Manager / CEO holders named beside the
+  script's.
 
 ## The owner's batch of 2026-11-23
 

@@ -201,7 +201,36 @@ async function cleanupOdoo() {
   await prisma.auditLog.deleteMany({ where: { entityId: 'list', actorName: `${TAG} odoo` } });
 }
 
+/**
+ * The SEEDED requisition route alone, for the run: an administrator's own
+ * purchase-request route (the laptop's "cost controller, technical manager,
+ * team leader") is switched off while the script runs and switched back on by
+ * `cleanup()` — the ids parked in a Setting, so a run that dies leaves them
+ * for the next run's cleanup to restore. A check never leans on what the
+ * install's routes are.
+ */
+const SEEDED_PR_ROUTE = 'Purchase Request — technical manager, team leader';
+const PR_ROUTES_STASH = 'approvalWorkflows.purchase_request.__verify__';
+async function setAsideOwnPrRoutes() {
+  const own = await prisma.approvalWorkflow.findMany({
+    where: { documentType: 'purchase_request', isActive: true, name: { not: SEEDED_PR_ROUTE } },
+    select: { id: true },
+  });
+  if (!own.length) return;
+  const ids = own.map((r) => r.id);
+  await prisma.setting.upsert({ where: { key: PR_ROUTES_STASH }, create: { key: PR_ROUTES_STASH, value: { ids } }, update: { value: { ids } } });
+  await prisma.approvalWorkflow.updateMany({ where: { id: { in: ids } }, data: { isActive: false } });
+}
+async function restoreOwnPrRoutes() {
+  const stash = await prisma.setting.findUnique({ where: { key: PR_ROUTES_STASH } });
+  if (!stash) return;
+  const ids = ((stash.value as { ids?: string[] }).ids ?? []).filter((v) => typeof v === 'string');
+  await prisma.approvalWorkflow.updateMany({ where: { id: { in: ids } }, data: { isActive: true } });
+  await prisma.setting.delete({ where: { key: PR_ROUTES_STASH } });
+}
+
 async function cleanup() {
+  await restoreOwnPrRoutes();
   await cleanupOdoo();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
@@ -330,6 +359,7 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
 async function main() {
   console.log('\nG-CORE supply chain verification\n');
   await cleanup();
+  await setAsideOwnPrRoutes();
 
   const engineer = await makeUser('Verify Engineer', 'eng@verifyc.local', ['project_engineer']);
   // The routing sheet of 2026-10-13: a requisition goes to the Technical
@@ -557,6 +587,9 @@ async function main() {
     subject: `${TAG} request`,
     amount: 15_000,
     requesterId: engineer.id,
+    // The request's project, as POST /:id/submit passes it (2026-11-19): its
+    // Technical Manager step is the project's own Technical Manager.
+    jobId: pr.jobId,
   });
   await act({ requestId: prApproval.id, userId: pm.id, action: 'APPROVED' });
   const prSigned = await prisma.approvalAction.findMany({ where: { requestId: prApproval.id }, orderBy: { sequence: 'asc' } });
@@ -631,10 +664,15 @@ async function main() {
     );
   }
 
-  const poRoute = async (amount: number) => (await pickWorkflow('purchase_order', amount))?.steps.map((st) => st.name).join(' › ');
+  // By the ROLE each step routes to — an install may rename its steps ("Approved By").
+  const poRoute = async (amount: number) => {
+    const steps = (await pickWorkflow('purchase_order', amount))?.steps ?? [];
+    const keys = await prisma.role.findMany({ where: { id: { in: steps.map((st) => st.roleId).filter((v): v is string => !!v) } }, select: { id: true, key: true } });
+    return steps.map((st) => keys.find((k) => k.id === st.roleId)?.key ?? st.approverType).join(' › ');
+  };
   check(
     'a purchase order up to ₱100,000.00 goes to the Purchasing Manager alone; above it, the CEO / President follows',
-    (await poRoute(100_000)) === 'Purchasing Manager' && (await poRoute(100_000.01)) === 'Purchasing Manager › CEO / President',
+    (await poRoute(100_000)) === 'purchasing_manager' && (await poRoute(100_000.01)) === 'purchasing_manager › ceo',
     `${await poRoute(100_000)} | ${await poRoute(100_000.01)}`,
   );
 
