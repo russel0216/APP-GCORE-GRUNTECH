@@ -867,6 +867,7 @@ function storedInventoryView(): 'list' | 'kanban' {
 export function Inventory() {
   const navigate = useNavigate();
   const { can } = useAuth();
+  const toast = useToast();
   const [params, setParams] = useSearchParams();
   const asked = params.get('view');
   const view: 'list' | 'kanban' = asked === 'kanban' || asked === 'list' ? asked : storedInventoryView();
@@ -1014,6 +1015,41 @@ export function Inventory() {
     },
   ];
 
+  /**
+   * Export to Excel (2026-11-25, the owner's call): the list's own query —
+   * every page of it — read by `GET /inventory/export`, the .xlsx written in
+   * the browser (a dynamic import, so the main bundle never carries SheetJS).
+   */
+  async function exportToExcel(listQuery: Record<string, string | undefined>) {
+    try {
+      const query: Record<string, string> = {};
+      for (const [k, v] of Object.entries(listQuery)) if (v != null && v !== '') query[k] = String(v);
+      const file = await api.get<{ fileName: string; sheet: string; head: string[]; rows: (string | number | null)[][]; total: number; capped: boolean }>(
+        `/inventory/export${qs(query)}`,
+      );
+      if (!file.rows.length) {
+        toast('error', 'Nothing to export for this search and these filters');
+        return;
+      }
+      const { downloadWorkbook } = await import('../../lib/spreadsheetWrite');
+      downloadWorkbook(
+        file.fileName,
+        file.sheet,
+        file.head,
+        file.rows,
+        file.head.map((h) => (/description|details|supplier|name|customer/i.test(h) ? 36 : /product group|category|brand|warehouse/i.test(h) ? 20 : 12)),
+      );
+      toast(
+        'ok',
+        file.capped
+          ? `Exported the first ${file.rows.length.toLocaleString()} of ${file.total.toLocaleString()} lines — narrow the filters for the rest`
+          : `Exported ${file.rows.length.toLocaleString()} line${file.rows.length === 1 ? '' : 's'}`,
+      );
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'The Excel file could not be made');
+    }
+  }
+
   return (
     <div>
       {/* The open tab names the screen (2026-11-17, the owner's call): the heading is for screen readers alone. */}
@@ -1065,8 +1101,13 @@ export function Inventory() {
             </>
           }
           reloadToken={reload}
-          menuItems={
-            can('gchain.items.create')
+          menuItems={[
+            {
+              label: 'Export to Excel',
+              hint: 'Every line the list shows — its search and filters, all pages — with every column, as an .xlsx file',
+              onSelect: (listQuery) => void exportToExcel(listQuery),
+            },
+            ...(can('gchain.items.create')
               ? [
                   {
                     label: 'Import from Odoo…',
@@ -1096,8 +1137,8 @@ export function Inventory() {
                     },
                   },
                 ]
-              : []
-          }
+              : []),
+          ]}
           onSummary={(raw) => {
             setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[]);
             setCanManageItems((raw as InventorySummary).canManageItems === true);

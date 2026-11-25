@@ -167,8 +167,11 @@ interface Props<T> {
   /**
    * The screen's own tools for the "..." menu — an Import, say — listed above
    * Columns. A tool goes here, never back on the toolbar line (rule 9).
+   * `onSelect` is handed the list's own query — its search, scope, sort and
+   * filters, as the printed list is sent them — for a tool that reads the
+   * same set (the inventory's Export to Excel, 2026-11-25).
    */
-  menuItems?: { label: string; hint?: string; onSelect: () => void }[];
+  menuItems?: { label: string; hint?: string; onSelect: (listQuery: Record<string, string | undefined>) => void }[];
   /**
    * The summary cards over the table (2026-10-08, the owner's call, after
    * SCORO's list of quotes): `Stat` tiles from the endpoint's `summary`, the
@@ -824,7 +827,7 @@ export function DataList<T>({
                     role="menuitem"
                     onClick={() => {
                       setMenuOpen(false);
-                      item.onSelect();
+                      item.onSelect(filterQuery as Record<string, string | undefined>);
                     }}
                   >
                     {item.label}

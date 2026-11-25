@@ -54,7 +54,7 @@ import {
   type PdfSection,
   type Signatory,
 } from '../shared/pdf';
-import { manilaDate } from '../shared/day';
+import { manilaDate, manilaDayKey } from '../shared/day';
 import { LIST_CAP, listReference, totalLabel, bracketed, counted, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import {
   receiveStock,
@@ -5341,6 +5341,152 @@ inventoryRoutes.get(
       req,
     );
     sendListPdf(res, pdf, 'stock-on-hand.pdf');
+  }),
+);
+
+/**
+ * The inventory as an Excel file (2026-11-25, the owner's call: "Inventory
+ * Export to Excel"; his answers: what the list shows — its search and filters,
+ * every page — and every column). The rows go to the browser, which writes the
+ * .xlsx (`lib/spreadsheetWrite.ts`, the HR attendance report's way); the same
+ * where-builders as the list and its paper, so the file never holds a
+ * different set. Up to EXPORT_CAP lines, said when it bites. Audited before
+ * the rows go out. Above `/:itemId/card`.
+ */
+const EXPORT_CAP = 20_000;
+inventoryRoutes.get(
+  '/export',
+  requireView('gchain', 'inventory'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const stockKind = choice(q.filters.stock, { company: 'company', project: 'project', order: 'order' } as const, 'Stock');
+    const day = manilaDayKey(new Date());
+    const currency = await companyCurrency();
+    const itemSelect = {
+      code: true,
+      partNumber: true,
+      name: true,
+      description: true,
+      brand: true,
+      productGroup: true,
+      unit: true,
+      category: { select: { name: true } },
+    } as const;
+    type ItemCols = { code: string; partNumber: string | null; name: string; description: string | null; brand: string | null; productGroup: string | null; unit: string; category: { name: string } | null };
+    const itemCells = (i: ItemCols) => [i.code, i.partNumber ?? '', i.name, i.description ?? '', i.productGroup ?? '', i.category?.name ?? '', i.brand ?? ''];
+    const ITEM_HEAD = ['Code', 'Part no.', 'Description', 'Details', 'Product group', 'Category', 'Brand / OEM'];
+    const money = (v: number) => Math.round(v * 100) / 100;
+
+    let head: string[];
+    let rows: (string | number | null)[][];
+    let total: number;
+    let sheet: string;
+    let fileName: string;
+
+    if (stockKind === 'project' || stockKind === 'order') {
+      const forProject = stockKind === 'project';
+      const where = forProject ? projectStockWhere(me, q).where : orderStockWhere(me, q);
+      const lines = forProject
+        ? await prisma.projectStock.findMany({
+            where: where as Prisma.ProjectStockWhereInput,
+            include: { item: { select: itemSelect }, warehouse: { select: { name: true } }, location: { select: { code: true } }, job: { select: { number: true, name: true } } },
+            orderBy: [{ job: { number: 'asc' } }, { item: { name: 'asc' } }],
+            take: EXPORT_CAP,
+          })
+        : await prisma.salesOrderStock.findMany({
+            where: where as Prisma.SalesOrderStockWhereInput,
+            include: { item: { select: itemSelect }, warehouse: { select: { name: true } }, location: { select: { code: true } }, salesOrder: { select: { number: true, customer: { select: { name: true } } } } },
+            orderBy: [{ salesOrder: { number: 'asc' } }, { item: { name: 'asc' } }],
+            take: EXPORT_CAP,
+          });
+      total = forProject
+        ? await prisma.projectStock.count({ where: where as Prisma.ProjectStockWhereInput })
+        : await prisma.salesOrderStock.count({ where: where as Prisma.SalesOrderStockWhereInput });
+      head = [forProject ? 'Project' : 'Sales order', forProject ? 'Project name' : 'Customer', ...ITEM_HEAD, 'Warehouse', 'Bin', 'Unit', 'On hand', `Unit cost (${currency})`, `Value (${currency})`];
+      rows = lines.map((b) => {
+        const owner = 'job' in b ? [b.job.number, b.job.name] : [(b as { salesOrder: { number: string; customer: { name: string } } }).salesOrder.number, (b as { salesOrder: { number: string; customer: { name: string } } }).salesOrder.customer.name];
+        return [
+          ...owner,
+          ...itemCells(b.item),
+          b.warehouse.name,
+          b.location?.code ?? '',
+          b.item.unit,
+          num(b.quantity),
+          money(num(b.averageCost)),
+          money(num(b.quantity) * num(b.averageCost)),
+        ];
+      });
+      sheet = forProject ? 'Project stock' : 'Sales order stock';
+      fileName = `${forProject ? 'Project Stock' : 'Sales Order Stock'} - ${day}.xlsx`;
+    } else {
+      const { where } = await inventoryListWhere(me, q);
+      const lines = await prisma.inventoryBalance.findMany({
+        where,
+        include: {
+          item: {
+            select: {
+              ...itemSelect,
+              minStock: true,
+              reorderLevel: true,
+              maxStock: true,
+              preferredSupplier: { select: { name: true } },
+            },
+          },
+          warehouse: { select: { name: true } },
+          location: { select: { code: true } },
+        },
+        orderBy: { item: { name: 'asc' } },
+        take: EXPORT_CAP,
+      });
+      total = await prisma.inventoryBalance.count({ where });
+      const itemIds = [...new Set(lines.map((r) => r.itemId))];
+      const [onOrder, incoming] = await Promise.all([itemsOnOrder(itemIds), incomingFor(itemIds)]);
+      const STATE_WORDS: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', OUT_OF_STOCK: 'Out of stock', ON_ORDER: 'On order' };
+      const level = (v: Prisma.Decimal | null) => (v == null ? null : num(v));
+      head = [
+        ...ITEM_HEAD,
+        'Warehouse',
+        'Bin / rack',
+        'Unit',
+        'On hand',
+        'On loan',
+        'Available',
+        'Incoming',
+        `Unit cost (${currency})`,
+        `Value (${currency})`,
+        'Minimum',
+        'Reorder at',
+        'Maximum',
+        'Status',
+        'Preferred supplier',
+      ];
+      rows = lines.map((b) => [
+        ...itemCells(b.item),
+        b.warehouse.name,
+        b.location?.code ?? '',
+        b.item.unit,
+        num(b.quantity),
+        num(b.borrowedQty),
+        availableOf(b),
+        incoming.get(b.itemId) ?? 0,
+        money(num(b.averageCost)),
+        money(num(b.quantity) * num(b.averageCost)),
+        level(b.item.minStock),
+        level(b.item.reorderLevel),
+        level(b.item.maxStock),
+        STATE_WORDS[stockState(b, onOrder.has(b.itemId))],
+        b.item.preferredSupplier?.name ?? '',
+      ]);
+      sheet = 'Inventory';
+      fileName = `Inventory - ${day}.xlsx`;
+    }
+
+    await audit(
+      { entityType: 'inventory', entityId: 'list', action: 'EXPORTED', summary: `Exported the ${sheet.toLowerCase()} to Excel (${rows.length} line(s))` },
+      req,
+    );
+    res.json({ fileName, sheet, head, rows, total, capped: total > rows.length });
   }),
 );
 
