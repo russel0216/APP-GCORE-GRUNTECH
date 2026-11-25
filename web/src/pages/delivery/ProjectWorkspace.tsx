@@ -76,6 +76,8 @@ interface ScopeItem {
 
 interface Job {
   id: string;
+  /** May this viewer Modify it / move its status (GT-HT-2026-0022)? */
+  canModify?: boolean;
   number: string;
   type: string;
   status: string;
@@ -275,6 +277,9 @@ export function ProjectWorkspace() {
 
   const s = job.summary;
   const mayEdit = can('gops.projects.edit_all');
+  // Modify and the status moves go through PATCH /jobs/:id, which takes Edit Own on
+  // one's own projects too (GT-HT-2026-0022); the API says whether this one is.
+  const mayModify = job.canModify ?? mayEdit;
   const mayRegister = can('gops.installed_base.create');
 
   // Which of the cross-module tabs this person can see anything in.
@@ -370,7 +375,7 @@ export function ProjectWorkspace() {
         }
         actions={
           <>
-            {mayEdit && job.status === 'PLANNING' && (
+            {mayModify && job.status === 'PLANNING' && (
               <button
                 className="btn btn-primary"
                 onClick={() =>
@@ -386,7 +391,7 @@ export function ProjectWorkspace() {
                 Start
               </button>
             )}
-            {mayEdit && job.status === 'IN_PROGRESS' && (
+            {mayModify && job.status === 'IN_PROGRESS' && (
               <button
                 className="btn btn-primary"
                 onClick={() =>
@@ -421,7 +426,7 @@ export function ProjectWorkspace() {
               label: 'Add equipment',
               onSelect: () => setTurnover('register'),
             },
-          mayEdit &&
+          mayModify &&
             (job.status === 'PLANNING' || job.status === 'IN_PROGRESS') && {
               label: 'Put on hold',
               confirm: {
@@ -432,7 +437,7 @@ export function ProjectWorkspace() {
                 onConfirm: () => setStatus('ON_HOLD'),
               },
             },
-          mayEdit &&
+          mayModify &&
             job.status === 'ON_HOLD' && {
               label: 'Resume',
               confirm: {
@@ -443,7 +448,7 @@ export function ProjectWorkspace() {
                 onConfirm: () => setStatus('IN_PROGRESS'),
               },
             },
-          mayEdit &&
+          mayModify &&
             job.status !== 'CANCELLED' &&
             job.status !== 'TURNED_OVER' && {
               label: job.type === 'SERVICE_CONTRACT' ? 'Cancel service contract' : 'Cancel project',
@@ -472,7 +477,7 @@ export function ProjectWorkspace() {
               },
             },
         ]}
-        modify={mayEdit ? () => setEditing(true) : undefined}
+        modify={mayModify ? () => setEditing(true) : undefined}
         confirm={confirm}
       />
 

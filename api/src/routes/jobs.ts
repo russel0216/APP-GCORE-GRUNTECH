@@ -18,7 +18,7 @@ import { workingDayDate, workingDaysBetween } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { SUPPLY_CATEGORY_CODES, cleanCostingIds, costingIdsOf, revisionCostingScopes } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
-import { visibleOwners } from '../shared/team';
+import { editableOwners, visibleOwners } from '../shared/team';
 import { projectBudgetByLine, requestedByLine } from '../shared/projectBudget';
 import { adoptBudgetRequests } from '../shared/budgetRequestSources';
 
@@ -263,6 +263,18 @@ export function projectOwnedBy(ids: string[]): Prisma.JobWhereInput {
       { costing: { quotationRevisions: { some: sold } } },
     ],
   };
+}
+
+/**
+ * May this caller MODIFY the project (`PATCH /jobs/:id`: its details and its
+ * status)? Edit All anyone's; Edit Team / Edit Own the projects that count as
+ * theirs (`projectOwnedBy`) — help ticket GT-HT-2026-0022, 2026-11-26: the
+ * route asked Edit All alone, so the Edit Own box on Admin › Roles did nothing.
+ */
+export async function mayModifyProject(me: ResolvedUser, jobId: string): Promise<boolean> {
+  if (me.isSuperAdmin || me.permissions.has('gops.projects.edit_all')) return true;
+  if (!me.permissions.has('gops.projects.edit_own') && !me.permissions.has('gops.projects.edit_team')) return false;
+  return (await prisma.job.count({ where: { id: jobId, ...projectOwnedBy(editableOwners(me, 'gops', 'projects')) } })) > 0;
 }
 
 export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
@@ -1209,6 +1221,8 @@ jobRoutes.get(
     const travelRequestCount = await prisma.budgetRequest.count({ where: { jobId: job.id, isTravel: true } });
     res.json({
       ...job,
+      // Modify and the status moves (PATCH /jobs/:id) — GT-HT-2026-0022.
+      canModify: await mayModifyProject(me, job.id),
       contractValue,
       downpaymentPct: job.downpaymentPct ? num(job.downpaymentPct) : null,
       retentionPct: job.retentionPct ? num(job.retentionPct) : null,
@@ -1384,11 +1398,14 @@ jobRoutes.delete(
 
 jobRoutes.patch(
   '/:id',
-  require_('gops.projects.edit_all'),
+  requireAny('gops.projects.edit_all', 'gops.projects.edit_team', 'gops.projects.edit_own'),
   handler(async (req, res) => {
     const body = parseBody(updateJobSchema, req.body);
     const before = await prisma.job.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Job not found');
+    if (!(await mayModifyProject(currentUser(req), before.id))) {
+      throw forbidden('Only its Technical Manager, Project Engineer, creator or salesperson — or whoever may edit all projects — changes this project');
+    }
 
     const data: Prisma.JobUpdateInput = {};
     if (body.name !== undefined) data.name = body.name;
