@@ -1494,7 +1494,10 @@ would collide; `install.ps1` runs once and refuses if the preflight fails;
 2026-10-08 the server runs them itself: `autodeploy.ps1 -Register` makes the
 `GCoreGruntechDeploy` task, which every five minutes fetches `origin/master`
 and rebuilds when it moved (`data/logs/deploy.log`, outcome in
-`deploy-last.txt`), so **a push to master is a deploy**. The rebuild builds
+`deploy-last.txt`), so **a push to master is a deploy**. **Whether it landed is read from
+outside** (2026-11-26): `GET /api/health` sends `commit` (the short hash the
+API process was started on, read once at boot from `.git`'s own files —
+`runningCommit()` in `index.ts`, no git process) and `startedAt`. The rebuild builds
 the new code BEFORE it stops the running site (a commit that does not build
 leaves the site as it was), asks no questions (`--ff-only`,
 `GIT_ASK_YESNO=false`), and holds `data/rebuild.lock` so two cannot run at

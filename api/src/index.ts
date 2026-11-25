@@ -147,10 +147,34 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 if (!env.isProduction) app.use(morgan('dev'));
 
+/**
+ * The commit this process was started on (2026-11-26, the owner's call: "is
+ * the deploy live?" had no answer from outside). Read ONCE at boot, straight
+ * from .git's files — no git process, so the checkout's owner does not matter
+ * — and the rebuild pulls before it starts the API, so this is the code that
+ * is running. Null where there is no checkout to read.
+ */
+function runningCommit(): string | null {
+  try {
+    const git = path.resolve(__dirname, '..', '..', '.git');
+    const head = fs.readFileSync(path.join(git, 'HEAD'), 'utf8').trim();
+    if (!head.startsWith('ref: ')) return /^[0-9a-f]{40}$/.test(head) ? head.slice(0, 7) : null;
+    const ref = head.slice(5).trim();
+    const loose = path.join(git, ref);
+    if (fs.existsSync(loose)) return fs.readFileSync(loose, 'utf8').trim().slice(0, 7) || null;
+    const packed = fs.readFileSync(path.join(git, 'packed-refs'), 'utf8').split('\n').find((l) => l.trim().endsWith(` ${ref}`));
+    return packed ? packed.trim().slice(0, 7) : null;
+  } catch {
+    return null;
+  }
+}
+const COMMIT = runningCommit();
+const STARTED_AT = new Date().toISOString();
+
 app.get('/api/health', async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true, service: 'gcore-api', db: 'up' });
+    res.json({ ok: true, service: 'gcore-api', db: 'up', commit: COMMIT, startedAt: STARTED_AT });
   } catch {
     res.status(503).json({ ok: false, service: 'gcore-api', db: 'down' });
   }
