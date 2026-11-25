@@ -78,6 +78,10 @@ export function partNumbers(): Promise<Map<string, { id: string; code: string }>
   }
   return partCache.map;
 }
+/** After a run that added items: the next check reads the part numbers again. */
+export function forgetPartNumbers(): void {
+  partCache = null;
+}
 
 const GROUP_NAMES: Record<GroupCode, string> = {
   PMP: 'Pumps & Motors',
@@ -333,6 +337,11 @@ export interface OdooAssetRecord {
   plateNo: string | null;
   quantity: number;
   unitCost: number;
+  /**
+   * Nothing on hand in Odoo any more (2026-11-25): kept as a RETIRED asset, so
+   * the product-moves import has an asset to file its history on. Never issued.
+   */
+  gone: boolean;
 }
 
 function assetRef(category: string, name: string): string {
@@ -359,7 +368,8 @@ export const odooAssetsSpec: ImportSpec<OdooAssetRecord> = {
     [
       r.assetType,
       r.quantity > 1 ? `a lot of ${r.quantity}` : null,
-      r.holding.holder ? `${r.holding.resigned ? 'last held by' : 'for'} ${r.holding.holder}${r.holding.resigned ? ' (resigned) — stays Available' : ''}` : 'Available',
+      r.gone ? 'nothing on hand in Odoo — kept Retired, for its history' : null,
+      r.gone ? null : r.holding.holder ? `${r.holding.resigned ? 'last held by' : 'for'} ${r.holding.holder}${r.holding.resigned ? ' (resigned) — stays Available' : ''}` : 'Available',
       r.holding.site ? `at ${r.holding.site}` : null,
     ]
       .filter(Boolean)
@@ -367,6 +377,8 @@ export const odooAssetsSpec: ImportSpec<OdooAssetRecord> = {
   summarize: async (records) => {
     const people = await activeEmployees();
     const holders = new Map<string, { units: number; lines: number; resigned: boolean }>();
+    const gone = records.filter((r) => r.gone);
+    records = records.filter((r) => !r.gone);
     for (const r of records) {
       if (!r.holding.holder) continue;
       const h = holders.get(r.holding.holder) ?? { units: 0, lines: 0, resigned: r.holding.resigned };
@@ -382,6 +394,9 @@ export const odooAssetsSpec: ImportSpec<OdooAssetRecord> = {
       facts: [
         { label: 'Assets', value: `${records.length} records, ${records.reduce((s, r) => s + r.quantity, 0)} units — a line of several is one lot` },
         { label: 'Value', value: formatMoney(cents(records.reduce((s, r) => s + r.quantity * r.unitCost, 0))) },
+        ...(gone.length
+          ? [{ label: 'No longer on hand', value: `${gone.length} record(s) Odoo holds none of — added as RETIRED assets, not issued and not counted above, so their Odoo movement history has a page` }]
+          : []),
       ],
       tables: [
         {
@@ -408,12 +423,12 @@ function buildAsset(raw: Record<string, string>[]): OdooAssetRecord {
   const holding = assetCategory(rows[0].category);
   if (!holding) throw new SkipRow('A product — imported in G-CHAIN › Inventory', true);
   const quantity = rows.reduce((s, r) => s + Math.max(0, r.onHand), 0);
-  if (quantity <= 0) throw new SkipRow('Nothing on hand in Odoo', true);
-  if (!Number.isInteger(quantity)) throw new Error(`${quantity} on hand — an asset is counted in whole units`);
+  const gone = quantity <= 0;
+  if (!gone && !Number.isInteger(quantity)) throw new Error(`${quantity} on hand — an asset is counted in whole units`);
   const reference = rows.map((r) => r.reference).find(Boolean) ?? '';
   const name = rows[0].name;
   const stocked = rows.filter((r) => r.onHand > 0);
-  const unitCost = cents(stocked.reduce((s, r) => s + r.onHand * r.cost, 0) / quantity);
+  const unitCost = gone ? cents(Math.max(0, ...rows.map((r) => r.cost))) : cents(stocked.reduce((s, r) => s + r.onHand * r.cost, 0) / quantity);
   return {
     ref: assetRef(rows[0].category!, name),
     category: rows[0].category!,
@@ -422,8 +437,9 @@ function buildAsset(raw: Record<string, string>[]): OdooAssetRecord {
     brandModel: reference || name,
     assetType: odooAssetType(holding, `${name} ${reference}`),
     plateNo: holding.kind === 'vehicle' ? plateFrom(name) ?? plateFrom(reference) : null,
-    quantity,
+    quantity: gone ? 1 : quantity,
     unitCost,
+    gone,
   };
 }
 
@@ -452,12 +468,13 @@ export async function odooAssetsWrite(records: { record: OdooAssetRecord; existi
     const tags = await reserveNumbers('company_asset', fresh.length, tx, async (numbers) =>
       new Set((await tx.companyAsset.findMany({ where: { tag: { in: numbers } }, select: { tag: true } })).map((a) => a.tag)),
     );
-    const holderOf = (r: OdooAssetRecord) => (r.holding.holder && !r.holding.resigned ? matchHolder(r.holding.holder, people) : null);
+    const holderOf = (r: OdooAssetRecord) => (!r.gone && r.holding.holder && !r.holding.resigned ? matchHolder(r.holding.holder, people) : null);
     const noteOf = (r: OdooAssetRecord) =>
       [
         `From Odoo — ${r.name} (category: ${r.category})`,
-        r.holding.holder && r.holding.resigned ? `Last held by ${r.holding.holder} (resigned) — confirm where it is` : null,
-        r.holding.holder && !r.holding.resigned && !holderOf(r) ? `Held by ${r.holding.holder} in Odoo — no employee matched; issue it from this page` : null,
+        r.gone ? 'Nothing on hand in Odoo when imported — kept Retired for its movement history. Restore it if the item is found.' : null,
+        r.gone ? null : r.holding.holder && r.holding.resigned ? `Last held by ${r.holding.holder} (resigned) — confirm where it is` : null,
+        !r.gone && r.holding.holder && !r.holding.resigned && !holderOf(r) ? `Held by ${r.holding.holder} in Odoo — no employee matched; issue it from this page` : null,
         r.holding.site ? `At ${r.holding.site}` : null,
       ]
         .filter(Boolean)
@@ -472,7 +489,9 @@ export async function odooAssetsWrite(records: { record: OdooAssetRecord; existi
           description: r.name !== r.brandModel ? r.name : null,
           cost: D(r.unitCost),
           quantity: r.quantity,
-          status: holderOf(r) ? ('ISSUED' as const) : ('AVAILABLE' as const),
+          status: r.gone ? ('RETIRED' as const) : holderOf(r) ? ('ISSUED' as const) : ('AVAILABLE' as const),
+          retiredAt: r.gone ? new Date() : null,
+          retiredReason: r.gone ? 'Nothing on hand in Odoo when imported' : null,
           notes: noteOf(r),
           importRef: r.ref,
           createdById: actor.id,
@@ -530,7 +549,9 @@ export async function odooAssetsWrite(records: { record: OdooAssetRecord; existi
         entityType: 'company_asset',
         entityId: 'list',
         action: 'CREATED',
-        summary: `Imported Odoo's assets and tools: ${fresh.length} assets (${fresh.reduce((s, r) => s + r.quantity, 0)} units), ${issued.length} issued to their holders${late ? `; ${late} left Available before issued now that their holder is on file` : ''}`,
+        summary: `Imported Odoo's assets and tools: ${fresh.filter((r) => !r.gone).length} assets (${fresh.filter((r) => !r.gone).reduce((s, r) => s + r.quantity, 0)} units), ${issued.length} issued to their holders${
+          fresh.some((r) => r.gone) ? `; ${fresh.filter((r) => r.gone).length} no longer on hand in Odoo added as Retired` : ''
+        }${late ? `; ${late} left Available before issued now that their holder is on file` : ''}`,
         actorId: actor.id,
         actorName: actor.name,
       },

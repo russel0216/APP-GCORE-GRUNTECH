@@ -4975,6 +4975,27 @@ and incoming". His answers: a card of its own, zero-quantity rows skipped.
   delivered in Odoo, then the newest 20 (Show all, 1,000 at most listed).
 - verify-chain pins the readings, the import, the untouched stock, the
   re-run and the card.
+- **Every product's moves are kept, and the tools' go to G-HR** (2026-11-26,
+  the owner's call: "keep them, but the laptops, vehicles and tools go to
+  Asset Management" — it replaces "a product G-CORE has no item for is
+  listed as skipped"). `targetFor()` in `routes/imports/odooMoves.ts`: (1)
+  the ITEM whose part number is Odoo's Name; (2) else the G-HR ASSET the
+  Odoo import made from that Name (`importRef` after the `|`; a Name under
+  two categories is two assets, the history on each) — `OdooAssetMove`,
+  `OdooStockMove`'s twin, HISTORY ONLY: nothing issues, returns or counts
+  from it; (3) else a product G-CORE never held is filed in the write as an
+  INACTIVE item (`moveProductParts()`: Odoo's Name the part number, the
+  bracketed text the name; no stock, no cost, Materials, one audit row), so
+  its history can be found. The check's facts count the three and list the
+  60 new items with the most moves. **Run Asset Management's Odoo import
+  first**: `odoo_assets` now takes a tool, laptop or vehicle with NOTHING on
+  hand as ONE **Retired** asset (`OdooAssetRecord.gone`: quantity 1, never
+  issued, `retiredReason` "Nothing on hand in Odoo when imported", left out
+  of the check's units and value) — otherwise its moves would land on an
+  inactive item. The asset's page shows "Movement history from Odoo"
+  (`GET /assets/:id` → `odooHistory`, `odooAssetHistory()` in
+  `shared/stockCardHistory.ts`; the stock card's `OdooHistoryCard` with
+  `asset`). verify-chain pins it.
 - **Stock Movements is a menu of its own** (the same day, the owner's call:
   "remove the recent stock movement below Inventory; a separate menu between
   Inventory and Pull-out Slips to view all the stock movement, with filters;

@@ -53,6 +53,22 @@ export function moveProductNames(product: string): string[] {
   return out;
 }
 
+/**
+ * A Product cell as the two things Odoo joined: its Name (G-CORE's part
+ * number) and its Internal Reference (the description), where it has one.
+ * What a product G-CORE never held is filed under (2026-11-25).
+ */
+export function moveProductParts(product: string): { name: string; reference: string | null } {
+  const text = tidy(product);
+  const cut = text.startsWith('[') ? text.indexOf('] ') : -1;
+  if (cut > 0) {
+    const name = tidy(text.slice(cut + 2));
+    const reference = tidy(text.slice(1, cut));
+    if (name) return { name, reference: reference || null };
+  }
+  return { name: text, reference: null };
+}
+
 /** The description Odoo printed in the brackets, for a message. */
 export function moveProductLabel(product: string): string {
   return moveProductNames(product)[0] ?? tidy(product);

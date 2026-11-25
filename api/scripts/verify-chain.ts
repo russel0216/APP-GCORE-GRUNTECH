@@ -7228,11 +7228,29 @@ async function odooMigration() {
     `2025-12-01 08:00:00,Product Quantity Confirmed,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Virtual Locations/Inventory adjustment,,0.00,Units,Done,`,
     `2026-03-01 08:00:00,WH/OUT/${TAG}3,"[WILO, SUBMERSIBLE PUMP] ${TAG} ODOO PUMP-1",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,9.00,Units,Waiting,Someone`,
     `2026-03-02 08:00:00,WH/OUT/${TAG}4,"[NOBODY HAS THIS] ${TAG} ODOO NOT ON FILE",WH/Stock,Partner Locations/Customers,${TAG} CUSTOMER,1.00,Units,Done,Someone`,
+    `2026-03-03 08:00:00,WH/OUT/${TAG}5,"[STANLEY, WRENCH] ${TAG} ODOO WRENCH",WH/Stock,Partner Locations/Customers,${TAG} SITE,2.00,Units,Done,Someone`,
+    `2026-03-04 08:00:00,WH/OUT/${TAG}6,"[BOSCH, GRINDER] ${TAG} ODOO GRINDER",WH/Stock,Virtual Locations/Scrap,,1.00,Units,Done,Someone`,
   ].join('\n');
+  // A tool Odoo holds none of any more: a Retired asset, so its history has a page.
+  const goneCsv = [
+    'Favorite,Name,Internal Reference,Responsible,Tags,Ribbon,Barcode,Sales Price,Cost,Product Category,Product Type,Quantity On Hand,Forecasted Quantity,Unit',
+    `FALSE,${TAG} ODOO GRINDER,"BOSCH, GRINDER",X,,,,800,800,Zzodoo Holder Tools,Goods,0,0,Units`,
+  ].join('\n');
+  await runImport(goneCsv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  await runImport(goneCsv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  const grinders = await prisma.companyAsset.findMany({ where: { importRef: { contains: `${TAG} ODOO GRINDER` } }, include: { issuances: true } });
+  check(
+    'a tool with nothing on hand in Odoo comes into G-HR as ONE Retired asset — never issued, though its category names an employee — and a second run adds no other',
+    grinders.length === 1 && grinders[0].status === 'RETIRED' && grinders[0].issuances.length === 0 && !!grinders[0].retiredAt && grinders[0].quantity === 1,
+    JSON.stringify(grinders.map((g) => ({ s: g.status, i: g.issuances.length, q: g.quantity }))),
+  );
   const movesDry = await runImport(movesCsv, odooMovesSpec, false, () => Promise.resolve());
   check(
-    'the moves check: the pump found by its part number, the product G-CORE has no item for listed as skipped, nothing refused',
-    movesDry.created === 1 && movesDry.errors === 0 && movesDry.skipped === 1 && movesDry.rows.filter((r) => r.action === 'skip').length === 1,
+    'the moves check: the pump found by its part number, the wrench and the grinder by the assets made from their Odoo Name, the product G-CORE never held to be filed — nothing refused, nothing written',
+    movesDry.created === 4 &&
+      movesDry.errors === 0 &&
+      (await prisma.item.count({ where: { partNumber: `${TAG} ODOO NOT ON FILE` } })) === 0 &&
+      (await prisma.odooAssetMove.count({ where: { assetId: { in: [wrench!.id, grinders[0].id] } } })) === 0,
     JSON.stringify(movesDry.rows),
   );
   await runImport(movesCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
@@ -7258,7 +7276,41 @@ async function odooMigration() {
     JSON.stringify({ bal: pumpAfterMoves.balances, moves: pumpAfterMoves.stockMoves.length }),
   );
   await runImport(movesCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
-  check('the moves file run again adds nothing', (await prisma.odooStockMove.count({ where: { itemId: pump.id } })) === 3);
+  const strangerItems = await prisma.item.findMany({ where: { partNumber: `${TAG} ODOO NOT ON FILE` }, include: { balances: true, stockMoves: true, odooMoves: true } });
+  check(
+    "a product G-CORE never held is filed as ONE inactive item under Odoo's Name, its description the bracketed text, with no stock and no cost — and its move on it",
+    strangerItems.length === 1 &&
+      strangerItems[0].isActive === false &&
+      strangerItems[0].name === 'NOBODY HAS THIS' &&
+      strangerItems[0].balances.length === 0 &&
+      strangerItems[0].stockMoves.length === 0 &&
+      strangerItems[0].odooMoves.length === 1,
+    JSON.stringify(strangerItems.map((i) => ({ a: i.isActive, n: i.name, b: i.balances.length, m: i.odooMoves.length }))),
+  );
+  const wrenchAfter = await prisma.companyAsset.findUniqueOrThrow({ where: { id: wrench!.id }, include: { issuances: true } });
+  check(
+    "a tool's moves are filed on its G-HR asset, never on an item: one move on the wrench, one on the retired grinder, and nothing issued or returned by it",
+    (await prisma.odooAssetMove.count({ where: { assetId: wrench!.id } })) === 1 &&
+      (await prisma.odooAssetMove.count({ where: { assetId: grinders[0].id } })) === 1 &&
+      (await prisma.item.count({ where: { partNumber: { in: [`${TAG} ODOO WRENCH`, `${TAG} ODOO GRINDER`] } } })) === 0 &&
+      wrenchAfter.status === wrench!.status &&
+      wrenchAfter.issuances.length === wrench!.issuances.length,
+  );
+  const odooAssetRead = await api(signToken(admin.id, admin.email), 'GET', `/assets/${wrench!.id}`);
+  const assetHistory = odooAssetRead.body.odooHistory as { total: number; delivered: number; rows: { reference: string; contact: string | null }[] } | null | undefined;
+  check(
+    "the asset's page shows it: one move, 2 delivered, its reference and where it went",
+    odooAssetRead.status === 200 && assetHistory?.total === 1 && assetHistory.delivered === 2 && assetHistory.rows[0].reference === `WH/OUT/${TAG}5` && assetHistory.rows[0].contact === `${TAG} SITE`,
+    JSON.stringify({ status: odooAssetRead.status, history: assetHistory }),
+  );
+  await runImport(movesCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
+  check(
+    'the moves file run again adds nothing: no second item, no second move on an item or an asset',
+    (await prisma.odooStockMove.count({ where: { itemId: pump.id } })) === 3 &&
+      (await prisma.item.count({ where: { partNumber: `${TAG} ODOO NOT ON FILE` } })) === 1 &&
+      (await prisma.odooStockMove.count({ where: { itemId: strangerItems[0]?.id ?? 'none' } })) === 1 &&
+      (await prisma.odooAssetMove.count({ where: { assetId: { in: [wrench!.id, grinders[0].id] } } })) === 2,
+  );
   const cardRead = await api(signToken(admin.id, admin.email), 'GET', `/inventory/${pump.id}/card`);
   const card = cardRead.body as {
     movementsTotal?: number;
@@ -7303,8 +7355,8 @@ async function odooMigration() {
   const smSearch = await api(smToken, 'GET', `/stock-movements?view=odoo&search=${encodeURIComponent(`${TAG} CUSTOMER`)}`);
   const smOut = await api(smToken, 'GET', `/stock-movements?itemId=${pump.id}&direction=out`);
   check(
-    "the Odoo view is the history alone, under the same filters: three moves, one in, two in February, found by the customer's name — and nothing of it in G-CORE's view",
-    smOdoo.body.total === 3 && smIn.body.total === 1 && smFeb.body.total === 2 && smSearch.body.total === 2 && smOut.body.total === 0,
+    "the Odoo view is the history alone, under the same filters: three moves, one in, two in February, found by the customer's name (the pump's two deliveries and the inactive item's one) — and nothing of it in G-CORE's view",
+    smOdoo.body.total === 3 && smIn.body.total === 1 && smFeb.body.total === 2 && smSearch.body.total === 3 && smOut.body.total === 0,
     JSON.stringify([smOdoo.body.total, smIn.body.total, smFeb.body.total, smSearch.body.total, smOut.body.total]),
   );
   const smBadView = await api(smToken, 'GET', '/stock-movements?view=everything');

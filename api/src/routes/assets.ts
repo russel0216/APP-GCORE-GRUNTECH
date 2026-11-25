@@ -19,6 +19,7 @@ import { registerSearch } from '../shared/search';
 import { manilaDate } from '../shared/day';
 import { LIST_CAP, listReference, sendListPdf, choice } from '../shared/listPaper';
 import { assetState, leavingEmployees, type AssetState } from '../shared/assets';
+import { odooAssetHistory } from '../shared/stockCardHistory';
 
 /**
  * G-HR › Records › Asset Management (2026-10-21, the owner's Asset
@@ -607,6 +608,8 @@ assetRoutes.get(
       canRetire: mayEdit && (row.status === 'AVAILABLE' || row.status === 'UNDER_REPAIR'),
       canRestore: mayEdit && row.status === 'RETIRED',
       canDelete: mayEdit && can(me, 'ghr.assets.edit_all') && history.length === 0,
+      // Where it moved in Odoo before G-CORE (2026-11-25) — a record only.
+      odooHistory: await odooAssetHistory(row.id),
     });
   }),
 );

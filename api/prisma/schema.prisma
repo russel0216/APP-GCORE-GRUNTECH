@@ -6647,10 +6647,35 @@ model CompanyAsset {
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   issuances     AssetIssuance[]
+  odooMoves     OdooAssetMove[]
 
   @@index([assetTypeId])
   @@index([status])
   @@index([importRef])
+}
+
+/// Where a tool, laptop or vehicle moved in Odoo before G-CORE (2026-11-25):
+/// HISTORY ONLY, read on the asset's page — OdooStockMove's twin for the
+/// products G-CORE keeps in G-HR. Nothing issues, returns or counts from it.
+model OdooAssetMove {
+  id            String       @id @default(cuid())
+  assetId       String
+  asset         CompanyAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  occurredAt    DateTime
+  reference     String
+  kind          String
+  direction     Int          @default(0)
+  fromLocation  String
+  toLocation    String
+  contact       String?
+  quantity      Decimal      @db.Decimal(18, 3)
+  unit          String?
+  createdByName String?
+  importKey     String
+  createdAt     DateTime     @default(now())
+
+  @@unique([assetId, importKey])
+  @@index([assetId, occurredAt])
 }
 
 /// AVAILABLE in the office, ISSUED to someone, UNDER_REPAIR, RETIRED (kept,

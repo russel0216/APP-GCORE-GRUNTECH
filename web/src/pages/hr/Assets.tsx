@@ -13,6 +13,7 @@ import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, ProductPicture, Stat
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { IssueBatchModal } from './AssetSlips';
+import { OdooHistoryCard, type OdooHistory } from '../chain/StockCardHistory';
 
 /**
  * G-HR › Records › Asset Management (2026-10-21, the owner's Asset
@@ -79,6 +80,8 @@ interface AssetRow {
 }
 
 interface AssetDetail extends AssetRow {
+  /** Where it moved in Odoo before G-CORE — a record only. */
+  odooHistory?: OdooHistory | null;
   seesCost: boolean;
   currency: string;
   history: {
@@ -815,6 +818,8 @@ export function AssetPage() {
             </div>
           )}
         </section>
+
+        <OdooHistoryCard history={r.odooHistory} unit={r.quantity > 1 ? 'units' : 'unit'} asset />
 
         <Attachments entityType="company_asset" entityId={r.id} hint="The receipt, a vehicle's OR/CR, photos" canEdit={r.canEdit} />
       </div>

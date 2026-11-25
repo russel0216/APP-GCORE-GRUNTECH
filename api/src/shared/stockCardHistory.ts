@@ -107,15 +107,28 @@ export async function withDocuments<T extends MoveLike>(moves: T[]): Promise<(T 
 /** The newest rows the card shows at once; the totals always cover every row. */
 export const ODOO_HISTORY_SHOWN = 1_000;
 
-export async function odooHistory(itemId: string) {
-  const [total, sums, edge, rows] = await Promise.all([
-    prisma.odooStockMove.count({ where: { itemId } }),
-    prisma.odooStockMove.groupBy({ by: ['direction'], where: { itemId }, _sum: { quantity: true } }),
-    prisma.odooStockMove.aggregate({ where: { itemId }, _min: { occurredAt: true }, _max: { occurredAt: true } }),
-    prisma.odooStockMove.findMany({ where: { itemId }, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: ODOO_HISTORY_SHOWN }),
-  ]);
+type HistoryRow = {
+  id: string;
+  occurredAt: Date;
+  reference: string;
+  kind: string;
+  direction: number;
+  fromLocation: string;
+  toLocation: string;
+  contact: string | null;
+  quantity: unknown;
+  unit: string | null;
+  createdByName: string | null;
+};
+
+function historyOf(
+  total: number,
+  sums: { direction: number; _sum: { quantity: unknown } }[],
+  edge: { _min: { occurredAt: Date | null }; _max: { occurredAt: Date | null } },
+  rows: HistoryRow[],
+) {
   if (!total) return null;
-  const sumOf = (d: number) => round3(sums.filter((s) => (d > 0 ? s.direction > 0 : s.direction < 0)).reduce((n, s) => n + num(s._sum.quantity), 0));
+  const sumOf = (d: number) => round3(sums.filter((s) => (d > 0 ? s.direction > 0 : s.direction < 0)).reduce((n, s) => n + num(s._sum.quantity as never), 0));
   return {
     total,
     received: sumOf(1),
@@ -132,9 +145,30 @@ export async function odooHistory(itemId: string) {
       from: r.fromLocation,
       to: r.toLocation,
       contact: r.contact,
-      quantity: num(r.quantity),
+      quantity: num(r.quantity as never),
       unit: r.unit,
       by: r.createdByName,
     })),
   };
+}
+
+export async function odooHistory(itemId: string) {
+  const [total, sums, edge, rows] = await Promise.all([
+    prisma.odooStockMove.count({ where: { itemId } }),
+    prisma.odooStockMove.groupBy({ by: ['direction'], where: { itemId }, _sum: { quantity: true } }),
+    prisma.odooStockMove.aggregate({ where: { itemId }, _min: { occurredAt: true }, _max: { occurredAt: true } }),
+    prisma.odooStockMove.findMany({ where: { itemId }, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: ODOO_HISTORY_SHOWN }),
+  ]);
+  return historyOf(total, sums, edge, rows);
+}
+
+/** The same history for a tool, laptop or vehicle kept in G-HR (`OdooAssetMove`) — read on the asset's page. */
+export async function odooAssetHistory(assetId: string) {
+  const [total, sums, edge, rows] = await Promise.all([
+    prisma.odooAssetMove.count({ where: { assetId } }),
+    prisma.odooAssetMove.groupBy({ by: ['direction'], where: { assetId }, _sum: { quantity: true } }),
+    prisma.odooAssetMove.aggregate({ where: { assetId }, _min: { occurredAt: true }, _max: { occurredAt: true } }),
+    prisma.odooAssetMove.findMany({ where: { assetId }, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: ODOO_HISTORY_SHOWN }),
+  ]);
+  return historyOf(total, sums, edge, rows);
 }

@@ -135,7 +135,7 @@ export interface OdooHistory {
 
 const FIRST_SHOWN = 20;
 
-export function OdooHistoryCard({ history, unit }: { history: OdooHistory | null | undefined; unit: string }) {
+export function OdooHistoryCard({ history, unit, asset }: { history: OdooHistory | null | undefined; unit: string; asset?: boolean }) {
   const [all, setAll] = useState(false);
   if (!history || !history.total) return null;
   const rows = all ? history.rows : history.rows.slice(0, FIRST_SHOWN);
@@ -150,8 +150,8 @@ export function OdooHistoryCard({ history, unit }: { history: OdooHistory | null
         )}
       </div>
       <p className="faint">
-        Where this product moved in Odoo before G-CORE, {formatDate(history.first)} to {formatDate(history.last)}. A record only — it is not part of the stock above and
-        made no slip in G-CORE.
+        Where this {asset ? 'asset' : 'product'} moved in Odoo before G-CORE, {formatDate(history.first)} to {formatDate(history.last)}. A record only —{' '}
+        {asset ? 'it issued and returned nothing in G-CORE.' : 'it is not part of the stock above and made no slip in G-CORE.'}
       </p>
       <div className="kpi-grid proc-stats">
         <Stat label="Received in Odoo" value={`${qty(history.received)} ${unit}`} />
