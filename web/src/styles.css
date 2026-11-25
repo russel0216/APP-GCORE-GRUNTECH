@@ -5989,6 +5989,13 @@ a.icon-row:hover {
   font-weight: 600;
 }
 
+/* A search box in a table cell (the pull-out slip's item, 2026-11-25): the
+   table's own scroll box cut its list to one row, so while a list is open the
+   table lets it fall over the page below. */
+.table-wrap:has(.search-select .lookup-menu) {
+  overflow: visible;
+}
+
 .search-select-group {
   padding: var(--s-2) var(--s-3) var(--s-1);
   font-size: var(--fs-xs);
