@@ -671,6 +671,46 @@ four databases and four copies of "customer".
       API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
       old `?payment=` link redirects there.
 
+## Purchasing for the office budget (2026-11-27)
+
+Help tickets GT-HT-2026-0043 and 0045 ("please add yearly budget/overheads as
+project for admin requests"), the owner's call: a purchase request for an
+office budget line. It REVERSES "Purchasing never goes to an office line" for
+purchases made FOR the office; goods bought for stock or a project still
+never charge one.
+
+- **`PurchaseKind.OFFICE`**: no project, warehouse, sales order or quotation.
+  Every LINE names its office budget line
+  (`PurchaseRequestItem.officeBudgetLineId`, checked open by
+  `checkOfficeLines()` in `shared/officePurchases.ts`; a line already
+  carrying a closed one keeps it). Submit refuses a line without one, the
+  single-line add route refuses office requests, and a request moved to
+  another kind loses its lines' office lines. Services are allowed.
+- **The route** is the seeded optional "Purchase Request — office budget
+  (superior, finance manager)" (`OFFICE_PURCHASE_OPTION`, picked by
+  `stockRequestRoute('OFFICE')`; `standIns`, no `preparerSigns`): the
+  requester's superior (else the Finance Manager), then the Finance Manager.
+  Switched off, it falls back to the standard route.
+- **The order** takes the kind and each line's office line from its request
+  line (`fromRequestItem`, `checkPoLines`; a line added on the order takes
+  the first request line's). A batch order takes office requests together.
+- **The Incoming** receives it for OFFICE USE: no warehouse (`landing`
+  null), no new item asked for, nothing shelved, no job cost.
+- **The office monitor reads it** (`officePurchaseFigures()`, added in
+  `officeFigures()`): a pending request is requested at its declared
+  estimate; an approved one is cash out for what is not yet received, at the
+  declared estimate; what the Incoming received is actual at the cost it came
+  in at. An order line with no request counts at its own price. A supplier
+  bill against the order charges no office line, so nothing counts twice.
+  `officeDocuments()` lists the requests and orders, `officeLineUse()`
+  counts their lines (a line in use is closed, never removed).
+- **The web**: the requisition page's Kind "For the office budget (admin
+  and overheads)" — an "Office budget line" default above the lines, each
+  line's own picker in the Budget line column ("— as above —"), no
+  warehouse; the request page names each line's office line; the order and
+  the Incoming say it is for the office.
+- verify-chain pins it.
+
 ## The reimbursement page's lines, the CEO's own money, and back to draft (2026-11-26)
 
 The owner's five on the reimbursement, and "on return or reject don't make

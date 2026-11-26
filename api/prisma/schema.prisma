@@ -177,26 +177,26 @@ model User {
   accountTokens AccountToken[]
 
   lastLoginAt                 DateTime?
-  createdAt                   DateTime               @default(now())
-  updatedAt                   DateTime               @updatedAt
-  minutesAgreements           MinutesAgreement[]     @relation("MinutesAgreement")
-  issuesReceived              StockIssue[]           @relation("IssueReceivedBy")
-  billingsPrepared            ProgressBilling[]      @relation("BillingPreparer")
-  invoiceRequestsRaised       InvoiceRequest[]       @relation("InvoiceRequestRequester")
-  invoiceRequestsCredited     InvoiceRequest[]       @relation("InvoiceRequestSalesperson")
-  commissionsRaised           CommissionRequest[]    @relation("CommissionRequester")
-  commissionsCredited         CommissionRequest[]    @relation("CommissionSalesperson")
-  commissionShares            CommissionShare[]      @relation("CommissionBeneficiary")
-  attendanceCorrectionsRaised AttendanceCorrection[] @relation("AttendanceCorrectionRequester")
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+  minutesAgreements           MinutesAgreement[]        @relation("MinutesAgreement")
+  issuesReceived              StockIssue[]              @relation("IssueReceivedBy")
+  billingsPrepared            ProgressBilling[]         @relation("BillingPreparer")
+  invoiceRequestsRaised       InvoiceRequest[]          @relation("InvoiceRequestRequester")
+  invoiceRequestsCredited     InvoiceRequest[]          @relation("InvoiceRequestSalesperson")
+  commissionsRaised           CommissionRequest[]       @relation("CommissionRequester")
+  commissionsCredited         CommissionRequest[]       @relation("CommissionSalesperson")
+  commissionShares            CommissionShare[]         @relation("CommissionBeneficiary")
+  attendanceCorrectionsRaised AttendanceCorrection[]    @relation("AttendanceCorrectionRequester")
+  overtimeAllocated           OvertimeRequest[]         @relation("OvertimeAllocatedBy")
+  assetSlipsIssued            AssetSlip[]               @relation("AssetSlipIssuer")
+  assetSlipsAcknowledged      AssetSlip[]               @relation("AssetSlipAcknowledger")
+  examSittingsIssued          ExamSitting[]             @relation("ExamSittingIssuer")
+  evaluationRunsCreated       EvaluationRun[]           @relation("EvaluationRunCreator")
+  evaluationRunAssignments    EvaluationRunAssignment[] @relation("EvaluationRunEvaluator")
 
   @@index([isActive])
   @@index([supervisorId])
-  overtimeAllocated OvertimeRequest[] @relation("OvertimeAllocatedBy")
-  assetSlipsIssued AssetSlip[] @relation("AssetSlipIssuer")
-  assetSlipsAcknowledged AssetSlip[] @relation("AssetSlipAcknowledger")
-  examSittingsIssued ExamSitting[] @relation("ExamSittingIssuer")
-  evaluationRunsCreated EvaluationRun[] @relation("EvaluationRunCreator")
-  evaluationRunAssignments EvaluationRunAssignment[] @relation("EvaluationRunEvaluator")
 }
 
 enum AccountTokenPurpose {
@@ -1039,18 +1039,18 @@ model Employee {
   leaveRequests LeaveRequest[]
   overtime      OvertimeRequest[]
 
-  clearances          EmployeeClearance[]
-  evaluations         EmployeeEvaluation[]
-  trainingAttendances TrainingAttendee[]
-  trainingRecords     TrainingRecord[]
-  flowItems           EmployeeFlowItem[]
+  clearances           EmployeeClearance[]
+  evaluations          EmployeeEvaluation[]
+  trainingAttendances  TrainingAttendee[]
+  trainingRecords      TrainingRecord[]
+  flowItems            EmployeeFlowItem[]
+  assetSlips           AssetSlip[]
+  evaluationRunTargets EvaluationRunTarget[]
 
   @@index([isActive])
   @@index([lastName, firstName])
   @@index([positionId])
   @@index([industryId])
-  assetSlips AssetSlip[]
-  evaluationRunTargets EvaluationRunTarget[]
 }
 
 /// The five cost buckets every costing, budget and cost-ledger row uses
@@ -1129,8 +1129,8 @@ model Item {
   description String?
   itemType    ItemType @default(MATERIAL)
 
-  categoryId String?
-  category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId   String?
+  category     ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   /// The PRODUCT GROUP, from the quotation's list (Admin › Categories ›
   /// Quotation groups) and kept as its name, as a quotation line keeps it
   /// (2026-11-25, the owner's call: "Incoming Report product group, same with
@@ -1681,12 +1681,12 @@ model Quotation {
   salesOrders SalesOrder[]
 
   budgetRequests BudgetRequest[]
+  overtime       OvertimeRequest[]
 
   @@index([customerId])
   @@index([ownerId])
   @@index([outcome])
   @@index([teamId])
-  overtime OvertimeRequest[]
 }
 
 model QuotationRevision {
@@ -1751,8 +1751,7 @@ model QuotationRevision {
   /// quotes the equipment on its own lines, the engineer's costing holds
   /// equipment AND installation): WHOLE, or INSTALLATION — its labour,
   /// subcontract, indirect and contingency lines only.
-  costingScope  String @default("WHOLE")
-
+  costingScope  String                     @default("WHOLE")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1770,9 +1769,9 @@ model QuotationRevision {
 model SalesOrder {
   invoiceParts        InvoicePart[]        @relation("InvoicePartOrder")
   invoiceRequestParts InvoiceRequestPart[] @relation("InvoiceRequestPartOrder")
-  id     String           @id @default(cuid())
-  number String           @unique
-  status SalesOrderStatus @default(DRAFT)
+  id                  String               @id @default(cuid())
+  number              String               @unique
+  status              SalesOrderStatus     @default(DRAFT)
 
   quotationId String
   quotation   Quotation        @relation(fields: [quotationId], references: [id], onDelete: Restrict)
@@ -1783,7 +1782,7 @@ model SalesOrder {
 
   /// Record ownership — the author; "only the author can edit" as on quotations.
   ownerId String
-  owner   User   @relation("SalesOrderOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  owner   User      @relation("SalesOrderOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   /// The team the order counts under (2026-11-12, the owner's call: "each order
   /// its own team") — its salesperson's at booking, else the quotation's.
   /// Null on an order from before, read through `orderTeamOf()` as the quotation's.
@@ -1836,12 +1835,12 @@ model SalesOrder {
   invoiceRequests    InvoiceRequest[]
 
   budgetRequests BudgetRequest[]
+  overtime       OvertimeRequest[]
 
   @@index([quotationId])
   @@index([customerId])
   @@index([ownerId])
   @@index([status])
-  overtime OvertimeRequest[]
 }
 
 enum SalesOrderStatus {
@@ -2403,25 +2402,25 @@ model BudgetRequest {
 
   /// Re-derived: Σ DISBURSEMENT allocations that are CASH (not a booking).
   /// 0 or the cash part — released in one voucher.
-  amountReleased Decimal @default(0) @db.Decimal(18, 2)
+  amountReleased         Decimal   @default(0) @db.Decimal(18, 2)
   /// Re-derived: the approved liquidation's total plus what finance booked
   /// (`amountBooked`), else 0.
-  amountSpent    Decimal @default(0) @db.Decimal(18, 2)
+  amountSpent            Decimal   @default(0) @db.Decimal(18, 2)
   /// A travel request's FINANCE part (2026-11-21, the owner's call: "the air
   /// fare and the booking of the hotel can be paid by finance through the
   /// company credit card"): the lines marked `financePays`, booked and paid by
   /// finance; the rest (`amount` − this) is the cash released to the
   /// traveller and liquidated. Kept by the save; 0 on every other request.
-  financePart    Decimal @default(0) @db.Decimal(18, 2)
+  financePart            Decimal   @default(0) @db.Decimal(18, 2)
   /// Re-derived: Σ DISBURSEMENT allocations marked `booking` — what finance
   /// paid directly. Spent at once, never liquidated.
-  amountBooked   Decimal @default(0) @db.Decimal(18, 2)
+  amountBooked           Decimal   @default(0) @db.Decimal(18, 2)
   /// Liquidation reminders (2026-11-21): the one three days before the
   /// deadline and the one on the day, each claimed once.
-  liquidationReminderAt DateTime?
+  liquidationReminderAt  DateTime?
   liquidationDueNoticeAt DateTime?
   /// Re-derived: Σ RECEIPT allocations (unspent cash returned).
-  amountRefunded Decimal @default(0) @db.Decimal(18, 2)
+  amountRefunded         Decimal   @default(0) @db.Decimal(18, 2)
 
   /// releasedAt + finance.rules.budgetRequestLiquidationDays, snapshotted at release.
   liquidationDueDate DateTime? @db.Date
@@ -2846,6 +2845,11 @@ enum PurchaseKind {
   /// project built from it, which takes its requests, orders and goods over
   /// (`shared/quotationBuying.ts`). Lost, it is re-allocated by hand.
   QUOTATION
+  /// Bought for the OFFICE (2026-11-27, help tickets GT-HT-2026-0043/0045:
+  /// "add yearly office budget"): every line names an office budget line;
+  /// received for office use, never shelved, never a job's cost
+  /// (`shared/officePurchases.ts`).
+  OFFICE
 }
 
 enum PrStatus {
@@ -2933,22 +2937,25 @@ model PurchaseRequestItem {
   /// The short name, printed bold over the description (the costing line's
   /// rule). Null on a line typed before the page editor: its description
   /// then serves as the name.
-  name            String?
-  partNumber      String?
-  description     String
+  name               String?
+  partNumber         String?
+  description        String
   /// Goods or a service (2026-10-21): a service is received as "service
   /// rendered" and never enters stock; each prints its own standard terms.
-  nature          LineNature @default(GOODS)
-  quantity        Decimal    @db.Decimal(18, 3)
-  unit            String     @default("pcs")
-  estimatedCost   Decimal    @default(0) @db.Decimal(18, 2)
+  nature             LineNature        @default(GOODS)
+  quantity           Decimal           @db.Decimal(18, 3)
+  unit               String            @default("pcs")
+  estimatedCost      Decimal           @default(0) @db.Decimal(18, 2)
   /// quantity × estimatedCost, stored so the commitment is a recorded fact.
-  estimatedAmount Decimal    @default(0) @db.Decimal(18, 2)
-  orderedQty      Decimal    @default(0) @db.Decimal(18, 3)
+  estimatedAmount    Decimal           @default(0) @db.Decimal(18, 2)
+  orderedQty         Decimal           @default(0) @db.Decimal(18, 3)
   /// Taken from the shelf by a pull-out slip instead of bought (2026-10-14):
   /// what is left to order is quantity − orderedQty − pulledQty.
-  pulledQty       Decimal    @default(0) @db.Decimal(18, 3)
-  sortOrder       Int        @default(0)
+  pulledQty          Decimal           @default(0) @db.Decimal(18, 3)
+  sortOrder          Int               @default(0)
+  /// An OFFICE request's line names the office budget line it is charged to.
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation("PrItemOffice", fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
 
   quotes     CanvassQuote[]
   rfqItems   RfqItem[]
@@ -3257,24 +3264,27 @@ model PurchaseOrderItem {
   /// The bold name over the description and the part number — the
   /// requisition line's, carried over (2026-10-13). Null on a line typed
   /// before the order page: its description then serves as the name.
-  name           String?
-  partNumber     String?
-  description    String
+  name               String?
+  partNumber         String?
+  description        String
   /// Goods or a service — the request line's, carried over (2026-10-21).
-  nature         LineNature @default(GOODS)
-  quantity       Decimal    @db.Decimal(18, 3)
-  unit           String     @default("pcs")
-  unitPrice      Decimal    @db.Decimal(18, 2)
-  amount         Decimal    @db.Decimal(18, 2)
+  nature             LineNature        @default(GOODS)
+  quantity           Decimal           @db.Decimal(18, 3)
+  unit               String            @default("pcs")
+  unitPrice          Decimal           @db.Decimal(18, 2)
+  amount             Decimal           @db.Decimal(18, 2)
   /// The LANDED cost of one unit in pesos (2026-10-23, the owner's call:
   /// "Inventory unit cost should be the landed cost in PHP") — freight,
   /// duties and charges included, typed by the buyer. When set it is what
   /// the Incoming report, the stock and a sales order's spend take for this
   /// line (`receiptUnitCost()`); a project's budget still subtracts the
   /// request's declared value.
-  landedUnitCost Decimal?   @db.Decimal(18, 2)
-  receivedQty    Decimal    @default(0) @db.Decimal(18, 3)
-  sortOrder      Int        @default(0)
+  landedUnitCost     Decimal?          @db.Decimal(18, 2)
+  receivedQty        Decimal           @default(0) @db.Decimal(18, 3)
+  sortOrder          Int               @default(0)
+  /// An OFFICE order's line: the office budget line (its request line's).
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation("PoItemOffice", fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
 
   receivingItems ReceivingItem[]
 
@@ -3372,17 +3382,17 @@ model ReceivingItem {
   /// report is received.
   productGroup String?
 
-  quantity  Decimal @db.Decimal(18, 3)
-  unitCost  Decimal @db.Decimal(18, 2)
+  quantity      Decimal  @db.Decimal(18, 3)
+  unitCost      Decimal  @db.Decimal(18, 2)
   /// The unit cost as typed, in the report's currency, where that is not PHP
   /// (2026-11-25); `unitCost` is its peso figure at the report's rate.
   typedUnitCost Decimal? @db.Decimal(18, 4)
   /// The unit cost (pesos) was typed on the Incoming report — over what the
   /// order says (2026-10-23) — so posting and the seed's restating keep it.
-  costTyped Boolean @default(false)
-  serialNo  String?
-  batchNo   String?
-  remarks   String?
+  costTyped     Boolean  @default(false)
+  serialNo      String?
+  batchNo       String?
+  remarks       String?
 
   @@index([receivingId])
 }
@@ -3590,7 +3600,7 @@ model PulloutItem {
 
   /// The sales order line or the request line it answers (one of two tables, so no foreign key).
   sourceLineId String?
-  quantity     Decimal @db.Decimal(18, 3)
+  quantity     Decimal  @db.Decimal(18, 3)
   /// How much of its source line this row covers (2026-11-25, the owner's
   /// GT-SO-2026-0044: a filter sold as "1 lot" leaves as housing, drain and
   /// element). On a sales order slip the FIRST part of a line carries the lots
@@ -3598,15 +3608,15 @@ model PulloutItem {
   /// 0; null — a slip from before, or a request line — the quantity itself.
   sourceQty    Decimal? @db.Decimal(18, 3)
   /// At the warehouse's average when it went out; an estimate until then.
-  unitCost     Decimal @default(0) @db.Decimal(18, 2)
-  amount       Decimal @default(0) @db.Decimal(18, 2)
-  sortOrder    Int     @default(0)
+  unitCost     Decimal  @default(0) @db.Decimal(18, 2)
+  amount       Decimal  @default(0) @db.Decimal(18, 2)
+  sortOrder    Int      @default(0)
   /// Serial or batch, and its condition as it left (2026-10-15).
   serialNo     String?
   condition    String?
   /// Drawn from the sales order's own stock (2026-10-21) — what was bought
   /// for it and received into this warehouse — never the company's.
-  orderStock   Boolean @default(false)
+  orderStock   Boolean  @default(false)
 
   @@index([slipId])
   @@index([sourceLineId])
@@ -3895,22 +3905,22 @@ model OdooStockMove {
   itemId String
   item   Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
-  occurredAt   DateTime
+  occurredAt    DateTime
   /// Odoo's document: WH/OUT/04895, WH/IN/02323, "Product Quantity Updated".
-  reference    String
+  reference     String
   /// RECEIPT | DELIVERY | RETURN_IN | RETURN_OUT | ADJUSTMENT | TRANSFER | OTHER
-  kind         String
+  kind          String
   /// +1 into the warehouse, -1 out of it, 0 inside it.
-  direction    Int      @default(0)
-  fromLocation String
-  toLocation   String
+  direction     Int      @default(0)
+  fromLocation  String
+  toLocation    String
   /// The customer, supplier or project name as Odoo wrote it — never linked.
-  contact      String?
-  quantity     Decimal  @db.Decimal(18, 3)
-  unit         String?
+  contact       String?
+  quantity      Decimal  @db.Decimal(18, 3)
+  unit          String?
   createdByName String?
   /// The once-only key: the same line imported twice adds nothing.
-  importKey    String
+  importKey     String
 
   createdAt DateTime @default(now())
 
@@ -3993,23 +4003,23 @@ model Attendance {
 
   date DateTime @db.Date
 
-  timeIn       DateTime?
-  timeInMethod ClockMethod?
-  timeInPhoto  String?
+  timeIn         DateTime?
+  timeInMethod   ClockMethod?
+  timeInPhoto    String?
   /// Match distance at clock-in, kept so a questionable match can be reviewed.
-  timeInScore  Decimal?     @db.Decimal(6, 4)
+  timeInScore    Decimal?     @db.Decimal(6, 4)
   /// Where the punch was made: the phone's GPS and how far off it may be,
   /// in metres (2026-11-23). Null where the browser gave none.
-  timeInLat      Decimal? @db.Decimal(9, 6)
-  timeInLng      Decimal? @db.Decimal(9, 6)
+  timeInLat      Decimal?     @db.Decimal(9, 6)
+  timeInLng      Decimal?     @db.Decimal(9, 6)
   timeInAccuracy Int?
 
-  timeOut       DateTime?
-  timeOutMethod ClockMethod?
-  timeOutPhoto  String?
-  timeOutScore  Decimal?     @db.Decimal(6, 4)
-  timeOutLat      Decimal? @db.Decimal(9, 6)
-  timeOutLng      Decimal? @db.Decimal(9, 6)
+  timeOut         DateTime?
+  timeOutMethod   ClockMethod?
+  timeOutPhoto    String?
+  timeOutScore    Decimal?     @db.Decimal(6, 4)
+  timeOutLat      Decimal?     @db.Decimal(9, 6)
+  timeOutLng      Decimal?     @db.Decimal(9, 6)
   timeOutAccuracy Int?
 
   status           AttendanceStatus @default(PRESENT)
@@ -4167,14 +4177,14 @@ model OvertimeRequest {
   /// prepared reports to will allocate or correct the project, sales order or
   /// quotation"). Only a PROJECT carries a cost ledger, so these post nothing;
   /// the overtime can be moved to the project later.
-  salesOrderId String?
-  salesOrder   SalesOrder? @relation(fields: [salesOrderId], references: [id], onDelete: SetNull)
-  quotationId  String?
-  quotation    Quotation?  @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  salesOrderId   String?
+  salesOrder     SalesOrder?   @relation(fields: [salesOrderId], references: [id], onDelete: SetNull)
+  quotationId    String?
+  quotation      Quotation?    @relation(fields: [quotationId], references: [id], onDelete: SetNull)
   /// Who last set or corrected where it is charged, and when.
-  allocatedById String?
-  allocatedBy   User?     @relation("OvertimeAllocatedBy", fields: [allocatedById], references: [id], onDelete: SetNull)
-  allocatedAt   DateTime?
+  allocatedById  String?
+  allocatedBy    User?         @relation("OvertimeAllocatedBy", fields: [allocatedById], references: [id], onDelete: SetNull)
+  allocatedAt    DateTime?
 
   /// Snapshotted at posting so a later rate change does not rewrite history.
   hourlyRate Decimal? @db.Decimal(14, 4)
@@ -4834,7 +4844,7 @@ enum InvoiceStatus {
 /// exists, so the figures are carried rather than retyped.
 model Invoice {
   /// The sales orders one invoice bills, where it bills several (2026-11-14).
-  parts InvoicePart[]
+  parts  InvoicePart[]
   id     String        @id @default(cuid())
   number String        @unique
   status InvoiceStatus @default(DRAFT)
@@ -5154,17 +5164,17 @@ model ExpenseClaimLine {
   claimId String
   claim   ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
 
-  sortOrder   Int      @default(0)
-  spentOn     DateTime @db.Date
-  description String
+  sortOrder       Int      @default(0)
+  spentOn         DateTime @db.Date
+  description     String
   /// Free text: fare, meals, accommodation, materials bought on site…
-  category    String?
+  category        String?
   /// The OR or receipt number, because a claim without one is not claimable.
-  receiptNo   String?
+  receiptNo       String?
   /// The company the receipt is from (2026-10-15, the owner's line pattern:
   /// Date — Company / receipt — Item / purpose).
-  vendor      String?
-  amount      Decimal  @db.Decimal(18, 2)
+  vendor          String?
+  amount          Decimal  @db.Decimal(18, 2)
   /// Spent abroad (2026-11-21): the receipt's own currency and figure, and the
   /// rate it was taken in at. `amount` stays the pesos — what is posted.
   foreignCurrency String?
@@ -5355,9 +5365,9 @@ model Payment {
   /// A charge on the company's credit card (2026-11-21): its last four digits
   /// and the statement month it falls on ("2026-11"), and when finance ticked
   /// it off that statement.
-  cardLast4          String?
-  statementMonth     String?
-  statementMatchedAt DateTime?
+  cardLast4            String?
+  statementMonth       String?
+  statementMatchedAt   DateTime?
   statementMatchedById String?
 
   notes String?
@@ -6250,7 +6260,7 @@ enum InvoiceRequestStatus {
 /// money is the billing's, never re-keyed; the order lends its PO and terms.
 model InvoiceRequest {
   /// The sales orders a batch request bills together on one S.I. (2026-11-14).
-  parts InvoiceRequestPart[]
+  parts   InvoiceRequestPart[]
   id      String               @id @default(cuid())
   number  String
   /// The withholding rate the invoice will carry (2026-10-16: editable, e.g.
@@ -6523,8 +6533,10 @@ model OfficeBudgetLine {
   budgetRequests BudgetRequest[]
   supplierBills  SupplierBill[]
   cashAdvances   CashAdvance[]
-  claimLines     ExpenseClaimLine[]  @relation("ClaimLineOffice")
-  requestItems   BudgetRequestItem[] @relation("RequestItemOffice")
+  claimLines     ExpenseClaimLine[]    @relation("ClaimLineOffice")
+  requestItems   BudgetRequestItem[]   @relation("RequestItemOffice")
+  prItems        PurchaseRequestItem[] @relation("PrItemOffice")
+  poItems        PurchaseOrderItem[]   @relation("PoItemOffice")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6827,10 +6839,10 @@ model Candidate {
   events          CandidateEvent[]
   examResults     ExamResult[]
   contracts       EmploymentContract[]
+  examSittings    ExamSitting[]
 
   @@index([mprId])
   @@index([status])
-  examSittings ExamSitting[]
 }
 
 enum CandidateStatus {
@@ -6867,17 +6879,17 @@ model CandidateEvent {
 /// Logic, Technical / Mechanical, Communication & Verbs (seeded system rows),
 /// and what HR adds. Each is scored out of `maxScore` and weighs `weight`.
 model ExamCatalog {
-  id          String       @id @default(cuid())
-  name        String       @unique
-  description String?
-  maxScore    Int          @default(100)
-  weight      Decimal      @default(1) @db.Decimal(6, 2)
-  sortOrder   Int          @default(0)
-  isSystem    Boolean      @default(false)
-  isActive    Boolean      @default(true)
-  createdById String?
-  createdAt   DateTime     @default(now())
-  results     ExamResult[]
+  id               String         @id @default(cuid())
+  name             String         @unique
+  description      String?
+  maxScore         Int            @default(100)
+  weight           Decimal        @default(1) @db.Decimal(6, 2)
+  sortOrder        Int            @default(0)
+  isSystem         Boolean        @default(false)
+  isActive         Boolean        @default(true)
+  createdById      String?
+  createdAt        DateTime       @default(now())
+  results          ExamResult[]
   /// Minutes an applicant has for this exam when taking it online (2026-11-13).
   timeLimitMinutes Int            @default(30)
   questions        ExamQuestion[]
@@ -7266,7 +7278,6 @@ model EvaluationRunAnswer {
 
   @@unique([assignmentId, questionId])
 }
-
 
 /// One sales order's share of an invoice that bills several orders on one
 /// S.I. (2026-11-14, the owner's call: "A + A + B = progress billing 65% —

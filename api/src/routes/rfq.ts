@@ -402,8 +402,8 @@ export async function warehouseDeliverTo(pr: { warehouseId?: string | null }): P
  * name or customer — and for a sales order's purchase (2026-10-21) the
  * order's number alone.
  */
-function projectRef(pr: { job: { number: string } | null; salesOrder?: { number: string } | null; warehouse?: { name: string } | null }): string {
-  return pr.job ? `Project ${pr.job.number}` : pr.salesOrder ? `Sales order ${pr.salesOrder.number}` : 'Stock replenishment';
+function projectRef(pr: { kind?: string; job: { number: string } | null; salesOrder?: { number: string } | null; warehouse?: { name: string } | null }): string {
+  return pr.job ? `Project ${pr.job.number}` : pr.salesOrder ? `Sales order ${pr.salesOrder.number}` : pr.kind === 'OFFICE' ? 'Office budget' : 'Stock replenishment';
 }
 
 async function loadRfq(id: string) {

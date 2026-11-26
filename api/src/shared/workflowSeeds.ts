@@ -124,6 +124,20 @@ export const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // A purchase for the OFFICE budget (2026-11-27, help tickets
+    // GT-HT-2026-0043 / 0045): the requester's superior, then the Finance
+    // Manager who keeps the office budgets. Marked by its option label —
+    // `stockRequestRoute()` asks for it for every OFFICE request.
+    documentType: 'purchase_request',
+    name: 'Purchase Request — office budget (superior, finance manager)',
+    optionLabel: 'Office budget purchase',
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Superior', approverType: 'SUPERVISOR', roleKey: 'finance_manager' },
+      { sequence: 2, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+    ],
+  },
+  {
     // BUDGET REQUEST (project cash). Since 2026-11-26 (the owner's call: "they
     // don't want Carter Gasiong to approve budget request, particular in
     // BOSS"): Team Leader, the project budget agreed (passed over when it

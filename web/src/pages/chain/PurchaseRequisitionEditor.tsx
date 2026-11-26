@@ -11,6 +11,7 @@ import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { parseDelimited, preferredFrom, prLineAmount, rowsToPrLines, type PrLineDraft } from '../../lib/prLines';
 import { SearchSelect } from '../../components/SearchSelect';
 import { CREATE_RIGHT, CreatePopup } from '../../components/CreatePopup';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
 
 /**
  * The purchase requisition as a PAGE (2026-10-13, the owner's call: "Purchase
@@ -118,6 +119,7 @@ interface ExistingPr {
     nature?: 'GOODS' | 'SERVICE';
     item: { id: string } | null;
     costCategory: { id: string } | null;
+    officeBudgetLine?: CurrentOfficeLine | null;
   }[];
 }
 
@@ -125,11 +127,15 @@ interface Line extends PrLineDraft {
   key: string;
   id: string | null;
   itemId: string | null;
+  /** For the office budget: the line's own office line; empty takes the request's default. */
+  officeBudgetLineId?: string;
 }
 
 interface Header {
-  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT' | 'SALES_ORDER' | 'QUOTATION';
+  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT' | 'SALES_ORDER' | 'QUOTATION' | 'OFFICE';
   jobId: string;
+  /** For the office budget (2026-11-27): the office line every line takes unless it names its own. */
+  officeLineId: string;
   /** The quotation a QUOTATION request buys ahead for — charged once it has a sales order or a project (2026-11-10). */
   quotationId: string;
   /** The issued sales order a SALES_ORDER request buys for — no project (2026-10-21). */
@@ -215,6 +221,7 @@ export function PurchaseRequisitionEditor() {
     jobId: presetJobId ?? '',
     quotationId: presetQuotationId ?? '',
     salesOrderId: presetSalesOrderId ?? '',
+    officeLineId: '',
     warehouseId: '',
     purpose: '',
     // A week out: most requests are wanted soon, and a blank date is the one nobody chases.
@@ -247,8 +254,9 @@ export function PurchaseRequisitionEditor() {
           if (id) setExisting(pr);
           const neededBy = pr.neededBy ? pr.neededBy.slice(0, 10) : '';
           h = {
-            kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' || pr.kind === 'QUOTATION' ? pr.kind : 'DIRECT_TO_JOB',
+            kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' || pr.kind === 'QUOTATION' || pr.kind === 'OFFICE' ? pr.kind : 'DIRECT_TO_JOB',
             jobId: pr.job?.id ?? '',
+            officeLineId: pr.items.find((i) => i.officeBudgetLine)?.officeBudgetLine?.id ?? '',
             quotationId: pr.quotation?.id ?? '',
             salesOrderId: pr.salesOrder?.id ?? '',
             warehouseId: pr.warehouse?.id ?? '',
@@ -271,6 +279,7 @@ export function PurchaseRequisitionEditor() {
             estimatedCost: String(i.estimatedCost),
             costCategoryId: i.costCategory?.id ?? '',
             nature: i.nature ?? 'GOODS',
+            officeBudgetLineId: i.officeBudgetLine?.id ?? '',
           }));
           if (!ls.length) ls = [blankLine()];
           setHeader(h);
@@ -307,6 +316,12 @@ export function PurchaseRequisitionEditor() {
   const orderFixed = Boolean(presetSalesOrderId);
   const forQuote = header.kind === 'QUOTATION';
   const quoteFixed = Boolean(presetQuotationId);
+  const forOffice = header.kind === 'OFFICE';
+  const officeBudgets = useOfficeLines();
+  /** The office line a line is charged to: its own, else the request's default. */
+  const officeOf = (l: Line) => l.officeBudgetLineId || header.officeLineId;
+  /** Every office line the saved request names, so a closed one stays on the list. */
+  const officeCurrent = new Map((existing?.items ?? []).flatMap((i) => (i.officeBudgetLine ? [[i.officeBudgetLine.id, i.officeBudgetLine] as const] : [])));
 
   useEffect(() => {
     if (quoteFixed || !forQuote) return;
@@ -505,6 +520,7 @@ export function PurchaseRequisitionEditor() {
     if (!l.name.trim() && !l.description.trim()) return 'Say what is needed';
     if (!(Number(l.quantity) > 0)) return 'Quantity must be more than zero';
     if (direct && !l.costCategoryId) return 'Choose its budget line';
+    if (forOffice && !officeOf(l)) return 'Choose its office budget line';
     return null;
   };
   const problems: string[] = [];
@@ -513,6 +529,7 @@ export function PurchaseRequisitionEditor() {
   if (forOrder && !header.salesOrderId) problems.push('Choose the sales order');
   if (forQuote && !header.quotationId) problems.push('Choose the quotation');
   if (header.kind === 'STOCK_REPLENISHMENT' && !header.warehouseId) problems.push('Choose the warehouse');
+  if (forOffice && !header.officeLineId && sent.some((l) => !l.officeBudgetLineId)) problems.push('Choose the office budget line');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
     if (p) problems.push(`Line ${i + 1}: ${p}`);
@@ -524,7 +541,7 @@ export function PurchaseRequisitionEditor() {
       jobId: direct ? header.jobId || null : null,
       salesOrderId: forOrder ? header.salesOrderId || null : null,
       quotationId: forQuote ? header.quotationId || null : null,
-      warehouseId: header.warehouseId || null,
+      warehouseId: forOffice ? null : header.warehouseId || null,
       purpose: header.purpose.trim(),
       neededBy: header.neededBy || null,
       notes: header.notes.trim() || null,
@@ -541,6 +558,7 @@ export function PurchaseRequisitionEditor() {
         estimatedCost: Number(l.estimatedCost) || 0,
         // A stock request buys goods only; a service names no stock item.
         nature: header.kind === 'STOCK_REPLENISHMENT' ? 'GOODS' : (l.nature ?? 'GOODS'),
+        officeBudgetLineId: forOffice ? officeOf(l) || null : null,
       })),
       ...(existing ? { version: existing.version } : {}),
     };
@@ -684,6 +702,7 @@ export function PurchaseRequisitionEditor() {
                     <option value="SALES_ORDER">For a sales order (no project)</option>
                     <option value="QUOTATION">For a quotation (bought ahead, charged once won)</option>
                     <option value="STOCK_REPLENISHMENT">Warehouse stock (charged when issued)</option>
+                    <option value="OFFICE">For the office budget (admin and overheads)</option>
                   </select>
                 </Field>
               ) : (
@@ -748,6 +767,30 @@ export function PurchaseRequisitionEditor() {
                   </SearchSelect>
                 </Field>
               )}
+              {forOffice && (
+                <Field
+                  label="Office budget line"
+                  required
+                  error={attempted && !header.officeLineId && sent.some((l) => !l.officeBudgetLineId) ? 'Choose the office budget line' : null}
+                  hint={
+                    <OfficeLineAdvice
+                      budgets={officeBudgets}
+                      value={header.officeLineId}
+                      amount={sent.filter((l) => officeOf(l) === header.officeLineId).reduce((sum, l) => sum + amountOf(l), 0)}
+                      onPick={(officeLineId) => setHeader((h) => ({ ...h, officeLineId }))}
+                    />
+                  }
+                >
+                  <OfficeLineSelect
+                    budgets={officeBudgets}
+                    value={header.officeLineId}
+                    none="— choose —"
+                    current={officeCurrent.get(header.officeLineId) ?? null}
+                    onChange={(officeLineId) => setHeader((h) => ({ ...h, officeLineId }))}
+                  />
+                </Field>
+              )}
+              {!forOffice && (
               <Field
                 label={direct || forOrder ? 'Deliver to warehouse' : 'Warehouse'}
                 required={header.kind === 'STOCK_REPLENISHMENT'}
@@ -762,6 +805,7 @@ export function PurchaseRequisitionEditor() {
                   ))}
                 </SearchSelect>
               </Field>
+              )}
               <Field label="Needed by">
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
               </Field>
@@ -794,7 +838,9 @@ export function PurchaseRequisitionEditor() {
                 ? 'Each line is charged to a budget line (cost category) of the project. Only an approved request commits the budget; receiving incurs it.'
                 : forOrder
                   ? "This buys for the sales order — no project is needed. What it costs is measured against the order's quoted cost; received into a warehouse, the goods are held for the order until they go out."
-                  : forQuote
+                  : forOffice
+                    ? 'This buys for the office, charged to the office budget line each line names (the one above unless a line picks its own). It is received for office use and never enters warehouse stock. The Office Budget monitor counts it as cash out once approved and as actual once received.'
+                    : forQuote
                     ? 'This buys ahead for the quotation — before the customer confirms. Nothing is charged until a sales order is issued on it or a project is built from it; received into a warehouse, the goods are held for the quotation. If it is lost, they are re-allocated to a project or to warehouse stock.'
                     : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
             </p>
@@ -874,7 +920,7 @@ export function PurchaseRequisitionEditor() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Budget line</th>
+                    <th>{forOffice ? 'Office budget line' : 'Budget line'}</th>
                     <th>Part No.</th>
                     <th>Item and description</th>
                     <th>Unit</th>
@@ -891,6 +937,16 @@ export function PurchaseRequisitionEditor() {
                       <tr key={l.key}>
                         <td className="mono">{i + 1}</td>
                         <td>
+                          {forOffice ? (
+                            <OfficeLineSelect
+                              aria-label={`Line ${i + 1} office budget line`}
+                              budgets={officeBudgets}
+                              value={l.officeBudgetLineId ?? ''}
+                              none="— as above —"
+                              current={officeCurrent.get(l.officeBudgetLineId ?? '') ?? null}
+                              onChange={(officeBudgetLineId) => setLine(l.key, { officeBudgetLineId })}
+                            />
+                          ) : (
                           <select
                             aria-label={`Line ${i + 1} budget line`}
                             aria-invalid={problem === 'Choose its budget line' || undefined}
@@ -904,6 +960,7 @@ export function PurchaseRequisitionEditor() {
                               </option>
                             ))}
                           </select>
+                          )}
                           {/* Goods or a service (2026-10-21): a service is never bought for stock and names no stock item. */}
                           {header.kind !== 'STOCK_REPLENISHMENT' && (
                             <select

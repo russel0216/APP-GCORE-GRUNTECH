@@ -489,7 +489,9 @@ export function PurchaseOrderDetail() {
                 ? 'Direct to project — no project named'
                 : po.kind === 'SALES_ORDER'
                   ? 'For a sales order'
-                  : `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+                  : po.kind === 'OFFICE'
+                    ? 'For the office budget — received for office use'
+                    : `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
             )}
             {po.batch && (po.requests ?? []).length > 0 && (
               <>

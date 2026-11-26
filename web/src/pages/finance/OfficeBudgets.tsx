@@ -60,7 +60,7 @@ interface Line {
   documents: number;
 }
 interface Doc {
-  kind: 'reimbursement' | 'liquidation' | 'bill' | 'budget_request' | 'cash_advance';
+  kind: 'reimbursement' | 'liquidation' | 'bill' | 'budget_request' | 'cash_advance' | 'purchase_request' | 'purchase_order';
   id: string;
   number: string;
   status: string;
@@ -86,6 +86,8 @@ const KIND_WORDS: Record<Doc['kind'], string> = {
   bill: 'Supplier bill',
   budget_request: 'Budget request',
   cash_advance: 'Cash advance',
+  purchase_request: 'Purchase request',
+  purchase_order: 'Purchase order',
 };
 
 interface DraftLine {
@@ -509,7 +511,8 @@ export function OfficeBudgets() {
                   </div>
                   <p className="muted">
                     Remaining = budget − cash out − actual. Requested is still waiting for approval or release — shown, not subtracted. Actual is the opening actual plus approved
-                    reimbursements, liquidations and supplier bills (before VAT).
+                    reimbursements, liquidations and supplier bills (before VAT), and office purchases once received. An approved office purchase request is cash out until
+                    its goods are received.
                   </p>
                 </>
               )}

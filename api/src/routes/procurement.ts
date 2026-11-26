@@ -58,10 +58,11 @@ import { jobCostingIds } from '../shared/costingSets';
 import { salesOrderSpend } from '../shared/orderStock';
 import { checkQuotationTarget, quotationSpend } from '../shared/quotationBuying';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
+import { checkOfficeLines } from '../shared/officePurchases';
 
 /** What a purchase is for, in words — the lists, the papers and the trail. */
 export function purchaseKindLabel(kind: string): string {
-  return kind === 'DIRECT_TO_JOB' ? 'Direct to project' : kind === 'SALES_ORDER' ? 'For a sales order' : kind === 'QUOTATION' ? 'For a quotation' : 'Stock replenishment';
+  return kind === 'DIRECT_TO_JOB' ? 'Direct to project' : kind === 'SALES_ORDER' ? 'For a sales order' : kind === 'QUOTATION' ? 'For a quotation' : kind === 'OFFICE' ? 'For the office budget' : 'Stock replenishment';
 }
 
 /**
@@ -278,9 +279,11 @@ purchaseRequestRoutes.get(
               ? `${r.job.number} — ${r.job.name}`
               : r.salesOrder
                 ? `${r.salesOrder.number} — ${r.salesOrder.customer.name}`
-                : (r.warehouse?.name ?? 'Stock'),
+                : r.kind === 'OFFICE'
+                  ? 'Office budget'
+                  : (r.warehouse?.name ?? 'Stock'),
           },
-          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : r.kind === 'SALES_ORDER' ? 'Sales order' : r.kind === 'QUOTATION' ? 'Quotation' : 'Stock',
+          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : r.kind === 'SALES_ORDER' ? 'Sales order' : r.kind === 'QUOTATION' ? 'Quotation' : r.kind === 'OFFICE' ? 'Office budget' : 'Stock',
           String(r.items.length),
           bracketed(formatAmount(estimated(r).toFixed(2)), !PR_CLOSED.includes(r.status)),
           r.requestedBy.name,
@@ -705,6 +708,7 @@ async function loadPr(id: string) {
         include: {
           item: { select: { id: true, code: true, name: true, unit: true } },
           costCategory: { select: { id: true, code: true, name: true } },
+          officeBudgetLine: { select: { id: true, code: true, name: true, budget: { select: { id: true, name: true, year: true } } } },
         },
       },
       canvasses: {
@@ -820,6 +824,8 @@ const prLineSchema = z.object({
   quantity: z.number().positive('Quantity must be more than zero'),
   unit: z.string().trim().max(40).optional().nullable(),
   estimatedCost: z.number().min(0, 'An estimated cost cannot be negative').default(0),
+  /** An OFFICE request's line: the office budget line it is charged to. */
+  officeBudgetLineId: z.string().optional().nullable(),
 });
 type PrLineInput = z.infer<typeof prLineSchema>;
 
@@ -834,6 +840,7 @@ interface CheckedPrLine {
   quantity: number;
   unit: string;
   estimatedCost: number;
+  officeBudgetLineId: string | null;
 }
 
 /**
@@ -843,7 +850,7 @@ interface CheckedPrLine {
  * where it has one, else refused naming the line. `existingIds` are the
  * request's own lines; an id that is not one of them is a 400.
  */
-async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: string[]): Promise<CheckedPrLine[]> {
+async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: string[], keepOffice: Map<string, string | null> = new Map()): Promise<CheckedPrLine[]> {
   const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
   const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
   const [items, categories] = await Promise.all([
@@ -855,6 +862,11 @@ async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: str
   const itemById = new Map(items.map((i) => [i.id, i]));
   const known = new Set(categories.map((c) => c.id));
   const own = new Set(existingIds);
+  // An office request's lines each name their office budget line (2026-11-27).
+  const officeLines = await checkOfficeLines(
+    kind,
+    lines.map((l) => ({ officeBudgetLineId: l.officeBudgetLineId, label: l.name?.trim() || l.description?.trim() || 'a line', keep: l.id ? keepOffice.get(l.id) : null })),
+  );
   return lines.map((l, index) => {
     const n = index + 1;
     if (l.id && !own.has(l.id)) throw badRequest(`Line ${n} is not on this request`);
@@ -879,6 +891,7 @@ async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: str
       quantity: l.quantity,
       unit: l.unit?.trim() || 'pcs',
       estimatedCost: l.estimatedCost,
+      officeBudgetLineId: officeLines[index],
     };
   });
 }
@@ -900,13 +913,14 @@ async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lin
       estimatedCost: D(l.estimatedCost),
       estimatedAmount: D(cents(l.quantity * l.estimatedCost)),
       sortOrder,
+      officeBudgetLineId: l.officeBudgetLineId,
     };
     if (l.id) await tx.purchaseRequestItem.update({ where: { id: l.id }, data });
     else await tx.purchaseRequestItem.create({ data: { requestId, ...data } });
   }
 }
 
-const PR_KINDS = ['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT', 'SALES_ORDER', 'QUOTATION'] as const;
+const PR_KINDS = ['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT', 'SALES_ORDER', 'QUOTATION', 'OFFICE'] as const;
 
 const prSchema = z.object({
   kind: z.enum(PR_KINDS).default('DIRECT_TO_JOB'),
@@ -988,7 +1002,7 @@ purchaseRequestRoutes.post(
           number,
           kind: body.kind,
           ...targets,
-          warehouseId: body.warehouseId || null,
+          warehouseId: body.kind === 'OFFICE' ? null : body.warehouseId || null,
           requestedById: me.id,
           purpose: body.purpose,
           neededBy: asDate(body.neededBy),
@@ -1065,8 +1079,12 @@ purchaseRequestRoutes.patch(
       body.salesOrderId !== undefined ? body.salesOrderId : pr.salesOrderId,
       body.quotationId !== undefined ? body.quotationId : pr.quotationId,
     );
-    const warehouseId = body.warehouseId !== undefined ? body.warehouseId || null : pr.warehouseId;
+    const warehouseId = kind === 'OFFICE' ? null : body.warehouseId !== undefined ? body.warehouseId || null : pr.warehouseId;
     checkPrTarget(kind, jobId, warehouseId, salesOrderId, quotationId);
+    // For the office, every line names its office line — set on the request's page.
+    if (kind === 'OFFICE' && pr.items.some((i) => !i.officeBudgetLineId)) {
+      throw badRequest('For the office budget, every line names its office budget line — modify the request on its page');
+    }
     if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
     if (quotationId && quotationId !== pr.quotationId) await checkQuotationTarget(quotationId);
 
@@ -1101,7 +1119,7 @@ purchaseRequestRoutes.patch(
 
     const changed: string[] = [];
     if (kind !== pr.kind) {
-      changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : kind === 'SALES_ORDER' ? 'now for a sales order' : kind === 'QUOTATION' ? 'now for a quotation' : 'now for warehouse stock');
+      changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : kind === 'SALES_ORDER' ? 'now for a sales order' : kind === 'QUOTATION' ? 'now for a quotation' : kind === 'OFFICE' ? 'now for the office budget' : 'now for warehouse stock');
     }
     if (jobId !== pr.jobId && kind === pr.kind) changed.push('project');
     if (salesOrderId !== pr.salesOrderId && kind === pr.kind) changed.push('sales order');
@@ -1136,6 +1154,8 @@ purchaseRequestRoutes.patch(
       for (const fill of categoryFills) {
         await tx.purchaseRequestItem.update({ where: { id: fill.id }, data: { costCategoryId: fill.costCategoryId } });
       }
+      // No longer for the office: its lines charge no office line.
+      if (kind !== 'OFFICE') await tx.purchaseRequestItem.updateMany({ where: { requestId: pr.id, officeBudgetLineId: { not: null } }, data: { officeBudgetLineId: null } });
       await audit(
         {
           entityType: 'purchase_request',
@@ -1168,6 +1188,7 @@ purchaseRequestRoutes.post(
   handler(async (req, res) => {
     const { pr } = await prForEdit(req, req.params.id);
     const body = parseBody(prItemSchema, req.body);
+    if (pr.kind === 'OFFICE') throw badRequest('A line for the office budget names its office budget line — add it on the request’s page');
 
     if (pr.kind === 'DIRECT_TO_JOB' && !body.costCategoryId) {
       throw badRequest('A direct-to-job line needs a cost category — it is how the cost finds its budget line');
@@ -1290,7 +1311,7 @@ purchaseRequestRoutes.put(
     );
     const kind = body.kind;
     const { jobId, salesOrderId, quotationId } = prTargets(kind, body.jobId, body.salesOrderId, body.quotationId);
-    const warehouseId = body.warehouseId || null;
+    const warehouseId = kind === 'OFFICE' ? null : body.warehouseId || null;
     checkPrTarget(kind, jobId, warehouseId, salesOrderId, quotationId);
     if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
     if (quotationId && quotationId !== pr.quotationId) await checkQuotationTarget(quotationId);
@@ -1302,7 +1323,7 @@ purchaseRequestRoutes.put(
       const warehouse = await prisma.warehouse.findUnique({ where: { id: warehouseId }, select: { id: true } });
       if (!warehouse) throw badRequest('That warehouse does not exist');
     }
-    const lines = await checkPrLines(kind, body.lines, pr.items.map((i) => i.id));
+    const lines = await checkPrLines(kind, body.lines, pr.items.map((i) => i.id), new Map(pr.items.map((i) => [i.id, i.officeBudgetLineId])));
     const version = body.version ? new Date(body.version) : null;
     if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
 
@@ -1373,6 +1394,10 @@ purchaseRequestRoutes.post(
     if (!pr.items.length) throw badRequest('Add at least one line before submitting');
 
     const total = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
+    if (pr.kind === 'OFFICE') {
+      const bare = pr.items.filter((i) => !i.officeBudgetLineId).map((i) => i.name ?? i.description);
+      if (bare.length) throw badRequest(`Choose the office budget line of ${bare.join(', ')} before submitting`);
+    }
 
     if (pr.kind === 'DIRECT_TO_JOB' && pr.jobId) {
       const blocked = await overBudgetIsBlocked();
@@ -1422,7 +1447,7 @@ purchaseRequestRoutes.post(
         documentId: pr.id,
         documentNumber: pr.number,
         optionId: stockRoute.optionId,
-        subject: `${pr.job ? `${pr.job.number} — ` : pr.salesOrder ? `${pr.salesOrder.number} — ` : ''}${pr.purpose}`,
+        subject: `${pr.job ? `${pr.job.number} — ` : pr.salesOrder ? `${pr.salesOrder.number} — ` : pr.kind === 'OFFICE' ? 'Office budget — ' : ''}${pr.purpose}`,
         amount: total,
         link: `/g-chain/purchase-requests/${pr.id}`,
         requesterId: pr.requestedById,
@@ -3723,6 +3748,8 @@ const poLineSchema = z.object({
   unitPrice: z.number().min(0, 'A unit price cannot be negative'),
   /** The landed cost of one unit in PESOS (2026-10-23); left out keeps what the line has. */
   landedUnitCost: z.number().min(0).max(1e12).optional().nullable(),
+  /** An OFFICE order's line with no request behind it: the office budget line. */
+  officeBudgetLineId: z.string().optional().nullable(),
 });
 type PoLineInput = z.infer<typeof poLineSchema>;
 
@@ -3739,6 +3766,8 @@ interface OrderLine {
   unit: string;
   unitPrice: number;
   landedUnitCost?: number | null;
+  /** An OFFICE order's line: the office budget line (its request line's). */
+  officeBudgetLineId?: string | null;
   /** A batch order's line says which request, and what, it buys for. */
   requestNumber?: string;
   forLabel?: string;
@@ -3760,7 +3789,9 @@ function forLabelOf(pr: { kind: string; job: { number: string; name: string } | 
       ? `Sales order ${pr.salesOrder?.number ?? ''}`
       : pr.kind === 'QUOTATION'
         ? `Quotation ${pr.quotation?.number ?? ''}`
-        : `Stock${pr.warehouse ? ` — ${pr.warehouse.name}` : ''}`;
+        : pr.kind === 'OFFICE'
+          ? 'Office budget'
+          : `Stock${pr.warehouse ? ` — ${pr.warehouse.name}` : ''}`;
 }
 
 /**
@@ -3786,7 +3817,7 @@ async function batchSource(requestIds: string[]) {
   }
   const kind = prs[0].kind;
   if (prs.some((p) => p.kind !== kind)) {
-    throw badRequest('One order takes requests of one kind — for projects, for warehouse stock, for one sales order or for one quotation. Raise a separate order for the others');
+    throw badRequest('One order takes requests of one kind — for projects, for warehouse stock, for the office budget, for one sales order or for one quotation. Raise a separate order for the others');
   }
   if (kind === 'SALES_ORDER' && prs.some((p) => p.salesOrderId !== prs[0].salesOrderId)) throw badRequest('One order buys for one sales order — these requests are for different ones');
   if (kind === 'QUOTATION' && prs.some((p) => p.quotationId !== prs[0].quotationId)) throw badRequest('One order buys for one quotation — these requests are for different ones');
@@ -3894,10 +3925,11 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
 }
 
 function fromRequestItem(
-  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; nature: LineNatureKey; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string },
+  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; nature: LineNatureKey; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string; officeBudgetLineId?: string | null },
   unitPrice: number,
 ): OrderLine {
   return {
+    officeBudgetLineId: i.officeBudgetLineId ?? null,
     id: null,
     requestItemId: i.id,
     itemId: i.itemId,
@@ -3926,10 +3958,24 @@ async function checkPoLines(
   requestItemIds: string[],
 ): Promise<OrderLine[]> {
   // A request line keeps the nature the request gave it.
-  const requestNature = new Map(
-    requestItemIds.length
-      ? (await prisma.purchaseRequestItem.findMany({ where: { id: { in: requestItemIds } }, select: { id: true, nature: true } })).map((r) => [r.id, r.nature])
-      : [],
+  const requestRows = requestItemIds.length
+    ? await prisma.purchaseRequestItem.findMany({ where: { id: { in: requestItemIds } }, select: { id: true, nature: true, officeBudgetLineId: true } })
+    : [];
+  const requestNature = new Map(requestRows.map((r) => [r.id, r.nature]));
+  // An office order's line takes its request line's office line; one with no request names its own (2026-11-27).
+  const requestOffice = new Map(requestRows.map((r) => [r.id, r.officeBudgetLineId]));
+  const firstOffice = requestRows.find((r) => r.officeBudgetLineId)?.officeBudgetLineId ?? null;
+  const ownOffice = existingIds.length
+    ? new Map((await prisma.purchaseOrderItem.findMany({ where: { id: { in: existingIds } }, select: { id: true, officeBudgetLineId: true } })).map((r) => [r.id, r.officeBudgetLineId]))
+    : new Map<string, string | null>();
+  const officeLines = await checkOfficeLines(
+    kind,
+    lines.map((l) => ({
+      // A line added on the order with no request takes the office line of the order's first request line.
+      officeBudgetLineId: l.requestItemId && requestOffice.get(l.requestItemId) ? requestOffice.get(l.requestItemId) : l.officeBudgetLineId || firstOffice,
+      label: l.name?.trim() || l.description?.trim() || 'a line',
+      keep: l.requestItemId ? requestOffice.get(l.requestItemId) : l.id ? ownOffice.get(l.id) : null,
+    })),
   );
   const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
   const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
@@ -3968,6 +4014,7 @@ async function checkPoLines(
       unit: l.unit?.trim() || 'pcs',
       unitPrice: l.unitPrice,
       landedUnitCost: l.landedUnitCost,
+      officeBudgetLineId: officeLines[index],
     };
   });
 }
@@ -3991,6 +4038,7 @@ async function writePoLines(tx: Prisma.TransactionClient, orderId: string, lines
       amount: D(cents(l.quantity * l.unitPrice)),
       ...(l.landedUnitCost !== undefined ? { landedUnitCost: l.landedUnitCost === null || l.landedUnitCost === 0 ? null : D(l.landedUnitCost) } : {}),
       sortOrder,
+      officeBudgetLineId: l.officeBudgetLineId ?? null,
     };
     if (l.id) await tx.purchaseOrderItem.update({ where: { id: l.id }, data });
     else await tx.purchaseOrderItem.create({ data: { orderId, ...data } });

@@ -117,10 +117,12 @@ export function PurchaseRequests() {
                 ? 'Bought for a sales order — no project'
                 : r.kind === 'QUOTATION'
                   ? 'Bought ahead for a quotation — charged once it has a sales order or a project'
-                  : 'Charges a project when issued from stock'
+                  : r.kind === 'OFFICE'
+                    ? 'Bought for the office — charged to an office budget line'
+                    : 'Charges a project when issued from stock'
           }
         >
-          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : r.kind === 'SALES_ORDER' ? 'sales order' : r.kind === 'QUOTATION' ? 'quotation' : 'stock'}
+          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : r.kind === 'SALES_ORDER' ? 'sales order' : r.kind === 'QUOTATION' ? 'quotation' : r.kind === 'OFFICE' ? 'office budget' : 'stock'}
         </span>
       ),
     },
@@ -181,6 +183,7 @@ export function PurchaseRequests() {
               { value: 'DIRECT_TO_JOB', label: 'Direct to job' },
               { value: 'SALES_ORDER', label: 'For a sales order' },
               { value: 'QUOTATION', label: 'For a quotation' },
+              { value: 'OFFICE', label: 'For the office budget' },
               { value: 'STOCK_REPLENISHMENT', label: 'Stock replenishment' },
             ],
           },
@@ -217,6 +220,8 @@ interface PrItem {
   pulledQty: number;
   item: { id: string; code: string; name: string } | null;
   costCategory: { id: string; code: string; name: string } | null;
+  /** For the office budget (2026-11-27): the office line the line is charged to. */
+  officeBudgetLine?: { id: string; code: string; name: string; budget: { id: string; name: string; year: number } } | null;
 }
 
 interface PrDetail {
@@ -396,7 +401,7 @@ export function PurchaseRequestDetail() {
         amountLabel="Estimated total"
         meta={
           <>
-            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : pr.kind === 'SALES_ORDER' ? 'For a sales order' : pr.kind === 'QUOTATION' ? 'For a quotation' : 'Stock replenishment'}
+            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : pr.kind === 'SALES_ORDER' ? 'For a sales order' : pr.kind === 'QUOTATION' ? 'For a quotation' : pr.kind === 'OFFICE' ? 'For the office budget' : 'Stock replenishment'}
             {pr.job ? (
               <>
                 {' '}
@@ -598,7 +603,15 @@ export function PurchaseRequestDetail() {
               <tbody>
                 {pr.items.map((i) => (
                   <tr key={i.id}>
-                    <td>{i.costCategory?.name ?? <span className="faint">—</span>}</td>
+                    <td>
+                      {i.officeBudgetLine ? (
+                        <Link to={`/g-fin/operations-budget?year=${i.officeBudgetLine.budget.year}&budget=${i.officeBudgetLine.budget.id}&line=${i.officeBudgetLine.id}`} title={i.officeBudgetLine.budget.name}>
+                          {i.officeBudgetLine.code} {i.officeBudgetLine.name}
+                        </Link>
+                      ) : (
+                        (i.costCategory?.name ?? <span className="faint">—</span>)
+                      )}
+                    </td>
                     <td className="mono">{i.partNumber ?? (i.item ? i.item.code : '')}</td>
                     <td>
                       {i.name && i.name !== i.description ? (

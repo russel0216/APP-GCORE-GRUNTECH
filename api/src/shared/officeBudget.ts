@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { REQUEST_MONEY, requestMoney } from './requestMoney';
+import { officePurchaseDocuments, officePurchaseFigures, officePurchaseUse } from './officePurchases';
 
 /**
  * OFFICE BUDGETS (2026-11-10, the owner's call: "on Budget Request and
@@ -42,6 +43,7 @@ export interface OfficeOwn {
   cashAdvanceId?: string;
   budgetRequestId?: string;
   supplierBillId?: string;
+  purchaseRequestId?: string;
 }
 
 export interface OfficeFigures {
@@ -133,6 +135,13 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
     const m = requestMoney(i.request);
     f.released += m.cashOut * share;
     f.requested += m.waiting * share;
+  }
+  // Office purchasing (2026-11-27): requests and orders whose lines name the line.
+  for (const [id, p] of await officePurchaseFigures(lineIds, own.purchaseRequestId)) {
+    const f = at(id);
+    f.requested += p.requested;
+    f.released += p.released;
+    f.spent += p.spent;
   }
   for (const f of out.values()) {
     f.requested = cents(f.requested);
@@ -453,6 +462,7 @@ export async function officeDocuments(lineIds: string[]) {
       kind: 'cash_advance' as const, id: a.id, number: a.number, status: a.status as string, amount: num(a.amount), date: a.requestDate, what: a.purpose, who: a.requestedBy.name,
       lineId: a.officeBudgetLineId!, link: `/g-fin/cash-advances/${a.id}`,
     })),
+    ...(await officePurchaseDocuments(lineIds)),
   ];
   return rows.sort((a, b) => b.date.getTime() - a.date.getTime());
 }
@@ -470,6 +480,7 @@ export async function officeLineUse(lineIds: string[]): Promise<Map<string, numb
     prisma.cashAdvance.groupBy(by),
   ]);
   for (const g of groups.flat()) if (g.officeBudgetLineId) out.set(g.officeBudgetLineId, (out.get(g.officeBudgetLineId) ?? 0) + g._count._all);
+  for (const [id, n] of await officePurchaseUse(lineIds)) out.set(id, (out.get(id) ?? 0) + n);
   return out;
 }
 

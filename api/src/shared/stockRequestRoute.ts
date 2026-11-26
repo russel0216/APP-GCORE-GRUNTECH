@@ -26,6 +26,8 @@ import { groupKey } from './quotationGroups';
  */
 export const STOCK_LOCAL_OPTION = 'Warehouse stock — local purchase';
 export const STOCK_IMPORT_OPTION = 'Warehouse stock — imported brand';
+/** A purchase for the office budget (2026-11-27): the superior, then the Finance Manager. */
+export const OFFICE_PURCHASE_OPTION = 'Office budget purchase';
 
 /** Does any of these items sit under a product group marked imported? */
 export async function hasImportedItem(itemIds: (string | null | undefined)[]): Promise<boolean> {
@@ -47,7 +49,15 @@ export async function hasImportedItem(itemIds: (string | null | undefined)[]): P
 export async function stockRequestRoute(
   kind: string,
   itemIds: (string | null | undefined)[],
-): Promise<{ optionId: string | null; route: 'standard' | 'local' | 'imported' }> {
+): Promise<{ optionId: string | null; route: 'standard' | 'local' | 'imported' | 'office' }> {
+  if (kind === 'OFFICE') {
+    const office = await prisma.approvalWorkflow.findFirst({
+      where: { documentType: 'purchase_request', isActive: true, optionLabel: OFFICE_PURCHASE_OPTION },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    return office ? { optionId: office.id, route: 'office' } : { optionId: null, route: 'standard' };
+  }
   if (kind !== 'STOCK_REPLENISHMENT') return { optionId: null, route: 'standard' };
   const imported = await hasImportedItem(itemIds);
   const label = imported ? STOCK_IMPORT_OPTION : STOCK_LOCAL_OPTION;

@@ -620,6 +620,11 @@ export function IncomingEditor() {
                 </>
               )}
 
+              {mode === 'order' && order?.kind === 'OFFICE' ? (
+                <Field label="Received for">
+                  <div className="qe-static">Office use — charged to the office budget, never shelved</div>
+                </Field>
+              ) : (
               <Field
                 label={forProject ? 'Where did it go?' : 'Into warehouse'}
                 required={mode === 'none' || forProject}
@@ -656,6 +661,7 @@ export function IncomingEditor() {
                   ))}
                 </SearchSelect>
               </Field>
+              )}
               <Field label="Delivery receipt no.">
                 <input value={header.deliveryRefNo} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, deliveryRefNo: e.target.value }))} />
               </Field>

@@ -811,6 +811,8 @@ export function PurchaseOrderEditor() {
                       </Link>
                     ) : warehouse ? (
                       `Stock for ${warehouse.name}`
+                    ) : kind === 'OFFICE' ? (
+                      'Office budget — each line is charged to its request’s office budget line; received for office use'
                     ) : batch && kind === 'DIRECT_TO_JOB' ? (
                       'Several projects — each line is charged to its own request’s project'
                     ) : kind === 'DIRECT_TO_JOB' ? (

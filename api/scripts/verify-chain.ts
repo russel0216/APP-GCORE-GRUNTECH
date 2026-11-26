@@ -57,7 +57,8 @@ import { settlePullout } from '../src/routes/pullouts';
 import { runReorderCheck, reorderQuantity } from '../src/shared/reorder';
 import { searchTerms } from '../src/shared/itemSearch';
 import { suggestGroup } from '../src/shared/itemGroupsByBrand';
-import { stockRequestRoute, STOCK_LOCAL_OPTION, STOCK_IMPORT_OPTION } from '../src/shared/stockRequestRoute';
+import { stockRequestRoute, STOCK_LOCAL_OPTION, STOCK_IMPORT_OPTION, OFFICE_PURCHASE_OPTION } from '../src/shared/stockRequestRoute';
+import { officeFigures, officeDocuments, officeLineUse } from '../src/shared/officeBudget';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -351,6 +352,8 @@ async function cleanup() {
   });
   await prisma.purchaseOrder.deleteMany({ where: { notes: { startsWith: TAG } } });
   await prisma.purchaseRequest.deleteMany({ where: { purpose: { startsWith: TAG } } });
+  // Office budgets made for the office purchase checks (2026-11-27): after their requests and orders.
+  await prisma.officeBudget.deleteMany({ where: { name: { startsWith: TAG } } });
   // The automatic reorder's lines for this script's items, and its
   // requisitions left empty (one for the script's warehouse in full).
   await prisma.purchaseRequestItem.deleteMany({ where: { request: { autoReorder: true }, OR: [{ name: { startsWith: TAG } }, { item: { name: { startsWith: TAG } } }] } });
@@ -6698,6 +6701,7 @@ async function main() {
   }
 
   await odooMigration();
+  await officePurchasing(supplier.id);
 
   // ── 10d. Buying ahead for a quotation, and one order for several requests (2026-11-10) ──
   // The owner's calls: a purchase request may name an open quotation, through
@@ -6963,6 +6967,141 @@ async function main() {
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;
+}
+
+/**
+ * Purchasing for the OFFICE budget (2026-11-27, help tickets GT-HT-2026-0043
+ * and 0045): a purchase request whose every line names an office budget
+ * line; its order carries the lines over; the Incoming takes it for office
+ * use, never a warehouse; the office monitor counts it requested, cash out
+ * once approved, actual once received.
+ */
+async function officePurchasing(supplierId: string) {
+  console.log('\nPurchasing for the office budget');
+  const admin = await prisma.user.findFirstOrThrow({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
+  const token = signToken(admin.id, admin.email);
+  const budget = await prisma.officeBudget.create({
+    data: {
+      year: 2026,
+      name: `${TAG} OFFICE BUDGET`,
+      lines: { create: [{ code: 'Z01', name: 'OFFICE SUPPLIES', amount: 10000, sortOrder: 0 }, { code: 'Z02', name: 'OFFICE EXPENSE', amount: 5000, sortOrder: 1 }] },
+    },
+    include: { lines: { orderBy: { sortOrder: 'asc' } } },
+  });
+  const [supplies, expense] = budget.lines;
+  const route = await prisma.approvalWorkflow.create({
+    data: {
+      documentType: 'purchase_request',
+      name: `${TAG} office purchase`,
+      optionLabel: OFFICE_PURCHASE_OPTION,
+      steps: { create: [{ sequence: 1, name: 'Superior', approverType: 'SUPERVISOR' }] },
+    },
+  });
+  try {
+    const bare = await api(token, 'POST', '/purchase-requests', {
+      kind: 'OFFICE',
+      purpose: `${TAG} office paper`,
+      lines: [{ name: 'Bond paper A4', quantity: 10, unit: 'ream', estimatedCost: 250 }],
+    });
+    const made = await api(token, 'POST', '/purchase-requests', {
+      kind: 'OFFICE',
+      purpose: `${TAG} office paper`,
+      warehouseId: null,
+      lines: [
+        { name: 'Bond paper A4', quantity: 10, unit: 'ream', estimatedCost: 250, officeBudgetLineId: supplies.id },
+        { name: 'Water dispenser repair', quantity: 1, unit: 'lot', estimatedCost: 1500, nature: 'SERVICE', officeBudgetLineId: expense.id },
+      ],
+    });
+    const pr = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: String(made.body.id) }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+    check(
+      'a request for the office budget names an office budget line on every line — refused without one — and no project or warehouse',
+      bare.status === 400 &&
+        /office budget line/i.test(String(bare.body.error ?? '')) &&
+        made.status === 201 &&
+        pr.kind === 'OFFICE' &&
+        pr.jobId === null &&
+        pr.warehouseId === null &&
+        pr.items[0].officeBudgetLineId === supplies.id &&
+        pr.items[1].officeBudgetLineId === expense.id,
+      `${bare.status} ${bare.body.error}; ${made.status} ${pr.kind} ${pr.items.map((i) => i.officeBudgetLineId).join(',')}`,
+    );
+
+    const picked = await stockRequestRoute('OFFICE', [null]);
+    const seen = await api(token, 'GET', `/purchase-requests/route?amount=4000&kind=OFFICE&requestId=${pr.id}`);
+    check('it takes the office purchase route', picked.route === 'office' && picked.optionId === route.id && seen.body.stockRoute === 'office', `${picked.route} ${seen.body.stockRoute}`);
+
+    const before = (await officeFigures([supplies.id])).get(supplies.id)!;
+    await prisma.purchaseRequest.update({ where: { id: pr.id }, data: { status: 'PENDING_APPROVAL' } });
+    const asked = (await officeFigures([supplies.id])).get(supplies.id)!;
+    await prisma.purchaseRequest.update({ where: { id: pr.id }, data: { status: 'APPROVED' } });
+    const approved = (await officeFigures([supplies.id, expense.id]));
+    check(
+      'the office monitor counts a draft as nothing, a pending request as requested, an approved one as cash out at its declared value',
+      before.requested === 0 &&
+        before.released === 0 &&
+        asked.requested === 2500 &&
+        asked.released === 0 &&
+        approved.get(supplies.id)!.requested === 0 &&
+        approved.get(supplies.id)!.released === 2500 &&
+        approved.get(expense.id)!.released === 1500,
+      JSON.stringify({ before, asked, approved: [...approved.values()] }),
+    );
+
+    const ordered = await api(token, 'POST', '/purchase-orders', { requestId: pr.id, supplierId, notes: `${TAG} office order` });
+    const po = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: String(ordered.body.id) }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+    check(
+      'its purchase order is for the office budget and every line carries its request line’s office budget line',
+      ordered.status === 201 && po.kind === 'OFFICE' && po.jobId === null && po.items.length === 2 && po.items.every((i, n) => i.officeBudgetLineId === pr.items[n].officeBudgetLineId),
+      `${ordered.status} ${ordered.body.error ?? ''} ${po.kind} ${po.items.map((i) => i.officeBudgetLineId).join(',')}`,
+    );
+
+    await prisma.purchaseOrder.update({ where: { id: po.id }, data: { status: 'ISSUED' } });
+    const incoming = await api(token, 'POST', '/receivings', {
+      orderId: po.id,
+      items: [{ orderItemId: po.items[0].id, quantity: 4 }],
+    });
+    const report = incoming.status === 201 ? await prisma.receiving.findUnique({ where: { id: String(incoming.body.id) }, include: { items: true } }) : null;
+    check(
+      'the Incoming takes it for office use — no warehouse, no new item asked for — and builds no stock',
+      incoming.status === 201 && report?.warehouseId === null && (await prisma.inventoryBalance.count({ where: { itemId: { in: po.items.map((i) => i.itemId).filter((v): v is string => !!v) } } })) === 0,
+      `${incoming.status} ${incoming.body.error ?? ''} warehouse ${report?.warehouseId}`,
+    );
+    if (report) {
+      await prisma.receivingItem.deleteMany({ where: { receivingId: report.id } });
+      await prisma.receiving.delete({ where: { id: report.id } });
+    }
+
+    // Four reams received (a posted report, written as posting leaves it).
+    const posted = await prisma.receiving.create({
+      data: {
+        number: `${TAG}-RR-OFFICE`,
+        orderId: po.id,
+        status: 'RECEIVED',
+        receivedById: admin.id,
+        items: { create: [{ orderItemId: po.items[0].id, quantity: 4, unitCost: 260 }] },
+      },
+    });
+    await prisma.purchaseOrderItem.update({ where: { id: po.items[0].id }, data: { receivedQty: 4 } });
+    const after = (await officeFigures([supplies.id])).get(supplies.id)!;
+    const docs = await officeDocuments([supplies.id]);
+    const use = await officeLineUse([supplies.id]);
+    check(
+      'received, the goods are actual at what they came in at, and what is still to come stays cash out at the declared value',
+      after.spent === 1040 && after.released === 1500 && after.requested === 0,
+      JSON.stringify(after),
+    );
+    check(
+      'the office budget page lists the request and the order, and the line counts as in use',
+      docs.some((d) => d.kind === 'purchase_request' && d.id === pr.id && d.amount === 2500) &&
+        docs.some((d) => d.kind === 'purchase_order' && d.id === po.id) &&
+        (use.get(supplies.id) ?? 0) >= 2,
+      JSON.stringify(docs.map((d) => [d.kind, d.amount])) + ` use ${use.get(supplies.id)}`,
+    );
+    await prisma.receivingItem.deleteMany({ where: { receivingId: posted.id } });
+    await prisma.receiving.delete({ where: { id: posted.id } });
+  } finally {
+    await prisma.approvalWorkflow.delete({ where: { id: route.id } });
+  }
 }
 
 /**

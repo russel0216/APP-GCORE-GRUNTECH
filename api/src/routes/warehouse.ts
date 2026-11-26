@@ -428,7 +428,7 @@ receivingRoutes.get(
           /** The item's product group (the quotation's list, 2026-11-25); null where it has none. */
           productGroup: i.item ? i.item.productGroup : (matchedGroup.get(i.id) ?? null),
           /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
-          newItem: i.nature !== 'SERVICE' && !i.item && !matched.has(i.id),
+          newItem: order.kind !== 'OFFICE' && i.nature !== 'SERVICE' && !i.item && !matched.has(i.id),
           /** A service is received as "service rendered" — it enters no stock (2026-10-21). */
           nature: i.nature,
         };
@@ -918,6 +918,9 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     }
     let landing = warehouseId ?? (toSite ? null : order.warehouseId) ?? null;
     if (forProject && !landing) landing = (await siteWarehouse()).id;
+    // Bought for the OFFICE (2026-11-27): received for office use — never
+    // shelved, so it names no warehouse and files no item.
+    if (order.kind === 'OFFICE') landing = null;
     // A line the order typed without an item becomes one in the item master
     // when it reaches a warehouse — unless one already matches, it needs its
     // product group (2026-10-20). Delivered to site, it is filed without one.
