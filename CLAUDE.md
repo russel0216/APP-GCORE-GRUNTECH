@@ -790,6 +790,20 @@ advance takes the reimbursement's route). `shared/moneyRoutes.ts`.
   Cost Controller's own claim (504); verify-delivery the budget request and
   liquidation walks (239).
 
+## The overtime Excel report (2026-11-27)
+
+The owner's question: "where can I extract the overtime in Excel". Overtime ›
+⋯ › **Excel report**: `GET /overtime/report` (above `/:id`, the list's own
+`overtimeListWhere` and access, not paged, 20,000 at most, audited EXPORTED)
+and the .xlsx written in the browser by `lib/spreadsheetWrite.ts`, the
+attendance report's way. One row per filing: number, date, employee, team,
+stage (the screen's words), planned and actual times and hours, reason,
+variance note, project, budget line, the sales order or quotation referenced,
+the cost charged (never the rate or premium), filed on, **Authorised by** (the
+`overtime_prior` request's signers) and **Approved by** (the
+`overtime_request`'s), and when it was charged. The list gained a **Dates**
+filter (`from` / `to`), which the report and the paper follow.
+
 ## The owner's G-HR batch of 2026-11-13 — push 1
 
 - **Overtime is charged where the SUPERIOR says.** The filing form's project

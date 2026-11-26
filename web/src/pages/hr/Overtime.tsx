@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { APPROVER_FILTERS } from './approverFilters';
@@ -85,11 +85,83 @@ interface OtRow {
   costCategory: { id: string; name: string } | null;
 }
 
+/** A row of `GET /overtime/report`. */
+interface OtReportRow {
+  number: string;
+  date: string;
+  employeeNo: string | null;
+  name: string;
+  position: string | null;
+  team: string | null;
+  stage: string;
+  plannedStart: string;
+  plannedEnd: string;
+  estimatedHours: number;
+  actualStart: string | null;
+  actualEnd: string | null;
+  actualHours: number | null;
+  dinnerBreak: boolean;
+  reason: string;
+  varianceNote: string | null;
+  project: string | null;
+  budgetLine: string | null;
+  reference: string | null;
+  amount: number | null;
+  filedOn: string;
+  authorisedBy: string | null;
+  approvedBy: string | null;
+  postedOn: string | null;
+}
+
 export function Overtime() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [filing, setFiling] = useState(false);
   const [reload, setReload] = useState(0);
+  const toast = useToast();
+  const [params] = useSearchParams();
+
+  /**
+   * The Excel report (2026-11-27): every filing the list's filters name — the
+   * same query, read off the address — written in the browser, the attendance
+   * report's way.
+   */
+  async function excelReport() {
+    try {
+      const query: Record<string, string> = {};
+      for (const key of ['from', 'to', 'stage', 'waiting', 'reports', 'scope', 'jobId', 'employeeId']) {
+        const v = params.get(key);
+        if (v) query[key] = v;
+      }
+      const search = params.get('q');
+      if (search) query.search = search;
+      const { rows, currency } = await api.get<{ rows: OtReportRow[]; currency: string }>(`/overtime/report${qs(query)}`);
+      if (!rows.length) {
+        toast('error', 'Nothing to report for these filters');
+        return;
+      }
+      const { downloadWorkbook } = await import('../../lib/spreadsheetWrite');
+      downloadWorkbook(
+        `Overtime ${query.from ?? rows[0].date} to ${query.to ?? rows[rows.length - 1].date}.xlsx`,
+        'Overtime',
+        [
+          'Number', 'Date', 'Employee no.', 'Employee', 'Position', 'Team', 'Stage',
+          'Planned start', 'Planned end', 'Estimated hours', 'Actual start', 'Actual end', 'Actual hours', 'Dinner break',
+          'Reason', 'Variance note', 'Project', 'Budget line', 'Reference', `Cost (${currency})`,
+          'Filed on', 'Authorised by', 'Approved by', 'Charged on',
+        ],
+        rows.map((r) => [
+          r.number, r.date, r.employeeNo ?? '', r.name, r.position ?? '', r.team ?? '', r.stage,
+          r.plannedStart, r.plannedEnd, r.estimatedHours, r.actualStart ?? '', r.actualEnd ?? '', r.actualHours ?? '', r.dinnerBreak ? 'Yes' : 'No',
+          r.reason, r.varianceNote ?? '', r.project ?? '', r.budgetLine ?? '', r.reference ?? '', r.amount ?? '',
+          r.filedOn, r.authorisedBy ?? '', r.approvedBy ?? '', r.postedOn ?? '',
+        ]),
+        [16, 11, 13, 26, 22, 7, 26, 9, 9, 9, 9, 9, 9, 8, 36, 30, 34, 18, 20, 13, 11, 30, 30, 11],
+      );
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'The report could not be made');
+    }
+  }
 
   const columns: Column<OtRow>[] = [
     {
@@ -187,7 +259,12 @@ export function Overtime() {
         searchPlaceholder="Search number, reason, employee…"
         emptyTitle="No overtime filed yet"
         onRowClick={(r) => navigate(`/g-hr/overtime/${r.id}`)}
-        filters={[{ key: 'stage', label: 'Stage', options: STAGES }, ...APPROVER_FILTERS]}
+        filters={[
+          { key: 'from', toKey: 'to', label: 'Dates', type: 'dateRange' },
+          { key: 'stage', label: 'Stage', options: STAGES },
+          ...APPROVER_FILTERS,
+        ]}
+        menuItems={[{ label: 'Excel report', hint: 'Every filing under these filters, with who authorised and approved it', onSelect: excelReport }]}
         actions={
           can('ghr.overtime.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>

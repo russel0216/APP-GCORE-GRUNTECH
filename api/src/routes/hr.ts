@@ -2683,6 +2683,9 @@ async function overtimeListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
   if (stage) and.push({ stage });
   if (f.jobId) and.push({ jobId: f.jobId });
   if (f.employeeId) and.push({ employeeId: f.employeeId });
+  const from = filterDay(f.from, 'From');
+  const to = filterDay(f.to, 'To');
+  if (from || to) and.push({ date: { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) } });
   if (q.search) {
     and.push({
       OR: [
@@ -2742,6 +2745,115 @@ overtimeRoutes.get(
 );
 
 /**
+ * The overtime Excel report (2026-11-27, the owner's call: "where can I extract
+ * the overtime in excel"): every filing the list's filters name, through
+ * `overtimeListWhere` — the same visibility — not paged, 20,000 at most, with
+ * who authorised and who approved it. The sheet is written in the browser
+ * (`lib/spreadsheetWrite.ts`), the attendance report's way. The amount is the
+ * one the list shows; the hourly rate and premium never leave. Audited before
+ * the rows go out. Declared above `/:id`.
+ */
+overtimeRoutes.get(
+  '/report',
+  requireAny('ghr.overtime.view_all', 'ghr.overtime.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = await overtimeListWhere(me, q);
+    const total = await prisma.overtimeRequest.count({ where });
+    if (total > REPORT_ROWS) throw badRequest(`That is ${total.toLocaleString()} filings — narrow the dates to ${REPORT_ROWS.toLocaleString()} or fewer`);
+    const rows = await prisma.overtimeRequest.findMany({
+      where,
+      select: {
+        id: true,
+        number: true,
+        stage: true,
+        date: true,
+        plannedStart: true,
+        plannedEnd: true,
+        estimatedHours: true,
+        actualStart: true,
+        actualEnd: true,
+        actualHours: true,
+        dinnerBreak: true,
+        reason: true,
+        varianceNote: true,
+        amount: true,
+        priorApprovedAt: true,
+        postedAt: true,
+        createdAt: true,
+        employee: { select: { employeeNo: true, firstName: true, lastName: true, position: true, industry: { select: { code: true } } } },
+        job: { select: { number: true, name: true } },
+        costCategory: { select: { name: true } },
+        salesOrder: { select: { number: true } },
+        quotation: { select: { number: true } },
+      },
+      orderBy: [{ date: 'asc' }, { employee: { lastName: 'asc' } }],
+    });
+
+    // Who signed each filing, read off its approval requests (prior and actual).
+    const requests = rows.length
+      ? await prisma.approvalRequest.findMany({
+          where: { documentType: { in: ['overtime_prior', 'overtime_request'] }, documentId: { in: rows.map((r) => r.id) } },
+          select: {
+            documentType: true,
+            documentId: true,
+            createdAt: true,
+            actions: {
+              where: { action: 'APPROVED' },
+              select: { actedAt: true, approver: { select: { name: true } } },
+              orderBy: { actedAt: 'asc' },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+    const signers = new Map<string, string>();
+    for (const r of requests) {
+      // The latest request of each kind wins — a pulled-back filing's old one is history.
+      signers.set(
+        `${r.documentType}:${r.documentId}`,
+        r.actions.map((a) => `${a.approver.name} (${a.actedAt.toISOString().slice(0, 10)})`).join('; '),
+      );
+    }
+
+    await audit(
+      { entityType: 'overtime_request', entityId: 'list', action: 'EXPORTED', summary: `Exported the overtime report (${rows.length} filing(s))` },
+      req,
+    );
+    res.json({
+      currency: await companyCurrency(),
+      rows: rows.map((r) => ({
+        number: r.number,
+        date: r.date.toISOString().slice(0, 10),
+        employeeNo: r.employee.employeeNo,
+        name: `${r.employee.lastName}, ${r.employee.firstName}`,
+        position: r.employee.position,
+        team: r.employee.industry?.code ?? null,
+        stage: OT_STAGE_LABEL[r.stage],
+        plannedStart: r.plannedStart,
+        plannedEnd: r.plannedEnd,
+        estimatedHours: num(r.estimatedHours),
+        actualStart: r.actualStart,
+        actualEnd: r.actualEnd,
+        actualHours: r.actualHours == null ? null : num(r.actualHours),
+        dinnerBreak: r.dinnerBreak,
+        reason: r.reason,
+        varianceNote: r.varianceNote,
+        project: r.job ? `${r.job.number} ${r.job.name}` : null,
+        budgetLine: r.costCategory?.name ?? null,
+        reference: r.salesOrder ? `Sales order ${r.salesOrder.number}` : r.quotation ? `Quotation ${r.quotation.number}` : null,
+        amount: r.amount == null ? null : num(r.amount),
+        filedOn: r.createdAt.toISOString().slice(0, 10),
+        authorisedBy: signers.get(`overtime_prior:${r.id}`) || null,
+        approvedBy: signers.get(`overtime_request:${r.id}`) || null,
+        postedOn: r.postedAt ? r.postedAt.toISOString().slice(0, 10) : null,
+      })),
+    });
+  }),
+);
+
+/**
  * The overtime list on paper — the list as filtered (or the rows ticked),
  * through `overtimeListWhere`, so the paper is the screen it was printed
  * off. The cost is the screen's: the amount an approved filing was charged
@@ -2793,6 +2905,7 @@ overtimeRoutes.get(
       stage && `stage ${OT_STAGE_LABEL[stage]}`,
       f.jobId && `project ${job?.number ?? 'not found'}`,
       f.employeeId && `employee ${employee ? `${employee.firstName} ${employee.lastName}` : 'not found'}`,
+      rangeNamed('dated', f.from, f.to),
       (q.scope === 'mine' || (!me.isSuperAdmin && !me.permissions.has('ghr.overtime.view_all'))) && 'mine only',
       f.ids && 'the rows selected',
     ]);
