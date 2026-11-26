@@ -11,7 +11,7 @@
 
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { approversForStep, ctxOf, stepApplies, MONEY_DOCUMENTS } from './approvals';
+import { approversForStep, ctxOf, stepApplies, withCeoRule, MONEY_DOCUMENTS } from './approvals';
 import { DOCUMENT_TYPES } from './numbering';
 import { REGISTRY } from '../permissions/registry';
 import { levelsOf, LEVEL_LABELS } from './permissionLevels';
@@ -114,6 +114,8 @@ export interface WaitingRow {
   problem: Problem;
   problemText: string | null;
   fix: string | null;
+  /** A step the route no longer has, on a route still there: Resume moves it on. */
+  canResume: boolean;
 }
 
 export async function waitingDocuments(users?: Map<string, UserLite>): Promise<WaitingRow[]> {
@@ -148,13 +150,13 @@ export async function waitingDocuments(users?: Map<string, UserLite>): Promise<W
       retiredRoute: !!r.workflow && !r.workflow.isActive,
     };
     const push = (stepName: string, waitingOn: { id: string; name: string }[], problem: Problem, problemText: string | null, fix: string | null) =>
-      rows.push({ ...base, stepName, waitingOn, problem, problemText, fix });
+      rows.push({ ...base, stepName, waitingOn, problem, problemText, fix, canResume: problem === 'step_missing' });
 
     if (!r.workflow) { push('—', [], 'no_route', 'Its approval route was deleted.', 'Pull it back to draft and submit it again.'); continue; }
     const step = r.workflow.steps.find((s) => s.sequence === r.currentSequence) as StepWithRole | undefined;
-    if (!step) { push(`#${r.currentSequence}`, [], 'step_missing', 'The route was edited after it was submitted: this step no longer exists.', 'Pull it back to draft and submit it again.'); continue; }
-    const ctx = ctxOf(r);
-    if (!stepApplies(step, ctx)) { push(step.name, [], 'step_missing', 'It sits on a step that does not apply to it.', 'Pull it back to draft and submit it again.'); continue; }
+    if (!step) { push(`#${r.currentSequence}`, [], 'step_missing', 'The route was edited after it was submitted: this step no longer exists.', 'Resume it (System Administrator): it moves to the next unsigned step, or is approved if every step is signed. Or pull it back to draft and submit again.'); continue; }
+    const ctx = await withCeoRule(ctxOf(r), r.requesterId);
+    if (!stepApplies(step, ctx)) { push(step.name, [], 'step_missing', 'It sits on a step that does not apply to it.', 'Resume it (System Administrator), or pull it back to draft and submit again.'); continue; }
     let ids: string[];
     try {
       ids = await approversForStep(step, r.requesterId, prisma, ctx);

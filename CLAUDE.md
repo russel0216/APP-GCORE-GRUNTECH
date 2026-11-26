@@ -671,6 +671,34 @@ four databases and four copies of "customer".
       API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
       old `?payment=` link redirects there.
 
+## The reimbursement page's lines, the CEO's own money, and back to draft (2026-11-26)
+
+The owner's five on the reimbursement, and "on return or reject don't make
+them start from scratch".
+
+- **Lines**: "+ Add line" always adds one (it used to drop blank lines first,
+  so only one blank could stand) and "+ Add 5 lines" five, each taking the
+  last line's date; each line has a grip (drag it, or arrow keys on it) and
+  ⧉ Duplicate beside ✕ (`ClaimEditor.tsx`). The Company / store, Item and
+  Kind boxes are `MemoryInput`s on `GET /expense-claims/suggest/fields?field=
+  vendor|description|category` (above `/:id`, the claims the caller may read).
+- **The CEO / President's own money document goes to finance alone**:
+  `withCeoRule(ctx, requesterId)` in `shared/approvals.ts` sets `ctx.ceoOwn`
+  for a money document whose requester holds `ceo`, and `stepApplies` then
+  passes over every SUPERVISOR, PROJECT_MANAGER(S) and HR step and every ROLE
+  step naming `CEO_PASSES_ROLES` (Team Leader, Technical / Sales / Aftermarket
+  Manager, Back Support, Cost Controller, CEO, Executive). His reimbursement,
+  budget request and cash advance go Finance Checker › Finance Manager; a
+  liquidation Accounting staff › Accounting Manager › Finance Manager. Read at
+  route preview, submit, act, history and the paper's slots; a request he
+  submitted before waits on a step that no longer applies — Approval Health
+  says to pull it back and submit again.
+- **Returned or rejected, a reimbursement, cash advance or budget / travel
+  request goes back to DRAFT** (`settleExpense`, `settleAdvance`,
+  `settleBudgetRequest`), its lines kept and the approver's word on the page
+  (`DecisionNote`); only a cancel closes it. REJECTED stays for what was
+  closed before.
+
 ## The money routes without the CEO (2026-11-26)
 
 The owner's call: "they don't want Carter Gasiong to approve budget request,

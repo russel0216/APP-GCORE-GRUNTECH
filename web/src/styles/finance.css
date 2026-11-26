@@ -131,6 +131,19 @@
   gap: var(--s-1);
 }
 
+/* A reimbursement line's own tools (2026-11-26): drag by the grip, duplicate, remove. */
+.line-tools {
+  display: flex;
+  gap: var(--s-1);
+}
+.line-grip {
+  cursor: grab;
+  color: var(--muted);
+}
+tr.line-drop-target > td {
+  box-shadow: inset 0 2px 0 var(--brand-purple);
+}
+
 /* Office Budget (2026-11-10): the line's code is a short box beside its name. */
 .ob-code {
   width: 6rem;

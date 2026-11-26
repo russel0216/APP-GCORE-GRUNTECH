@@ -4,6 +4,8 @@ import { api } from '../../lib/api';
 import { ErrorBox, Loading } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { PersonSelect, usePeople } from '../../components/People';
+import { useConfirm } from '../../components/Confirm';
+import { useAuth } from '../../lib/auth';
 
 /*
  * Admin › Approval Health (2026-11-26, the owner's call: "a better
@@ -18,7 +20,7 @@ interface WaitingRow {
   requester: { id: string; name: string };
   steps: { sequence: number; name: string; state: 'done' | 'current' | 'next' }[];
   stepName: string; waitingOn: { id: string; name: string }[]; days: number;
-  workflowName: string | null; retiredRoute: boolean; problem: Problem; problemText: string | null; fix: string | null;
+  workflowName: string | null; retiredRoute: boolean; problem: Problem; problemText: string | null; fix: string | null; canResume: boolean;
 }
 interface RouteStep { sequence: number; name: string; rule: string; holders: { id: string; name: string; team: string | null }[]; waiting: number; problem: string | null }
 interface RouteCard {
@@ -116,7 +118,7 @@ export function ApprovalHealth() {
             </div>
           </div>
 
-          {view === 'waiting' && <WaitingView rows={data.waiting} onPerson={(id) => go('person', { person: id })} />}
+          {view === 'waiting' && <WaitingView rows={data.waiting} onPerson={(id) => go('person', { person: id })} onChanged={() => void load()} />}
           {view === 'routes' && <RoutesView routes={data.routes} onPerson={(id) => go('person', { person: id })} />}
           {view === 'people' && <PeopleView setup={data.setup} onPerson={(id) => go('person', { person: id })} />}
           {view === 'person' && <PersonView />}
@@ -147,7 +149,21 @@ function ProblemBadge({ problem }: { problem: Problem }) {
   return <span className={`badge ${problem === 'slow' ? 'warn' : 'danger'}`}>{PROBLEM_WORDS[problem]}</span>;
 }
 
-function WaitingView({ rows, onPerson }: { rows: WaitingRow[]; onPerson: (id: string) => void }) {
+function WaitingView({ rows, onPerson, onChanged }: { rows: WaitingRow[]; onPerson: (id: string) => void; onChanged: () => void }) {
+  const { me } = useAuth();
+  const isSuper = me?.user.isSuperAdmin ?? false;
+  const confirm = useConfirm();
+  const resume = (r: WaitingRow) =>
+    confirm.ask({
+      title: `Resume ${r.number}?`,
+      body: `Its route no longer has the step it was waiting at. It moves to the first step not yet signed and those approvers are told — or, if every step is signed, it is approved and goes on as if the last approver had signed. Recorded on its history.`,
+      confirmLabel: 'Resume',
+      tone: 'primary',
+      onConfirm: async () => {
+        await api.post(`/approval-health/resume/${encodeURIComponent(r.requestId)}`, {});
+        onChanged();
+      },
+    });
   const [params, setParams] = useSearchParams();
   const show = params.get('show') ?? 'all';
   const type = params.get('type') ?? '';
@@ -164,6 +180,8 @@ function WaitingView({ rows, onPerson }: { rows: WaitingRow[]; onPerson: (id: st
     .sort((a, b) => rank(a) - rank(b) || b.days - a.days);
 
   return (
+    <div className="stack">
+    {confirm.bar}
     <section className="card">
       <div className="card-head">
         <h2 className="card-title">Waiting documents</h2>
@@ -229,6 +247,11 @@ function WaitingView({ rows, onPerson }: { rows: WaitingRow[]; onPerson: (id: st
                   <td>
                     {r.problemText && <div>{r.problemText}</div>}
                     {r.fix && <div className="ah-fix">{r.fix}</div>}
+                    {r.canResume && isSuper && (
+                      <button type="button" className="btn btn-sm btn-primary" onClick={() => resume(r)}>
+                        Resume
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -237,6 +260,7 @@ function WaitingView({ rows, onPerson }: { rows: WaitingRow[]; onPerson: (id: st
         </div>
       )}
     </section>
+    </div>
   );
 }
 const rank = (r: WaitingRow) => (r.problem && r.problem !== 'slow' ? 0 : r.problem === 'slow' ? 1 : 2);

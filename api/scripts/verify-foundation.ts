@@ -65,6 +65,7 @@ import {
   contactOf,
   contactsOf,
   PROJECT_MANAGER_FALLBACK_ROLE,
+  resumeStranded,
 } from '../src/shared/approvals';
 import {
   renderDocument,
@@ -1351,6 +1352,43 @@ async function main() {
     'a return signs nothing more',
     (await prisma.approvalAction.count({ where: { requestId: returnedCo.id } })) === 1 &&
       (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: returnedCo.id } })).status === 'CANCELLED',
+  );
+
+  // ── A request stranded by a route edit is resumed (2026-11-26) ─────────────
+  // Four reimbursements on live waited at a step an edit had removed, with
+  // every remaining step signed and nobody able to act. resumeStranded moves
+  // such a request to the next unsigned step, or approves it.
+  console.log('\nStranded requests');
+  const strandSteps = [
+    { sequence: 1, name: 'Reviewer', approverType: 'ROLE' as const, roleId: roleA.id },
+    { sequence: 2, name: 'Removed later', approverType: 'ROLE' as const, roleId: roleB.id },
+    { sequence: 3, name: 'Approver', approverType: 'ROLE' as const, roleId: roleB.id },
+  ];
+  const strandFlow = await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_strand_doc`, name: 'Verify — stranded', steps: { create: strandSteps } },
+  });
+  let strandSettled = 0;
+  onApprovalSettled(`${TAG}_strand_doc`, async (_r, outcome) => {
+    if (outcome === 'APPROVED') strandSettled++;
+  });
+  const strandA = await submitForApproval({ documentType: `${TAG}_strand_doc`, documentId: `${TAG}-strand-a`, subject: `${SUBJECT} stranded A`, requesterId: signer.id });
+  const strandB = await submitForApproval({ documentType: `${TAG}_strand_doc`, documentId: `${TAG}-strand-b`, subject: `${SUBJECT} stranded B`, requesterId: signer.id });
+  await act({ requestId: strandA.id, userId: reviewer.id, action: 'APPROVED' });
+  await act({ requestId: strandB.id, userId: reviewer.id, action: 'APPROVED' });
+  const refusedLive = await resumeStranded(strandA.id, reviewer.id).then(() => 'resumed', (e: Error) => e.message);
+  check('a request at a step its route still has is not "resumed"', /not stuck/.test(refusedLive), refusedLive);
+  // The edit as it used to strand them: step 2 gone while both wait at it.
+  await prisma.approvalStep.deleteMany({ where: { workflowId: strandFlow.id, sequence: 2 } });
+  const resumedA = await resumeStranded(strandA.id, reviewer.id);
+  check('resumed, a request whose removed step has a later one moves to it', resumedA.status === 'PENDING' && resumedA.currentSequence === 3, `${resumedA.status} @ ${resumedA.currentSequence}`);
+  await act({ requestId: strandA.id, userId: approverB.id, action: 'APPROVED' });
+  check('…and its approver there decides it as ever', (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: strandA.id } })).status === 'APPROVED');
+  await prisma.approvalStep.deleteMany({ where: { workflowId: strandFlow.id, sequence: 3 } });
+  const resumedB = await resumeStranded(strandB.id, reviewer.id);
+  check(
+    'resumed with every remaining step signed, it is approved and its module hears of it',
+    resumedB.status === 'APPROVED' && strandSettled === 2,
+    `${resumedB.status}, settled ${strandSettled}`,
   );
 
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────

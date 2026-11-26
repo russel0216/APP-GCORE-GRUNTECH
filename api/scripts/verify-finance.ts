@@ -1488,7 +1488,8 @@ async function main() {
     b2Approvers.join(','),
   );
   await settle(b2Request.id, 'REJECTED');
-  check('rejected, it is REJECTED and owes nothing', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b2.id } })).status === 'REJECTED');
+  // Back to draft, never closed (2026-11-26): corrected and sent again.
+  check('rejected, it goes back to DRAFT and owes nothing', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b2.id } })).status === 'DRAFT');
 
   // (3) Released in one voucher, on the request's own deadline.
   const b1ReleaseDate = dayKey(new Date('2026-04-01'));
@@ -2967,8 +2968,9 @@ async function main() {
     );
     check('every print is on the claim’s trail as EXPORTED', (await exportsOf('expense_claim', pId)) === 4);
 
-    // Rejected at its first step: nobody signed, so only the claimant's line
-    // is dated — never "Pending" under the very step that refused it.
+    // Rejected at its first step: it goes back to DRAFT (2026-11-26, the
+    // owner's call — never start from scratch), so its paper is a draft's
+    // again: the claimant dated, the route a resubmission would take Pending.
     const rClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} refused on paper`, lines: [mLine('Parking', 180)] });
     const rId = String(rClaim.body.id ?? '');
     const rSubmit = await eng('POST', `/expense-claims/${rId}/submit`);
@@ -2978,16 +2980,15 @@ async function main() {
     const rPaper = await eng('GET', `/expense-claims/${rId}/pdf`);
     const rText = rPaper.bytes ? pdfText(rPaper.bytes) : '';
     check(
-      'a rejected claim prints PREPARED BY alone, dated — no step, nothing "Pending"',
+      'a rejected claim goes back to draft, its receipts kept, its paper a draft\'s',
       rClaim.status === 201 &&
         rSubmit.status === 200 &&
         rSteps.length > 0 &&
-        (await prisma.expenseClaim.findUnique({ where: { id: rId } }))?.status === 'REJECTED' &&
+        (await prisma.expenseClaim.findUnique({ where: { id: rId } }))?.status === 'DRAFT' &&
+        (await prisma.expenseClaimLine.count({ where: { claimId: rId } })) === 1 &&
         flat(rText).includes('PREPARED BY') &&
-        rSteps.every((st) => !flat(rText).includes(st)) &&
         signedCount(rText) === 1 &&
-        pendingCount(rText) === 0 &&
-        rText.includes('Rejected') &&
+        pendingCount(rText) > 0 &&
         hasLine(rText, 'Claimed') &&
         !rText.includes('Still owed'),
       `${rClaim.status} ${rSubmit.status} · ${signedCount(rText)} signed, ${pendingCount(rText)} pending`,
@@ -4633,6 +4634,16 @@ async function main() {
       'the Cost Controller’s own claim: her step goes to the Finance Manager, never up to the CEO she reports to',
       noCeo(ccOwn) && ccOwn!.steps.find((st) => st.name === 'Cost Controller')?.approvers.some((a) => a.id === finMgr.id) === true,
       JSON.stringify(ccOwn?.steps.map((st) => `${st.name}=${st.approvers.map((a) => a.name).join('/')}`)),
+    );
+    // The CEO / President's own money (2026-11-26, the owner's call: "on
+    // Carter's request it should only route to Dina and Erwen").
+    const ceoRmb = await routePreview('expense', 500, ceoUser.id, null, { documentType: 'expense', jobIds: [job.id] });
+    const ceoBr = await routePreview('budget_request', 500, ceoUser.id, null, { documentType: 'budget_request', jobIds: [job.id] });
+    check(
+      'the CEO / President’s own reimbursement and budget request go to the Finance Checker and the Finance Manager alone',
+      [ceoRmb, ceoBr].every((r) => JSON.stringify(r?.steps.map((st) => st.name)) === JSON.stringify(['Finance Checker', 'Finance Manager'])) &&
+        ceoRmb!.steps[1].approvers.some((a) => a.id === finMgr.id),
+      JSON.stringify([ceoRmb, ceoBr].map((r) => r?.steps.map((st) => `${st.name}=${st.approvers.map((a) => a.name).join('/')}`))),
     );
 
     const stageOf = async () =>

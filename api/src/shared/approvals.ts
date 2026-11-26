@@ -176,6 +176,12 @@ export interface ApprovalContext {
   requestId?: string | null;
   /** The document's type — a money document's held steps go up (`MONEY_DOCUMENTS`). */
   documentType?: string | null;
+  /**
+   * The CEO / President's own money document (`withCeoRule`, 2026-11-26): the
+   * steps above finance are passed over — the roles named here, and every
+   * Team Leader, project and HR step — so it goes to finance alone.
+   */
+  ceoOwn?: { dropRoleIds: string[] } | null;
 }
 
 /**
@@ -205,8 +211,41 @@ export const ctxOf = (r: { id?: string; jobId: string | null; projectManagerId?:
  * passed over when the document charges no project (an office-only claim).
  * Every other step always applies.
  */
-export const stepApplies = (step: Pick<ApprovalStep, 'approverType'>, ctx: ApprovalContext): boolean =>
-  step.approverType !== 'PROJECT_MANAGERS' || (ctx.jobIds?.length ?? 0) > 0;
+export const stepApplies = (step: Pick<ApprovalStep, 'approverType'> & { roleId?: string | null }, ctx: ApprovalContext): boolean => {
+  if (step.approverType === 'PROJECT_MANAGERS' && !(ctx.jobIds?.length ?? 0)) return false;
+  if (ctx.ceoOwn) {
+    if (['SUPERVISOR', 'PROJECT_MANAGER', 'PROJECT_MANAGERS', 'HR'].includes(step.approverType)) return false;
+    if (step.roleId && ctx.ceoOwn.dropRoleIds.includes(step.roleId)) return false;
+  }
+  return true;
+};
+
+/**
+ * The roles a CEO / President's own money document passes over (2026-11-26,
+ * the owner's call on his own reimbursement, which listed every Team Leader
+ * and the Cost Controller: "on Carter's request it should only route to Dina
+ * and Erwen"). Nobody below him signs off his money; finance checks it — the
+ * Finance Checker, the accounting staff on a liquidation, the Finance Manager.
+ */
+export const CEO_PASSES_ROLES = [
+  'team_leader',
+  'technical_manager',
+  'sales_manager',
+  'service_manager',
+  'back_support',
+  'cost_controller',
+  'ceo',
+  'executive',
+];
+
+/** `ctx` with `ceoOwn` set when the requester of a money document holds CEO / President. */
+export async function withCeoRule(ctx: ApprovalContext, requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<ApprovalContext> {
+  if (!isMoney(ctx) || ctx.ceoOwn) return ctx;
+  const ceo = await tx.userRole.findFirst({ where: { userId: requesterId, role: { key: 'ceo' } }, select: { userId: true } });
+  if (!ceo) return ctx;
+  const roles = await tx.role.findMany({ where: { key: { in: CEO_PASSES_ROLES } }, select: { id: true } });
+  return { ...ctx, ceoOwn: { dropRoleIds: roles.map((r) => r.id) } };
+}
 
 /**
  * The groups a PROJECT_MANAGERS step waits on (2026-11-11): one per project
@@ -861,7 +900,7 @@ export async function routePreview(
 ): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; roleId: string | null; held: boolean; approvers: StepPerson[] }[] } | null> {
   const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null, requesterId });
   if (!workflow) return null;
-  ctx = { ...ctx, documentType };
+  ctx = await withCeoRule({ ...ctx, documentType }, requesterId);
   // A step the preparer holds on a route that lets them sign is THEIRS: it is
   // signed at submit, so it names them alone (`held`).
   const held = await heldSequences(workflow, requesterId, prisma, ctx);
@@ -1009,7 +1048,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const submitCtx: ApprovalContext = {
+  let submitCtx: ApprovalContext = {
     documentType: input.documentType,
     jobId: input.jobId ?? null,
     projectManagerId: input.projectManagerId ?? null,
@@ -1017,6 +1056,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
     teamId: input.teamId ?? null,
     jobIds: input.jobIds ?? [],
   };
+  submitCtx = await withCeoRule(submitCtx, input.requesterId);
   const held = await heldSequences(workflow, input.requesterId, prisma, submitCtx);
   // A step that does not apply (no project to agree to) is passed over.
   const open = workflow.steps.filter((st) => !held.has(st.sequence) && stepApplies(st, submitCtx));
@@ -1197,7 +1237,7 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     ),
   );
   const steps = request.workflow!.steps;
-  const actCtx = ctxOf(request);
+  const actCtx = await withCeoRule(ctxOf(request), request.requesterId);
   const later = steps
     .slice(steps.findIndex((s) => s.sequence === step.sequence) + 1)
     .filter((s) => !signed.has(s.sequence) && stepApplies(s, actCtx));
@@ -1321,6 +1361,69 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     await emitSettled(settled, approved ? 'APPROVED' : 'REJECTED');
   }
 
+  return settled;
+}
+
+// ── Resuming a request whose step was removed ─────────────────────────────────
+
+/**
+ * A request waiting at a step its route no longer has (2026-11-26, the
+ * owner's call: four reimbursements, every remaining step signed, stuck at a
+ * step an edit had removed). The engine refuses to act on a missing step, so
+ * nobody could move them. This moves the request to the first step of its
+ * route still unsigned (that step's approvers are told), or — every step
+ * signed — closes it APPROVED and lets the module's subscriber apply it, as
+ * the last signature would have. A system administrator's act, audited on the
+ * document; never on a request whose current step exists.
+ */
+export async function resumeStranded(requestId: string, actorId: string): Promise<ApprovalRequest> {
+  const request = await prisma.approvalRequest.findUnique({
+    where: { id: requestId },
+    include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+  });
+  if (!request) throw notFound('Approval request not found');
+  if (request.status !== 'PENDING') throw badRequest('This request is no longer waiting for a decision');
+  if (!request.workflow) throw badRequest('Its route was deleted — pull the document back to draft and submit it again');
+  const ctx = ctxOf(request);
+  const current = request.workflow.steps.find((s) => s.sequence === request.currentSequence);
+  if (current && stepApplies(current, ctx)) throw badRequest('This request is at a step its route still has — it is waiting on its approvers, not stuck');
+
+  const signed = new Set(
+    (await prisma.approvalAction.findMany({ where: { requestId, action: 'APPROVED' }, select: { sequence: true } })).map((a) => a.sequence),
+  );
+  const next = request.workflow.steps.find((s) => !signed.has(s.sequence) && stepApplies(s, ctx));
+  const at = new Date();
+  const claimed = await prisma.approvalRequest.updateMany({
+    where: { id: requestId, status: 'PENDING', currentSequence: request.currentSequence },
+    data: next ? { currentSequence: next.sequence } : { status: 'APPROVED', closedAt: at },
+  });
+  if (!claimed.count) throw badRequest('This request changed a moment ago — reload to see where it stands');
+  const settled = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: requestId } });
+
+  const actor = await prisma.user.findUnique({ where: { id: actorId }, select: { name: true } });
+  await audit({
+    entityType: request.documentType,
+    entityId: request.documentId,
+    action: next ? 'UPDATED' : 'APPROVED',
+    summary: next
+      ? `Approval resumed by ${actor?.name ?? 'an administrator'}: step ${request.currentSequence} is no longer on its route — moved to step ${next.sequence} (${next.name})`
+      : `Approval resumed by ${actor?.name ?? 'an administrator'}: step ${request.currentSequence} is no longer on its route and every remaining step was signed — approved`,
+    actorId,
+  });
+
+  await clearApprovalBells(settled.link, at, prisma);
+  if (next) {
+    await notifyCurrentStep(settled);
+  } else {
+    await notify({
+      userId: settled.requesterId,
+      type: 'approval.approved',
+      title: `Approved: ${settled.subject}`,
+      body: settled.documentNumber ?? undefined,
+      link: settled.link ?? undefined,
+    });
+    await emitSettled(settled, 'APPROVED');
+  }
   return settled;
 }
 
@@ -1660,7 +1763,7 @@ export async function historyFor(documentType: string, documentId: string) {
   return Promise.all(
     named.map(async (r) => {
       if (r.status !== 'PENDING' || !r.workflow) return r;
-      const rctx = ctxOf(r);
+      const rctx = await withCeoRule(ctxOf(r), r.requesterId);
       // A project agreement partly given is still open at its step.
       const taken = new Set(r.actions.filter((a) => a.sequence !== r.currentSequence).map((a) => a.sequence));
       const steps = await Promise.all(
@@ -1927,7 +2030,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
   }
   if (!request) return [];
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
-  const reqCtx = ctxOf(request);
+  const reqCtx = await withCeoRule(ctxOf(request), request.requesterId);
   const signedSlot = (st: ApprovalStep, a: (typeof request.actions)[number]): ApprovalSlot => ({
     step: st.name,
     stepRoleId: st.roleId,

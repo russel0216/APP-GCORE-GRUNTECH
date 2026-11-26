@@ -673,12 +673,13 @@ export const settleAdvance = async (approval: ApprovalRequest, outcome: Approval
   if (advance.status !== 'PENDING_APPROVAL') return;
 
   if (outcome !== 'APPROVED') {
-    await prisma.cashAdvance.update({ where: { id: advance.id }, data: { status: 'REJECTED' } });
+    // Back to DRAFT, never closed (2026-11-26, the owner's call): corrected and sent again.
+    await prisma.cashAdvance.update({ where: { id: advance.id }, data: { status: 'DRAFT' } });
     await audit({
       entityType: 'cash_advance',
       entityId: advance.id,
       action: 'REJECTED',
-      summary: `${advance.number} rejected — nothing released`,
+      summary: `${advance.number} sent back to draft — nothing released`,
     });
     return;
   }

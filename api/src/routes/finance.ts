@@ -1,3 +1,4 @@
+import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { claimRouteOption } from '../shared/moneyRoutes';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -3484,6 +3485,36 @@ expenseRoutes.get(
   }),
 );
 
+/**
+ * What was typed before in a receipt line's boxes (2026-11-26, the owner's
+ * call: "Company should store every entry so that it will suggest the next
+ * time … also the other inputs") — the company / store, the item and the
+ * kind, values only, from the claims the caller may read, newest first
+ * (`shared/memory.ts`). Above `/:id`.
+ */
+const CLAIM_MEMORY_FIELDS = ['vendor', 'description', 'category'] as const;
+expenseRoutes.get(
+  '/suggest/fields',
+  requireAny('gfin.expenses.create', 'gfin.expenses.edit_own', 'gfin.expenses.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const field = String(req.query.field ?? '') as (typeof CLAIM_MEMORY_FIELDS)[number];
+    if (!CLAIM_MEMORY_FIELDS.includes(field)) throw badRequest(`Field is one of ${CLAIM_MEMORY_FIELDS.join(', ')}`);
+    const q = memoryTerm(req.query.q);
+    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all');
+    const rows = await prisma.expenseClaimLine.findMany({
+      where: {
+        [field]: { not: '', ...(q ? { contains: q, mode: 'insensitive' as const } : {}) },
+        ...(onlyOwn ? { claim: { claimedById: { in: visibleOwners(me, 'gfin', 'expenses') } } } : {}),
+      },
+      select: { vendor: true, description: true, category: true },
+      orderBy: { claim: { updatedAt: 'desc' } },
+      take: MEMORY_SCAN,
+    });
+    res.json(distinctTexts(rows.map((r) => r[field]), q));
+  }),
+);
+
 expenseRoutes.get(
   '/chargeable',
   requireAny('gfin.expenses.create', 'gfin.cash_advances.create'),
@@ -4356,14 +4387,17 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
   if (outcome !== 'APPROVED') {
     const claimed = await prisma.expenseClaim.updateMany({
       where: { id: claim.id, status: 'PENDING_APPROVAL' },
-      data: { status: 'REJECTED' },
+      // Returned or rejected, it goes back to DRAFT (2026-11-26, the owner's
+      // call: "don't make them start from scratch") — the receipts stay, the
+      // approver's word shows on the page, and it is corrected and sent again.
+      data: { status: 'DRAFT' },
     });
     if (!claimed.count) return claimNotApplied(claim.id, outcome);
     await audit({
       entityType: 'expense_claim',
       entityId: claim.id,
       action: 'REJECTED',
-      summary: `${claim.number} rejected — nothing posted, nothing reimbursable`,
+      summary: `${claim.number} sent back to draft — nothing posted, nothing reimbursable`,
     });
     return;
   }

@@ -1248,7 +1248,7 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
   const forWhat = sourceOf(request)?.label.replace(/ — .*$/, '') ?? '';
   const claimed = await prisma.budgetRequest.updateMany({
     where: { id: request.id, status: 'PENDING_APPROVAL' },
-    data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date() } : { status: 'REJECTED' },
+    data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date() } : { status: 'DRAFT' },
   });
   if (!claimed.count) {
     await audit({
@@ -1261,7 +1261,7 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
   }
 
   if (outcome !== 'APPROVED') {
-    await audit({ entityType: 'budget_request', entityId: request.id, action: 'REJECTED', summary: `${request.number} rejected — nothing released` });
+    await audit({ entityType: 'budget_request', entityId: request.id, action: 'REJECTED', summary: `${request.number} sent back to draft — nothing released` });
     return;
   }
 

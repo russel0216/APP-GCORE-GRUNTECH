@@ -12,6 +12,7 @@ import type { Claim } from './Expenses';
 import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
 import { ChargeCell, chargeBody, chargeKey, chargeOf, type LineCharge } from '../../components/LineCharge';
 import { SearchSelect } from '../../components/SearchSelect';
+import { MemoryInput } from '../../components/MemoryInput';
 
 /**
  * The reimbursement as a PAGE (2026-10-19, the owner's call: "do the same for
@@ -276,6 +277,28 @@ export function ClaimEditor() {
       const rest = ls.filter((l) => l.key !== key);
       return rest.length ? rest : [blankLine(today)];
     });
+  // Several blank lines at once, a line copied under itself, a line moved
+  // (2026-11-26, the owner's call). A new line takes the last line's date.
+  const addLines = (n: number) =>
+    setLines((ls) => [...ls, ...Array.from({ length: n }, () => blankLine(ls[ls.length - 1]?.spentOn || today))]);
+  const duplicateLine = (key: string) =>
+    setLines((ls) => {
+      const at = ls.findIndex((l) => l.key === key);
+      if (at < 0) return ls;
+      const copy = { ...ls[at], key: newKey() };
+      return [...ls.slice(0, at + 1), copy, ...ls.slice(at + 1)];
+    });
+  const moveLine = (key: string, to: number) =>
+    setLines((ls) => {
+      const from = ls.findIndex((l) => l.key === key);
+      if (from < 0 || to < 0 || to >= ls.length || from === to) return ls;
+      const next = [...ls];
+      const [line] = next.splice(from, 1);
+      next.splice(to, 0, line);
+      return next;
+    });
+  const [grab, setGrab] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
 
   const lineProblem = (l: Line): string | null => {
     if (isBlank(l)) return null;
@@ -545,13 +568,14 @@ export function ClaimEditor() {
               <table className="data">
                 <thead>
                   <tr>
+                    <th aria-label="Move" />
                     <th>#</th>
                     <th>Date</th>
                     <th>Company / receipt</th>
                     <th>Item / purpose</th>
                     {perLine && <th>Charged to</th>}
                     <th className="right">Amount</th>
-                    <th aria-label="Remove" />
+                    <th aria-label="Duplicate or remove" />
                   </tr>
                 </thead>
                 <tbody>
@@ -559,14 +583,64 @@ export function ClaimEditor() {
                     const problem = attempted ? lineProblem(l) : null;
                     const noReceipt = !isBlank(l) && l.description.trim() && !l.receiptNo.trim() && !l.perDiem;
                     return (
-                      <tr key={l.key}>
+                      <tr
+                        key={l.key}
+                        draggable={grab === l.key}
+                        className={dragOver === l.key && grab && grab !== l.key ? 'line-drop-target' : undefined}
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', l.key);
+                        }}
+                        onDragOver={(e) => {
+                          if (!grab) return;
+                          e.preventDefault();
+                          if (dragOver !== l.key) setDragOver(l.key);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          if (grab) moveLine(grab, i);
+                          setGrab(null);
+                          setDragOver(null);
+                        }}
+                        onDragEnd={() => {
+                          setGrab(null);
+                          setDragOver(null);
+                        }}
+                      >
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-icon line-grip"
+                            aria-label={`Move line ${i + 1}: drag, or use the up and down arrow keys`}
+                            title="Drag to move (or arrow keys)"
+                            onPointerDown={() => setGrab(l.key)}
+                            onPointerUp={() => setGrab(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                moveLine(l.key, i + (e.key === 'ArrowUp' ? -1 : 1));
+                              }
+                            }}
+                          >
+                            ⋮⋮
+                          </button>
+                        </td>
                         <td className="mono">{i + 1}</td>
                         <td>
                           <input type="date" aria-label={`Line ${i + 1} date`} value={l.spentOn} onChange={(e) => setLine(l.key, { spentOn: e.target.value })} />
                         </td>
                         <td>
                           <div className="fin-line-stack">
-                            <input aria-label={`Line ${i + 1} company`} value={l.vendor} maxLength={200} placeholder="Company / store" onChange={(e) => setLine(l.key, { vendor: e.target.value })} />
+                            <MemoryInput
+                              source="/expense-claims/suggest/fields"
+                              field="vendor"
+                              minChars={0}
+                              aria-label={`Line ${i + 1} company`}
+                              value={l.vendor}
+                              maxLength={200}
+                              placeholder="Company / store"
+                              onChange={(e) => setLine(l.key, { vendor: e.target.value })}
+                            />
                             <input
                               aria-label={`Line ${i + 1} receipt number`}
                               aria-invalid={(attempted && noReceipt) || undefined}
@@ -582,14 +656,25 @@ export function ClaimEditor() {
                         </td>
                         <td>
                           <div className="fin-line-stack">
-                            <input
+                            <MemoryInput
+                              source="/expense-claims/suggest/fields"
+                              field="description"
                               aria-label={`Line ${i + 1} item or purpose`}
                               value={l.description}
                               maxLength={500}
                               placeholder="Item bought, or what it was for"
                               onChange={(e) => setLine(l.key, { description: e.target.value })}
                             />
-                            <input aria-label={`Line ${i + 1} kind`} value={l.category} maxLength={100} placeholder="Kind: fare, meals, materials…" onChange={(e) => setLine(l.key, { category: e.target.value })} />
+                            <MemoryInput
+                              source="/expense-claims/suggest/fields"
+                              field="category"
+                              minChars={0}
+                              aria-label={`Line ${i + 1} kind`}
+                              value={l.category}
+                              maxLength={100}
+                              placeholder="Kind: fare, meals, materials…"
+                              onChange={(e) => setLine(l.key, { category: e.target.value })}
+                            />
                           </div>
                           {problem && <div className="field-error">{problem}</div>}
                         </td>
@@ -651,9 +736,14 @@ export function ClaimEditor() {
                           </div>
                         </td>
                         <td>
-                          <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
-                            ✕
-                          </button>
+                          <div className="line-tools">
+                            <button type="button" className="btn btn-sm btn-icon" aria-label={`Duplicate line ${i + 1}`} title="Duplicate" onClick={() => duplicateLine(l.key)}>
+                              ⧉
+                            </button>
+                            <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
+                              ✕
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -662,8 +752,11 @@ export function ClaimEditor() {
               </table>
             </div>
             <div className="line-foot">
-              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(today)])}>
+              <button type="button" className="btn btn-sm" onClick={() => addLines(1)}>
                 + Add line
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => addLines(5)}>
+                + Add 5 lines
               </button>
             </div>
             {missingReceipts > 0 && (

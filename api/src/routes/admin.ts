@@ -586,6 +586,25 @@ workflowRoutes.put(
     await checkAlsoRoles(body.steps);
     const alsoBefore = new Map(existing.steps.map((st) => [st.sequence, st.alsoRoleIds]));
 
+    // An edit never strands a document (2026-11-26: four reimbursements were
+    // left waiting at a step the edit removed, with nobody able to act). A
+    // document waiting at a step number the new route no longer has keeps the
+    // old route until it finishes, is pulled back, or is resumed on Admin ›
+    // Approval Health.
+    const kept = new Set(body.steps.map((s) => s.sequence));
+    const stranded = await prisma.approvalRequest.findMany({
+      where: { workflowId: req.params.id, status: 'PENDING', currentSequence: { notIn: [...kept] } },
+      select: { documentNumber: true, documentId: true, currentSequence: true },
+      take: 20,
+    });
+    if (stranded.length) {
+      const names = stranded.map((r) => `${r.documentNumber ?? r.documentId} (step ${r.currentSequence})`).join(', ');
+      throw badRequest(
+        `This edit removes a step that ${stranded.length === 20 ? 'at least 20 documents are' : stranded.length === 1 ? 'a document is' : `${stranded.length} documents are`} waiting at: ${names}. ` +
+          'Let them be decided or pull them back to draft first — or make a new route for the change and switch this one off, so documents already on it finish on it.',
+      );
+    }
+
     const workflow = await prisma.$transaction(async (tx) => {
       // Steps are replaced wholesale. In-flight requests keep their recorded
       // ApprovalActions (those are history and must survive), but they point at
