@@ -4,7 +4,7 @@ import { SkipRow, type ImportActor, type ImportSpec } from '../../shared/csv';
 import { formatDate } from '../../shared/pdf';
 import { reserveNumbers } from '../../shared/numbering';
 import { odooBrand, odooKey } from '../../shared/odooMigration';
-import { MOVE_HEADERS, MOVE_KIND_LABELS, moveProductParts, moveTotals, readMoves, type OdooMove, type OdooMoveSet } from '../../shared/odooMoves';
+import { MOVE_HEADERS, MOVE_KIND_LABELS, moveProductParts, moveTotals, readMoves, rekeyMoves, type OdooMove, type OdooMoveSet } from '../../shared/odooMoves';
 import type { Registered } from '../imports';
 import { forgetPartNumbers, partNumbers } from './odoo';
 
@@ -103,6 +103,20 @@ async function build(rows: Record<string, string>[]): Promise<OdooMovesRecord> {
   return { ...set, target: await targetFor(set) };
 }
 
+/**
+ * Several Odoo products may land on one item or asset (they share a Name), so
+ * a move's once-only key is counted over the TARGET, never the product.
+ */
+function rekeyByTarget(records: OdooMovesRecord[]): void {
+  const groups = new Map<string, OdooMove[][]>();
+  for (const r of records) {
+    const t = r.target;
+    const key = t.kind === 'item' ? `i:${t.itemId}` : t.kind === 'asset' ? `a:${t.assetIds.join(',')}` : `n:${t.key}`;
+    groups.set(key, [...(groups.get(key) ?? []), r.moves]);
+  }
+  for (const sets of groups.values()) rekeyMoves(sets);
+}
+
 type Db = Prisma.TransactionClient | typeof prisma;
 
 /** The keys already on file: `<itemId or assetId>|<importKey>`. */
@@ -145,6 +159,7 @@ export const odooMovesSpec: ImportSpec<OdooMovesRecord> = {
       .join(' · ');
   },
   summarize: async (records) => {
+    rekeyByTarget(records);
     const onItems = records.filter((r) => r.target.kind === 'item');
     const onAssets = records.filter((r) => r.target.kind === 'asset');
     const fresh = records.filter((r) => r.target.kind === 'new');
@@ -254,6 +269,7 @@ const rowOf = (m: OdooMove) => ({
 
 export async function odooMovesWrite(records: { record: OdooMovesRecord; existingId: string | null }[], actor?: ImportActor): Promise<void> {
   const list = records.map((r) => r.record);
+  rekeyByTarget(list);
   await prisma.$transaction(async (tx) => {
     // A product G-CORE never held: an inactive item, once. Read again inside
     // the transaction — the check's answer may be minutes old.

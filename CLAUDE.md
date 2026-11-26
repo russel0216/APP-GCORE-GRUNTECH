@@ -5033,7 +5033,11 @@ and incoming". His answers: a card of its own, zero-quantity rows skipped.
   inactive item. The asset's page shows "Movement history from Odoo"
   (`GET /assets/:id` → `odooHistory`, `odooAssetHistory()` in
   `shared/stockCardHistory.ts`; the stock card's `OdooHistoryCard` with
-  `asset`). verify-chain pins it.
+  `asset`). verify-chain pins it. **A move's once-only key is counted over
+  the TARGET** (`rekeyMoves()` / `rekeyByTarget()`, 2026-11-26): Odoo has
+  products that share a Name, G-CORE keeps a Name as one item or asset, and
+  a move alike in every fact on two of them was dropped as a repeat (12 of
+  26,527 on live); a line already on file keeps its key.
 - **Stock Movements is a menu of its own** (the same day, the owner's call:
   "remove the recent stock movement below Inventory; a separate menu between
   Inventory and Pull-out Slips to view all the stock movement, with filters;

@@ -7311,6 +7311,19 @@ async function odooMigration() {
       (await prisma.odooStockMove.count({ where: { itemId: strangerItems[0]?.id ?? 'none' } })) === 1 &&
       (await prisma.odooAssetMove.count({ where: { assetId: { in: [wrench!.id, grinders[0].id] } } })) === 2,
   );
+  // Two Odoo products sharing a Name are ONE item in G-CORE (2026-11-26): a
+  // move alike in every fact on each is two moves, never one and a repeat.
+  const twinLine = (label: string) =>
+    `2026-04-01 10:00:00,WH/OUT/${TAG}7,"[${label}] ${TAG} ODOO TWIN",WH/Stock,Partner Locations/Customers,${TAG} TWINSHOP,1.00,Units,Done,Someone`;
+  const twinCsv = ['Date,Reference,Product,From,To,Contact,Quantity,Unit,Status,Created by', twinLine('INCO, MASK'), twinLine('POWER HOUSE, MASK')].join('\n');
+  await runImport(twinCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
+  const twins = await prisma.item.findMany({ where: { partNumber: `${TAG} ODOO TWIN` }, include: { odooMoves: true } });
+  await runImport(twinCsv, odooMovesSpec, true, (records) => odooMovesWrite(records, actor));
+  check(
+    'two Odoo products that share a Name are one item, and a move alike in every fact on each is kept twice — and the file run again adds no third',
+    twins.length === 1 && twins[0].odooMoves.length === 2 && (await prisma.odooStockMove.count({ where: { itemId: twins[0].id } })) === 2,
+    JSON.stringify(twins.map((t) => t.odooMoves.length)),
+  );
   const cardRead = await api(signToken(admin.id, admin.email), 'GET', `/inventory/${pump.id}/card`);
   const card = cardRead.body as {
     movementsTotal?: number;

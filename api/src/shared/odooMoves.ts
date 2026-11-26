@@ -222,6 +222,30 @@ export function readMoves(rows: Record<string, string>[]): OdooMoveSet {
   return set;
 }
 
+const factsOf = (m: OdooMove) =>
+  [m.occurredAt.toISOString(), m.reference, m.fromLocation, m.toLocation, m.contact ?? '', m.quantity.toFixed(3)].join('|').toLowerCase();
+
+/**
+ * The once-only keys of every move landing on ONE item or asset, counted
+ * across the products that land there (2026-11-26). Odoo has products that
+ * share a Name, and G-CORE keeps a Name as one item: two of them with a move
+ * alike in every fact each read as the first of its kind, and the second was
+ * dropped as a repeat. Counted over the target, they are #0 and #1 — and a
+ * line already on file as #0 stays what it was. Rewrites `importKey` in place;
+ * running it twice changes nothing.
+ */
+export function rekeyMoves(sets: OdooMove[][]): void {
+  const seen = new Map<string, number>();
+  for (const moves of sets) {
+    for (const m of moves) {
+      const facts = factsOf(m);
+      const nth = seen.get(facts) ?? 0;
+      seen.set(facts, nth + 1);
+      m.importKey = createHash('sha1').update(`${facts}#${nth}`).digest('hex');
+    }
+  }
+}
+
 /** Received and delivered, in the item's unit — what the card's head says. */
 export function moveTotals(moves: { direction: number; quantity: number }[]): { in: number; out: number } {
   let i = 0;
