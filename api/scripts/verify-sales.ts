@@ -3489,8 +3489,8 @@ async function main() {
       const omega = await prisma.quotationGroup.findUniqueOrThrow({ where: { key: groupKey('OMEGA AIR') } });
       const onFile = await prisma.quotationGroup.count({ where: { key: { in: OWNER_GROUPS.map((g) => groupKey(g.name)) } } });
       check(
-        'the owner’s twelve groups are on file, in his order, with what they cover and their brand; a second seed adds none and overwrites nothing',
-        again === 0 && onFile === 12 && omega.description === 'Compressed Air & Gas Treatment and Separation' && omega.brand === 'OMEGA AIR' &&
+        'the owner’s groups are on file, in his order, with what they cover and their brand; a second seed adds none and overwrites nothing',
+        again === 0 && onFile === OWNER_GROUPS.length && omega.description === 'Compressed Air & Gas Treatment and Separation' && omega.brand === 'OMEGA AIR' &&
           omega.sortOrder === 1 && kept.description === `${TAG} custom`,
         `${first}/${again} ${onFile} ${JSON.stringify(omega)}`,
       );

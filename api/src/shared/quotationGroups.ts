@@ -63,6 +63,9 @@ export const OWNER_GROUPS: { name: string; description: string | null; brand: st
   { name: 'HORIBA', description: 'Water analyzer, Energy & Environment Solutions', brand: 'HORIBA' },
   { name: 'GRUNTECHNOLOGY', description: null, brand: null },
   { name: 'GRUNTECH SERVICES', description: null, brand: null },
+  // 2026-11-27, the owner's call: the warehouse files its consumables under a
+  // group of their own. Before OTHERS, which stays last.
+  { name: 'CONSUMABLES', description: 'Consumables and general supplies', brand: null },
   { name: 'OTHERS', description: null, brand: null },
 ];
 

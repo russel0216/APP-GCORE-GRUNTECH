@@ -6173,6 +6173,9 @@ SCORO.
   order by `seedOwnerGroups()` on every deploy: a group already on file is
   kept, and only what is blank on it (description, brand, a sort order of
   0) is filled. An administrator's spelling or wording is never overwritten.
+  **CONSUMABLES** joined them on 2026-11-27 (the owner's call, for the
+  warehouse's item groups), just before OTHERS: no brand, added by the seed
+  where missing, on the quotation editor's list as well as Inventory's.
 - **Every save that writes a line calls `rememberGroups(tx, names)`**
   (`shared/quotationGroups.ts`) — create with lines and replace lines
   (the single-line add/edit/delete routes went on 2026-10-10: nothing
