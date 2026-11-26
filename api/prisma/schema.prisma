@@ -1724,6 +1724,10 @@ model QuotationRevision {
   /// Snapshot of the rate used, so an old revision still prints the tax it was
   /// issued with after Settings change.
   vatRate           Decimal @default(0.12) @db.Decimal(6, 4)
+  /// Which Tax option was picked when two share a rate (2026-11-26): null is
+  /// "by its rate"; DR_SALE is "0% — DR sale only". Label and paper only —
+  /// the money is the rate's. `TAX_KINDS` in shared/quotation.ts.
+  taxKind           String?
   vatInclusive      Boolean @default(false)
   /// SCORO's "Hide total": the PDF prints the lines and their prices but no
   /// totals — a rate sheet, where the customer picks lines rather than buying
@@ -1806,6 +1810,8 @@ model SalesOrder {
   /// pre-discount, VAT on the net, totals stored by recalc only.
   discountPct    Decimal @default(0) @db.Decimal(9, 6)
   vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
+  /// The quotation's Tax option kind, carried at booking (see QuotationRevision.taxKind).
+  taxKind        String?
   vatInclusive   Boolean @default(false)
   subtotal       Decimal @default(0) @db.Decimal(18, 2)
   discountAmount Decimal @default(0) @db.Decimal(18, 2)

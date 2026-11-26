@@ -12,6 +12,7 @@ import { ActivityLog } from '../../components/ActivityLog';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
+import { taxText } from './editorParts';
 import { loadPeople } from '../../components/People';
 import { NumberInput } from '../../components/NumberInput';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, formatWholeMoney, initials, useToast, type Tone } from '../../components/ui';
@@ -683,6 +684,8 @@ export interface Revision {
   vatAmount: number;
   total: number;
   vatRate: number;
+  /** Which Tax option, where two share a rate ("0% DR sale only"). */
+  taxKind?: string | null;
   vatInclusive: boolean;
   /** SCORO's "Hide total": the PDF leaves the totals off. */
   hideTotal?: boolean;
@@ -787,7 +790,7 @@ export interface QuotationDetail {
   /** The company's VAT rate. */
   companyVatRate?: number;
   /** What the Tax dropdown offers: the company rate, 8%, 6% (Government), 0%. */
-  taxOptions?: { rate: number; label: string }[];
+  taxOptions?: { key: string; rate: number; label: string; taxKind: string | null }[];
   /** Optional approval routes for the draft at its total — "Add the CEO as approver". */
   approvalOptions?: { id: string; label: string }[];
   /** Where "Submit for approval" goes from here — the standard route and each option's — and who decides each step. */
@@ -1501,7 +1504,9 @@ export function QuotationDetail() {
                 <Detail label="Delivery">{revision.delivery}</Detail>
                 <Detail label="VAT">
                   {revision.vatRate === 0
-                    ? '0% — zero-rated'
+                    ? revision.taxKind
+                      ? taxText(0, revision.taxKind)
+                      : '0% — zero-rated'
                     : `${Number((revision.vatRate * 100).toFixed(2))}% — ${revision.vatInclusive ? 'included in the prices' : 'added on top of the prices'}`}
                 </Detail>
                 {revision.hideTotal && <Detail label="Hide total">Yes — the PDF prints the lines without the totals</Detail>}
@@ -1960,7 +1965,7 @@ function LineCost({ item, currency }: { item: Item; currency: string }) {
  * recomputes them on every save with the one `quotationTotals`.
  */
 function TotalsBlock({ revision, currency }: { revision: Revision; currency: string }) {
-  const rate = `${(revision.vatRate * 100).toFixed(0)}%`;
+  const rate = revision.taxKind ? taxText(revision.vatRate, revision.taxKind) : `${(revision.vatRate * 100).toFixed(0)}%`;
   return (
     <dl className="quote-totals" aria-label="Totals">
       <div>

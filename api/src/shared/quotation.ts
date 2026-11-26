@@ -262,11 +262,53 @@ export const QUOTATION_CURRENCIES: { code: string; label: string }[] = [
 ];
 export const QUOTATION_CURRENCY_CODES = QUOTATION_CURRENCIES.map((c) => c.code) as [string, ...string[]];
 
-export function quotationTaxOptions(companyRate: number): { rate: number; label: string }[] {
+/**
+ * A Tax option that shares its rate with another is told apart by a KIND
+ * (2026-11-26, help ticket GT-HT-2026-0042: "0% DR sale only"). Label and
+ * paper only — the money is the rate's. Stored on `QuotationRevision.taxKind`
+ * and `SalesOrder.taxKind`; null is "by its rate".
+ */
+export const TAX_KINDS: Record<string, { rate: number; label: string; paper: string }> = {
+  DR_SALE: { rate: 0, label: '0% (DR sale only)', paper: 'DR sale only' },
+};
+export const TAX_KIND_KEYS = Object.keys(TAX_KINDS) as [string, ...string[]];
+
+export type TaxOption = { key: string; rate: number; label: string; taxKind: string | null };
+
+/** An option's key: its kind, else its rate to four decimals. */
+export function taxOptionKey(rate: number, taxKind?: string | null): string {
+  return taxKind ? taxKind : Number(rate).toFixed(4);
+}
+
+/** "0% — DR sale only" where a kind was picked, else "12%". */
+export function taxRateText(rate: Money, taxKind?: string | null): string {
+  const pct = `${Number((Number(rate) * 100).toFixed(2))}%`;
+  const kind = taxKind ? TAX_KINDS[taxKind] : undefined;
+  return kind ? `${pct} — ${kind.paper}` : pct;
+}
+
+/**
+ * The rate and kind a save writes: a kind fixes its own rate; a rate sent
+ * without one clears the kind (a kind never outlives its rate). Undefined
+ * leaves the stored values alone.
+ */
+export function taxChoice(body: { vatRate?: number; taxKind?: string | null }): { vatRate?: number; taxKind?: string | null } {
+  if (body.taxKind) return { vatRate: TAX_KINDS[body.taxKind].rate, taxKind: body.taxKind };
+  if (body.taxKind === null) return { ...(body.vatRate !== undefined ? { vatRate: body.vatRate } : {}), taxKind: null };
+  if (body.vatRate !== undefined) return { vatRate: body.vatRate, taxKind: null };
+  return {};
+}
+
+export function quotationTaxOptions(companyRate: number): TaxOption[] {
   const pct = (r: number) => `${Number((r * 100).toFixed(2))}%`;
-  const options = [{ rate: companyRate, label: pct(companyRate) }, ...QUOTATION_EXTRA_TAX_RATES, { rate: 0, label: '0% (zero-rated)' }];
+  const options: TaxOption[] = (<Omit<TaxOption, 'key'>[]>[
+    { rate: companyRate, label: pct(companyRate), taxKind: null },
+    ...QUOTATION_EXTRA_TAX_RATES.map((o) => ({ ...o, taxKind: null })),
+    { rate: 0, label: '0% (zero-rated)', taxKind: null },
+    ...Object.entries(TAX_KINDS).map(([kind, k]) => ({ rate: k.rate, label: k.label, taxKind: kind })),
+  ]).map((o) => ({ ...o, key: taxOptionKey(o.rate, o.taxKind) }));
   const seen = new Set<string>();
-  return options.filter((o) => (seen.has(o.rate.toFixed(4)) ? false : (seen.add(o.rate.toFixed(4)), true)));
+  return options.filter((o) => (seen.has(o.key) ? false : (seen.add(o.key), true)));
 }
 
 /** A line's stored amount: quantity × price, to the centavo, in Decimal. */

@@ -1,3 +1,4 @@
+import { taxKey } from '../../lib/tax';
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { upperText } from '../../lib/caps';
 import { api, qs } from '../../lib/api';
@@ -49,7 +50,20 @@ export interface Line {
 }
 
 export type Option = { id: string; name: string };
-export type TaxOption = { rate: number; label: string };
+/**
+ * A Tax dropdown choice. Two options may share a rate ("0% (zero-rated)" and
+ * "0% (DR sale only)", 2026-11-26), so the select's value is `key` — the
+ * option's kind, else its rate to four decimals (`taxKey`, the API's
+ * `taxOptionKey`).
+ */
+export { taxKey, taxText } from '../../lib/tax';
+export type TaxOption = { key: string; rate: number; label: string; taxKind: string | null };
+/** The dropdown's options, plus the record's own choice should it no longer be offered. */
+export function withOwnTax(options: TaxOption[], rate: number, taxKind: string | null, own: string): TaxOption[] {
+  const key = taxKey(rate, taxKind);
+  if (options.some((o) => o.key === key)) return options;
+  return [...options, { key, rate, taxKind, label: `${Number((rate * 100).toFixed(2))}% (${own})` }];
+}
 
 /** What /quotations/suggest offers as a product is typed. */
 export interface ProductSuggestion {

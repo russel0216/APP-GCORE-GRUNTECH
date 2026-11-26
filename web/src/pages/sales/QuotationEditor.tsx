@@ -48,6 +48,8 @@ import {
   pct,
   Static,
   withTax,
+  taxKey,
+  withOwnTax,
   type Line,
   type Option,
   type ProductSuggestion,
@@ -107,6 +109,8 @@ interface Header {
   vatInclusive: boolean;
   /** SCORO's Tax dropdown: the company's rate, or 0% for a zero-rated sale. */
   vatRate: number;
+  /** Which option, where two share a rate ("0% DR sale only"); null is "by its rate". */
+  taxKind: string | null;
   /** SCORO's "Hide total": the PDF prints the lines without the totals. */
   hideTotal: boolean;
   /** Every figure's currency: PHP unless another is picked (2026-10-11). */
@@ -283,6 +287,7 @@ export function QuotationEditor() {
     terms: '',
     vatInclusive: false,
     vatRate: 0.12,
+    taxKind: null,
     hideTotal: false,
     currency: 'PHP',
     exchangeRate: '',
@@ -386,6 +391,7 @@ export function QuotationEditor() {
             terms: draft.terms ?? '',
             vatInclusive: draft.vatInclusive,
             vatRate: draft.vatRate,
+            taxKind: draft.taxKind ?? null,
             hideTotal: draft.hideTotal ?? false,
             currency: q.currency ?? 'PHP',
             exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
@@ -556,7 +562,7 @@ export function QuotationEditor() {
           vatInclusive: src.vatInclusive,
           // A zero-rated quote stays zero-rated; any other takes today's company
           // rate, which is what a new quotation may carry.
-          ...(src.vatRate === 0 ? { vatRate: 0 } : {}),
+          ...(src.vatRate === 0 ? { vatRate: 0, taxKind: src.taxKind ?? null } : {}),
           hideTotal: src.hideTotal ?? false,
           currency: q.currency ?? 'PHP',
           exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
@@ -922,6 +928,7 @@ export function QuotationEditor() {
           paymentTerms: header.paymentTerms || null,
           vatInclusive: header.vatInclusive,
           vatRate: header.vatRate,
+          taxKind: header.taxKind,
           hideTotal: header.hideTotal,
           currency: header.currency,
           ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 ? { exchangeRate: Number(header.exchangeRate) } : {}),
@@ -952,6 +959,7 @@ export function QuotationEditor() {
         paymentTerms: header.paymentTerms || null,
         vatInclusive: header.vatInclusive,
         vatRate: header.vatRate,
+        taxKind: header.taxKind,
         hideTotal: header.hideTotal,
         discountPct: Number(header.discountPct || 0),
       });
@@ -1032,12 +1040,10 @@ export function QuotationEditor() {
   // draft's own snapshot, should Settings have moved since.
   const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
   const serverTax: TaxOption[] = (editing ? quotation?.taxOptions : preview?.taxOptions) ?? [
-    { rate: companyRate, label: pctLabel(companyRate) },
-    { rate: 0, label: '0% (zero-rated)' },
+    { key: taxKey(companyRate), rate: companyRate, label: pctLabel(companyRate), taxKind: null },
+    { key: taxKey(0), rate: 0, label: '0% (zero-rated)', taxKind: null },
   ];
-  const taxOptions: TaxOption[] = serverTax.some((o) => Math.abs(o.rate - header.vatRate) < 0.00005)
-    ? serverTax
-    : [...serverTax, { rate: header.vatRate, label: `${pctLabel(header.vatRate)} (this draft)` }];
+  const taxOptions = withOwnTax(serverTax, header.vatRate, header.taxKind, 'this draft');
 
   return (
     <div className="qe">
@@ -1791,15 +1797,18 @@ export function QuotationEditor() {
                     {header.vatInclusive ? 'Tax included' : 'Tax'}
                     <select
                       id="qe-tax"
-                      value={String(header.vatRate)}
+                      value={taxKey(header.vatRate, header.taxKind)}
                       aria-describedby="qe-tax-hint"
                       onChange={(e) => {
+                        const picked = taxOptions.find((o) => o.key === e.target.value);
+                        if (!picked) return;
                         vatTouched.current = true;
-                        set('vatRate', Number(e.target.value));
+                        set('vatRate', picked.rate);
+                        set('taxKind', picked.taxKind);
                       }}
                     >
                       {taxOptions.map((o) => (
-                        <option key={o.rate} value={String(o.rate)}>
+                        <option key={o.key} value={o.key}>
                           {o.label}
                         </option>
                       ))}
@@ -1827,7 +1836,8 @@ export function QuotationEditor() {
               />
             )}
             <p id="qe-tax-hint" className="faint sales-hint">
-              6% is for a government customer; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
+              6% is for a government customer; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export; 0% DR sale only prints as
+              such on the paper.
             </p>
             {errors.discountPct && <CellError message={errors.discountPct} />}
             <Checkbox

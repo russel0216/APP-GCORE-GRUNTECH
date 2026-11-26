@@ -34,6 +34,10 @@ import {
   lineAmount,
   quotationTotals,
   quotationTaxOptions,
+  TAX_KIND_KEYS,
+  taxChoice,
+  taxOptionKey,
+  taxRateText,
   stripLineCost,
   QUOTATION_EXTRA_TAX_RATES,
   productTitle,
@@ -833,8 +837,9 @@ salesOrderRoutes.get(
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
     const taxOptions = quotationTaxOptions(company ? num(company.vatRate) : 0.12);
     const ownRate = num(order.vatRate);
-    if (!taxOptions.some((o) => Math.abs(o.rate - ownRate) < 0.00005)) {
-      taxOptions.push({ rate: ownRate, label: `${Number((ownRate * 100).toFixed(2))}% (this order)` });
+    const ownKey = taxOptionKey(ownRate, order.taxKind);
+    if (!taxOptions.some((o) => o.key === ownKey)) {
+      taxOptions.push({ key: ownKey, rate: ownRate, taxKind: order.taxKind ?? null, label: `${Number((ownRate * 100).toFixed(2))}% (this order)` });
     }
     res.json({
       ...presentOrder(order as unknown as Record<string, unknown>, showCost),
@@ -1185,6 +1190,7 @@ salesOrderRoutes.post(
           // A summary line already carries the discount inside its one price.
           discountPct: body.mode === 'summary' ? d(0) : revision.discountPct,
           vatRate: revision.vatRate,
+          taxKind: revision.taxKind ?? null,
           vatInclusive: revision.vatInclusive,
           lines: {
             create:
@@ -1301,6 +1307,8 @@ const saveSchema = z.object({
   contactId: z.string().optional().nullable(),
   discountPct: z.number().min(0).max(100).optional(),
   vatRate: z.number().min(0).max(1).optional(),
+  /** A Tax option sharing its rate with another ("0% DR sale only") — `taxChoice`. */
+  taxKind: z.enum(TAX_KIND_KEYS).optional().nullable(),
   vatInclusive: z.boolean().optional(),
   lines: z.array(z.object(lineFields)).max(500).optional(),
 });
@@ -1328,10 +1336,11 @@ salesOrderRoutes.put(
 
     // The quotation's tax choices apply here too: the company rate, 8%, 6%,
     // 0%, or the rate the order was created with.
-    if (body.vatRate !== undefined) {
+    const tax = taxChoice(body);
+    if (tax.vatRate !== undefined) {
       const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
       const allowed = [d(0), company?.vatRate ?? d(0.12), ...QUOTATION_EXTRA_TAX_RATES.map((o) => d(o.rate)), order.vatRate];
-      if (!allowed.some((r) => r.equals(d(body.vatRate!)))) {
+      if (!allowed.some((r) => r.equals(d(tax.vatRate!)))) {
         throw badRequest('VAT on a sales order is the company rate, 8%, 6%, or 0%');
       }
     }
@@ -1348,7 +1357,8 @@ salesOrderRoutes.put(
           ...(body.comment !== undefined ? { comment: body.comment || null } : {}),
           ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
           ...(body.discountPct !== undefined ? { discountPct: d(body.discountPct) } : {}),
-          ...(body.vatRate !== undefined ? { vatRate: d(body.vatRate) } : {}),
+          ...(tax.vatRate !== undefined ? { vatRate: d(tax.vatRate) } : {}),
+          ...(tax.taxKind !== undefined ? { taxKind: tax.taxKind } : {}),
           ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
         },
       });
@@ -2412,7 +2422,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     vatInclusive: order.vatInclusive,
   });
   const amount = (v: number) => formatAmount(v);
-  const rate = ratePct(order.vatRate);
+  const rate = taxRateText(order.vatRate, order.taxKind);
   const contact = order.contact;
 
   const fields: Record<string, string> = {

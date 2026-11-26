@@ -86,7 +86,8 @@ import { listQuery } from '../src/http/kit';
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
 import { leadListSummary, leadListWhere, printableQuotation, quotationListSummary, quotationListWhere, quotationPrintData } from '../src/routes/sales';
-import { capsParts, markUnchangedScoroImports, upperText } from '../src/shared/quotation';
+import { capsParts, markUnchangedScoroImports, upperText, quotationTaxOptions, taxChoice, taxRateText } from '../src/shared/quotation';
+import { taxKey as webTaxKey, taxText as webTaxText } from '../../web/src/lib/tax';
 import { upperText as webUpperText } from '../../web/src/lib/caps';
 import { withSupplierNote } from '../../web/src/lib/supplierNote';
 import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
@@ -1910,6 +1911,31 @@ async function main() {
   // ── 9. SCORO-style quotation money ─────────────────────────────────────────
   // quotationTotals in shared/quotation.ts is the ONE arithmetic: the routes
   // store what it returns and the screen shows what it returns.
+  console.log('\nThe Tax options told apart by kind (help ticket GT-HT-2026-0042, 2026-11-26)');
+  {
+    const opts = quotationTaxOptions(0.12);
+    const zeros = opts.filter((o) => o.rate === 0);
+    check(
+      'both 0% options are offered — zero-rated and DR sale only — under keys of their own',
+      zeros.length === 2 && new Set(zeros.map((o) => o.key)).size === 2 && zeros.some((o) => o.taxKind === 'DR_SALE' && o.label === '0% (DR sale only)'),
+      JSON.stringify(opts),
+    );
+    check('every option keys as the web keys it', opts.every((o) => o.key === webTaxKey(o.rate, o.taxKind)));
+    const dr = taxChoice({ vatRate: 0.12, taxKind: 'DR_SALE' });
+    const plain = taxChoice({ vatRate: 0 });
+    check(
+      'a kind fixes its own rate; a rate sent alone clears the kind; nothing sent changes nothing',
+      dr.vatRate === 0 && dr.taxKind === 'DR_SALE' && plain.vatRate === 0 && plain.taxKind === null && Object.keys(taxChoice({})).length === 0,
+    );
+    check(
+      'the paper and the page say "0% — DR sale only", any other rate as before',
+      taxRateText(0, 'DR_SALE') === '0% — DR sale only' &&
+        webTaxText(0, 'DR_SALE') === '0% — DR sale only' &&
+        taxRateText(0.12, null) === '12%' &&
+        webTaxText(0.12, null) === '12%',
+    );
+  }
+
   console.log('\nQuotation money (SCORO-style discount, cost and margin)');
 
   const lines = [
@@ -3401,6 +3427,22 @@ async function main() {
         ),
       );
     check('a zero-rated quote prints VAT (0%)', (await pdfOf()).includes('VAT (0%):'));
+    // "0% DR sale only" (2026-11-26): the same money as zero-rated, its own words.
+    const drSale = await http(salesToken, 'PATCH', base, { vatRate: 0, taxKind: 'DR_SALE' });
+    const drRow = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev0.id }, select: { taxKind: true, vatRate: true } });
+    check(
+      '"0% DR sale only" is taken and kept on the revision, at 0%',
+      drSale.status === 200 && drRow.taxKind === 'DR_SALE' && Number(drRow.vatRate) === 0 && money(Number(drSale.body.vatAmount), 0),
+      drSale.text.slice(0, 200),
+    );
+    check('and its paper says so beside the VAT', (await pdfOf()).includes('VAT (0% — DR sale only):'));
+    const badKind = await http(salesToken, 'PATCH', base, { taxKind: 'NO_SUCH' });
+    check('an unknown kind is refused', badKind.status === 400, badKind.text.slice(0, 160));
+    await http(salesToken, 'PATCH', base, { vatRate: 0 });
+    check(
+      'choosing plain 0% again clears the kind',
+      (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev0.id }, select: { taxKind: true } })).taxKind === null,
+    );
     const hidden = await http(salesToken, 'PATCH', base, { hideTotal: true });
     check('Hide total is kept on the revision', hidden.status === 200 && hidden.body.hideTotal === true, hidden.text.slice(0, 160));
     const hiddenText = await pdfOf();

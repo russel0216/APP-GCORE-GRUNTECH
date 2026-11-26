@@ -132,6 +132,9 @@ import {
   costingsForQuote,
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
+  TAX_KIND_KEYS,
+  taxChoice,
+  taxRateText,
   QUOTATION_CURRENCIES,
   QUOTATION_CURRENCY_CODES,
   DEFAULT_QUOTATION_CURRENCY,
@@ -2294,6 +2297,8 @@ const createQuotationSchema = quotationSchema.extend({
   vatInclusive: z.boolean().optional(),
   /** SCORO's Tax dropdown — see `checkVatRate`. Defaults to the company's rate. */
   vatRate: z.number().min(0).max(1).optional(),
+  /** A Tax option sharing its rate with another ("0% DR sale only") — `taxChoice`. */
+  taxKind: z.enum(TAX_KIND_KEYS).optional().nullable(),
   hideTotal: z.boolean().optional(),
   /** The author. Honoured only for edit_all (see `mayAuthorForOthers`). */
   ownerId: z.string().optional().nullable(),
@@ -2366,7 +2371,8 @@ quotationRoutes.post(
     // quotation keeps the team it was raised under.
     const teamId = body.teamId ? await pickedTeam(body.teamId) : ((await teamOf(ownerId))?.id ?? null);
     // Before the transaction, so a refused rate or number burns no number.
-    await checkVatRate(body.vatRate);
+    const tax = taxChoice(body);
+    await checkVatRate(tax.vatRate);
     if (body.number) await checkQuoteNumber(body.number);
 
     /*
@@ -2412,7 +2418,8 @@ quotationRoutes.post(
                 validityDays: body.validityDays ?? 30,
                 terms: body.terms || null,
                 notes: body.notes || null,
-                vatRate: body.vatRate !== undefined ? d(body.vatRate) : (company?.vatRate ?? d(0.12)),
+                vatRate: tax.vatRate !== undefined ? d(tax.vatRate) : (company?.vatRate ?? d(0.12)),
+                taxKind: tax.taxKind ?? null,
                 vatInclusive: body.vatInclusive ?? false,
                 hideTotal: body.hideTotal ?? false,
                 discountPct: d(body.discountPct ?? 0),
@@ -3067,6 +3074,7 @@ quotationRoutes.post(
           terms: latest?.terms ?? null,
           notes: latest?.notes ?? null,
           vatRate: latest?.vatRate ?? d(0.12),
+          taxKind: latest?.taxKind ?? null,
           vatInclusive: latest?.vatInclusive ?? false,
           hideTotal: latest?.hideTotal ?? false,
           discountPct: latest?.discountPct ?? d(0),
@@ -3133,6 +3141,7 @@ const revisionSchema = z.object({
   delivery: z.string().trim().max(500).optional().nullable(),
   paymentTerms: z.string().trim().max(500).optional().nullable(),
   vatRate: z.number().min(0).max(1).optional(),
+  taxKind: z.enum(TAX_KIND_KEYS).optional().nullable(),
   hideTotal: z.boolean().optional(),
 });
 
@@ -3162,7 +3171,8 @@ quotationRoutes.patch(
   handler(async (req, res) => {
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(revisionSchema, req.body);
-    await checkVatRate(body.vatRate, revision.vatRate);
+    const tax = taxChoice(body);
+    await checkVatRate(tax.vatRate, revision.vatRate);
     const costingIds = costingIdsOf(body);
     if (costingIds) await assertCostingsExist(costingIds);
     const scopes = costingScopesOf(body);
@@ -3178,7 +3188,8 @@ quotationRoutes.patch(
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
-        ...(body.vatRate !== undefined ? { vatRate: d(body.vatRate) } : {}),
+        ...(tax.vatRate !== undefined ? { vatRate: d(tax.vatRate) } : {}),
+        ...(tax.taxKind !== undefined ? { taxKind: tax.taxKind } : {}),
         ...(body.hideTotal !== undefined ? { hideTotal: body.hideTotal } : {}),
         ...(body.discountPct !== undefined ? { discountPct: d(body.discountPct) } : {}),
         ...(body.prNumber !== undefined ? { prNumber: body.prNumber || null } : {}),
@@ -3190,10 +3201,14 @@ quotationRoutes.patch(
     });
     await recalcRevision(req.params.revisionId);
     const discountChanged = body.discountPct !== undefined && !d(body.discountPct).equals(revision.discountPct);
-    const vatChanged = body.vatRate !== undefined && !d(body.vatRate).equals(revision.vatRate);
+    const vatChanged =
+      (tax.vatRate !== undefined && !d(tax.vatRate).equals(revision.vatRate)) ||
+      (tax.taxKind !== undefined && (tax.taxKind ?? null) !== (revision.taxKind ?? null));
     const changes = [
       discountChanged ? `discount ${Number(revision.discountPct)}% -> ${body.discountPct}%` : '',
-      vatChanged ? `VAT ${ratePct(revision.vatRate)} -> ${ratePct(body.vatRate!)}` : '',
+      vatChanged
+        ? `VAT ${taxRateText(revision.vatRate, revision.taxKind)} -> ${taxRateText(tax.vatRate ?? revision.vatRate, tax.taxKind === undefined ? revision.taxKind : tax.taxKind)}`
+        : '',
     ].filter(Boolean);
     await audit(
       {
@@ -3601,7 +3616,7 @@ export async function quotationPrintData(
   // none; it is named once, in the head and in "Total Price (PHP):".
   const currency = quotation.currency;
   const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
-  const rate = ratePct(revision.vatRate);
+  const rate = taxRateText(revision.vatRate, revision.taxKind);
   const discountPct = Number(revision.discountPct);
   const discountAmount = Number(revision.discountAmount);
   const net = Number(revision.subtotal) - discountAmount;

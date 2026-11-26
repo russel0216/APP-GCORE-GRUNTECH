@@ -60,6 +60,9 @@ import {
   pct,
   Static,
   withTax,
+  taxKey,
+  taxText,
+  withOwnTax,
   type Line,
   type ProductSuggestion,
   type TaxOption,
@@ -119,6 +122,7 @@ export interface SalesOrderRow {
   cancelReason: string | null;
   discountPct: number;
   vatRate: number;
+  taxKind?: string | null;
   vatInclusive: boolean;
   subtotal: number;
   discountAmount: number;
@@ -1041,7 +1045,7 @@ export function SalesOrderDetail() {
           <dl className="so-totals">
             <dt>Total price</dt>
             <dd className="mono">{formatMoney(order.netOfTax ?? order.net, order.quotation.currency)}</dd>
-            <dt>{order.vatInclusive ? `VAT included (${(order.vatRate * 100).toFixed(0)}%)` : `VAT (${(order.vatRate * 100).toFixed(0)}%)`}</dt>
+            <dt>{order.vatInclusive ? `VAT included (${taxText(order.vatRate, order.taxKind)})` : `VAT (${taxText(order.vatRate, order.taxKind)})`}</dt>
             <dd className="mono">{formatMoney(order.vatAmount, order.quotation.currency)}</dd>
             <dt className="so-grand">{order.vatInclusive ? 'Total' : 'VAT included'}</dt>
             <dd className="mono so-grand">{formatMoney(order.total, order.quotation.currency)}</dd>
@@ -1513,6 +1517,7 @@ interface SoHeader {
   contactId: string;
   discountPct: string;
   vatRate: number;
+  taxKind: string | null;
   vatInclusive: boolean;
 }
 
@@ -1565,6 +1570,7 @@ export function SalesOrderEditor() {
     contactId: '',
     discountPct: '0',
     vatRate: 0.12,
+    taxKind: null,
     vatInclusive: false,
   });
 
@@ -1591,6 +1597,7 @@ export function SalesOrderEditor() {
           contactId: o.contact?.id ?? '',
           discountPct: String(o.discountPct),
           vatRate: o.vatRate,
+          taxKind: o.taxKind ?? null,
           vatInclusive: o.vatInclusive,
         });
         const rows = o.lines.map(fromSoLine);
@@ -1739,6 +1746,7 @@ export function SalesOrderEditor() {
         contactId: header.contactId || null,
         discountPct: Number(header.discountPct || 0),
         vatRate: header.vatRate,
+        taxKind: header.taxKind,
         vatInclusive: header.vatInclusive,
         // The cost keys go only where the caller may see cost; the server
         // ignores them otherwise, and a saved line keeps its booking by id.
@@ -1782,10 +1790,10 @@ export function SalesOrderEditor() {
   const showCost = order.canSeeCost;
   const currency = order.quotation.currency ?? 'PHP';
   const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
-  const serverTax: TaxOption[] = order.taxOptions ?? [{ rate: order.vatRate, label: pctLabel(order.vatRate) }];
-  const taxOptions: TaxOption[] = serverTax.some((o) => Math.abs(o.rate - header.vatRate) < 0.00005)
-    ? serverTax
-    : [...serverTax, { rate: header.vatRate, label: `${pctLabel(header.vatRate)} (this order)` }];
+  const serverTax: TaxOption[] = order.taxOptions ?? [
+    { key: taxKey(order.vatRate, order.taxKind), rate: order.vatRate, label: pctLabel(order.vatRate), taxKind: order.taxKind ?? null },
+  ];
+  const taxOptions = withOwnTax(serverTax, header.vatRate, header.taxKind, 'this order');
 
   return (
     <div className="qe">
@@ -2110,9 +2118,18 @@ export function SalesOrderEditor() {
                 <dt>
                   <label className="quote-discount" htmlFor="so-tax">
                     {header.vatInclusive ? 'Tax included' : 'Tax'}
-                    <select id="so-tax" value={String(header.vatRate)} onChange={(e) => set('vatRate', Number(e.target.value))}>
+                    <select
+                      id="so-tax"
+                      value={taxKey(header.vatRate, header.taxKind)}
+                      onChange={(e) => {
+                        const picked = taxOptions.find((o) => o.key === e.target.value);
+                        if (!picked) return;
+                        set('vatRate', picked.rate);
+                        set('taxKind', picked.taxKind);
+                      }}
+                    >
                       {taxOptions.map((o) => (
-                        <option key={o.rate} value={String(o.rate)}>
+                        <option key={o.key} value={o.key}>
                           {o.label}
                         </option>
                       ))}

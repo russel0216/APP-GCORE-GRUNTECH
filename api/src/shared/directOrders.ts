@@ -54,7 +54,7 @@ export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderI
   const orders = await tx.salesOrder.findMany({
     where: { quotationId: order.quotation.id },
     orderBy: [{ number: 'asc' }],
-    select: { id: true, ownerId: true, discountPct: true, vatRate: true, vatInclusive: true, lines: { orderBy: { sortOrder: 'asc' } } },
+    select: { id: true, ownerId: true, discountPct: true, vatRate: true, taxKind: true, vatInclusive: true, lines: { orderBy: { sortOrder: 'asc' } } },
   });
   const first = orders[0];
   // The stand-in is its order's salesperson's (GT-HT-2026-0038): the SCORO
@@ -94,7 +94,7 @@ export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderI
   }
   await tx.quotationRevision.update({
     where: { id: revisionId },
-    data: { discountPct: d(first.discountPct), vatRate: d(first.vatRate), vatInclusive: first.vatInclusive },
+    data: { discountPct: d(first.discountPct), vatRate: d(first.vatRate), taxKind: first.taxKind ?? null, vatInclusive: first.vatInclusive },
   });
   await recalcQuotationRevision(revisionId, tx);
 }

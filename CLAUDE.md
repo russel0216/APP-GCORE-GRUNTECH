@@ -5837,7 +5837,18 @@ SCORO.
   sent to the page as `taxOptions` so the dropdown cannot drift from the rule —
   checked by `checkVatRate()`
   before anything is written so a refused rate burns no number; a draft may
-  keep the rate it was snapshotted with. A new revision copies it. **Progress
+  keep the rate it was snapshotted with. A new revision copies it. **Two
+  options may share a rate, told apart by a KIND** (2026-11-26, help ticket
+  GT-HT-2026-0042: "0% DR sale only"): `QuotationRevision.taxKind` and
+  `SalesOrder.taxKind` (null is "by its rate"; `TAX_KINDS` in
+  `shared/quotation.ts`, `DR_SALE` its one kind). LABEL AND PAPER ONLY — the
+  money is the rate's, and nothing in A/R, invoicing or commissions reads it.
+  `taxChoice()` is the save's rule (a kind fixes its rate; a rate sent alone
+  clears the kind); each option carries a `key` (its kind, else its rate to
+  four decimals — `taxOptionKey`, the web's `taxKey` in `lib/tax.ts`), which
+  is the select's value; `taxRateText()` prints "0% — DR sale only" on the
+  paper's VAT row and the page. A new revision, a sales order booked from a
+  revision and a direct order's stand-in carry it. **Progress
   billing takes the rate the work was sold at** (2026-10-17, closing the
   open item): `projectVatRate()` in `routes/progress.ts` reads the project's
   quotation revision's `vatRate`, else its costing's snapshotted one (a
