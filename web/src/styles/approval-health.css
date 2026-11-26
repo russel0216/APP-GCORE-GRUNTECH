@@ -1,0 +1,73 @@
+/* Admin › Approval Health (2026-11-26). Tokens only. */
+.ah-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--brand-purple, var(--magenta));
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ah-subject { color: var(--muted); font-size: var(--fs-sm); max-width: 28rem; }
+.ah-bad-text { color: var(--danger); font-weight: 600; }
+.ah-fix { margin-top: var(--s-1); font-weight: 600; }
+.ah-row-bad td { background: rgb(var(--danger-rgb) / 0.06); }
+
+/* A document's steps as a row of numbered dots. */
+.ah-track { display: flex; flex-wrap: wrap; gap: var(--s-1); list-style: none; margin: 0; padding: 0; }
+.ah-dot { display: flex; align-items: center; gap: var(--s-1); font-size: var(--fs-xs); color: var(--faint); }
+.ah-dot + .ah-dot::before { content: '›'; color: var(--faint); margin-right: var(--s-1); }
+.ah-dot-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.4rem; height: 1.4rem; border-radius: 999px;
+  border: 1px solid var(--line); font-weight: 600;
+}
+.ah-dot-name { display: none; }
+.ah-dot.is-done .ah-dot-mark { background: var(--brand-green, var(--ok)); border-color: transparent; color: #fff; }
+.ah-dot.is-current { color: var(--text); font-weight: 600; }
+.ah-dot.is-current .ah-dot-mark { border: 2px solid var(--brand-purple, var(--magenta)); color: var(--brand-purple, var(--magenta)); }
+.ah-dot.is-current .ah-dot-name { display: inline; }
+
+/* A route as boxes with arrows between. */
+.ah-flags { display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: flex-end; }
+.ah-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: var(--s-6); list-style: none; margin: 0; padding: 0; }
+.ah-box {
+  position: relative; flex: 0 1 13rem; min-width: 10rem;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: var(--s-3);
+  background: var(--surface-2); display: flex; flex-direction: column; gap: var(--s-1);
+}
+.ah-box + .ah-box::before {
+  content: '→'; position: absolute; left: calc(-1 * var(--s-6)); top: 50%;
+  width: var(--s-6); text-align: center; transform: translateY(-50%);
+  color: var(--faint); font-size: var(--fs-lg);
+}
+.ah-box.is-bad { border: 2px solid var(--danger); background: rgb(var(--danger-rgb) / 0.08); }
+.ah-start, .ah-end { flex-basis: 8rem; min-width: 7rem; background: transparent; border-style: dashed; }
+.ah-box-head { font-weight: 600; display: flex; align-items: center; gap: var(--s-1); }
+.ah-num {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 1.4rem; height: 1.4rem;
+  border-radius: 999px; background: var(--brand-purple, var(--magenta)); color: #fff; font-size: var(--fs-xs);
+}
+.ah-wait { margin-left: auto; }
+.ah-rule { font-size: var(--fs-sm); color: var(--muted); }
+.ah-names { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.ah-name {
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+  padding: 2px var(--s-2); font: inherit; font-size: var(--fs-sm); cursor: pointer; color: var(--text);
+}
+.ah-name:hover { border-color: var(--brand-purple, var(--magenta)); }
+
+.ah-list { margin: 0; padding-left: var(--s-5); display: flex; flex-direction: column; gap: var(--s-1); }
+
+/* One person. */
+.ah-checks { list-style: none; margin: 0 0 var(--s-3); padding: 0; display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.ah-checks li { border-radius: 999px; padding: var(--s-1) var(--s-3); font-size: var(--fs-sm); font-weight: 600; }
+.ah-checks .is-ok { background: rgb(var(--ok-rgb, 19 186 18) / 0.12); color: var(--ok); }
+.ah-checks .is-bad { background: rgb(var(--danger-rgb) / 0.12); color: var(--danger); }
+.ah-chain { display: flex; flex-wrap: wrap; gap: var(--s-4); list-style: none; margin: 0; padding: 0; }
+.ah-chain li { position: relative; min-width: 9rem; max-width: 16rem; }
+.ah-chain li + li::before { content: '→'; position: absolute; left: calc(-1 * var(--s-4)); width: var(--s-4); text-align: center; color: var(--faint); }
+.ah-chain-step { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+.ah-chain li.is-bad { color: var(--danger); }
+.ah-module .data { width: 100%; }

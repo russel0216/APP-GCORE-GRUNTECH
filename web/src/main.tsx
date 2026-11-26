@@ -37,6 +37,7 @@ import './styles/help.css';
 import './styles/face.css';
 import './styles/marketing.css';
 import './styles/exam.css';
+import './styles/approval-health.css';
 // Last: the working screens' dress (Tabler's look, the logo's two colours).
 import './styles/tabler.css';
 import './styles/dress.css';

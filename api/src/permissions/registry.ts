@@ -449,6 +449,8 @@ export const REGISTRY: ModuleDef[] = [
         note: 'Lay out the quotation and sales order PDFs: place the boxes and choose what each one prints' },
       { key: 'pipeline_stages', own: 'the page itself — it keeps no record of anybody’s', group: 'Process', label: 'Pipeline Stages', path: '/admin/pipeline-stages', actions: SETTINGS, phase: 3,
         note: 'The sales pipeline’s stages, as SCORO’s statuses: name, odds, colour and which are on the board' },
+      { key: 'approval_health', group: 'Process', label: 'Approval Health', path: '/admin/approval-health', actions: READ, phase: 10,
+        note: 'Where every waiting document stands and who it waits on, each route with who holds its steps today, and one person checked end to end' },
       { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
       { key: 'help_tickets', own: 'tickets you raised', group: 'Records', label: 'Help Tickets', path: '/admin/help-tickets', actions: SETTINGS, phase: 10,
         note: 'What people raised from the Help box: improvements, faults and questions, with their screenshots' },

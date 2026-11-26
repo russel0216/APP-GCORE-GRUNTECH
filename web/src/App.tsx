@@ -16,6 +16,7 @@ import { Company } from './pages/admin/Company';
 import { Appearance } from './pages/admin/Appearance';
 import { Numbering } from './pages/admin/Numbering';
 import { Workflows } from './pages/admin/Workflows';
+import { ApprovalHealth } from './pages/admin/ApprovalHealth';
 import { Audit } from './pages/admin/Audit';
 import { HelpTickets, HelpTicketPage } from './pages/admin/HelpTickets';
 import { PdfTemplates } from './pages/admin/PdfTemplates';
@@ -283,6 +284,14 @@ function Routed() {
           element={
             <Guard permission="admin.workflows.view_all">
               <Workflows />
+            </Guard>
+          }
+        />
+        <Route
+          path="/admin/approval-health"
+          element={
+            <Guard permission="admin.approval_health.view_all">
+              <ApprovalHealth />
             </Guard>
           }
         />
