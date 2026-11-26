@@ -28,6 +28,7 @@ import { prisma } from '../src/prisma';
 import { deleteAttachment } from '../src/shared/attachments';
 import { MONEY_IN_ACCESS_MARK, MONEY_IN_KEYS, applyMoneyInAccess } from '../src/shared/finAccess';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, ctxOf, heldSequences, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
@@ -128,6 +129,8 @@ async function restoreRules() {
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await restoreRules();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
@@ -277,9 +280,10 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
   return prisma.approvalRequest.findUnique({ where: { id: approvalId } });
 }
 
-async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
-  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
-  const roles = await rolesLike('zzfin_', roleKeys);
+async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string, opts: { real?: boolean } = {}) {
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts);
+  // `{ real: false }` the seed's rights alone, for a check about what the role may NOT do.
+  const roles = await rolesLike('zzfin_', roleKeys, opts);
   return prisma.user.create({
     data: {
       name,
@@ -312,6 +316,8 @@ const exportsOf = (entityType: string, entityId: string) =>
 async function main() {
   console.log('\nG-CORE finance verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   // ══ The tax arithmetic ═══════════════════════════════════════════════════
   console.log('Tax, and the difference between invoiced and collectible');
@@ -428,7 +434,10 @@ async function main() {
 
   const pm = await makeUser('ZZ Fin PM', 'pm@verifyf.local', ['project_manager']);
   const finance = await makeUser('ZZ Finance', 'fin@verifyf.local', ['finance']);
-  const engineer = await makeUser('ZZ Engineer', 'eng@verifyf.local', ['project_engineer'], pm.id);
+  // The seed's engineer rights alone: the install's Project Engineer may read every
+  // advance, claim and payment (the laptop's does), and the scope checks are about
+  // what an engineer may NOT see.
+  const engineer = await makeUser('ZZ Engineer', 'eng@verifyf.local', ['project_engineer'], pm.id, { real: false });
   const procurement = await makeUser('ZZ Procurement', 'proc@verifyf.local', ['procurement']);
   // A budget request's route (the sheet of 2026-10-13): the requester's Team
   // Leader (the engineer reports to the PM), Admin Back Support, the Finance

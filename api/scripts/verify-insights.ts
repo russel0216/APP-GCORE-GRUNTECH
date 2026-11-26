@@ -23,6 +23,7 @@ import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -114,6 +115,8 @@ const TAG = 'ZZINS';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   const jobs = await prisma.job.findMany({
     where: { name: { startsWith: TAG } },
     select: { id: true },
@@ -182,6 +185,8 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
 async function main() {
   console.log('\nG-CORE insights verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   // ══ The small arithmetic everything rests on ═════════════════════════════
   console.log('Arithmetic');
@@ -820,6 +825,9 @@ async function main() {
       link: `/g-fin/expenses/${plainClaim.id}`,
       requesterId: seller.id,
       status: 'PENDING',
+      // Raised long ago: the bottleneck lists the fifty that have waited
+      // longest, and an install may hold fifty older than today (the laptop does).
+      createdAt: new Date('2019-01-02T00:00:00Z'),
     },
   });
 

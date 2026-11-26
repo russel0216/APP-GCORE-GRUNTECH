@@ -12,6 +12,12 @@
  * and a throwaway `<prefix>like_<key>` carrying the rights the seed's
  * definition gives that key (`roleSeedPermissionKeys`), refilled on every
  * call. The prefix is the one the script's `cleanup()` deletes by.
+ *
+ * `{ real: false }` (2026-11-26) leaves the real role off: the user holds the
+ * seed's rights and nothing the install's role was given since (the laptop's
+ * HR Officer makes logins, its Project Engineer reads every budget request).
+ * Use it where a check is about what the role may NOT do and the engine need
+ * not route to the user by the key.
  */
 import { prisma } from '../../src/prisma';
 import { ROLE_SEEDS, roleSeedPermissionKeys } from '../../src/shared/roleSeeds';
@@ -19,7 +25,7 @@ import { CHART_ROLES } from '../../src/shared/rolesFromChart';
 
 const CHART_KEYS = new Set(CHART_ROLES.map((r) => r.key));
 
-export async function rolesLike(prefix: string, keys: string[]): Promise<{ id: string; key: string }[]> {
+export async function rolesLike(prefix: string, keys: string[], opts: { real?: boolean } = {}): Promise<{ id: string; key: string }[]> {
   const out: { id: string; key: string }[] = [];
   for (const key of keys) {
     const seed = ROLE_SEEDS.find((r) => r.key === key);
@@ -34,7 +40,7 @@ export async function rolesLike(prefix: string, keys: string[]): Promise<{ id: s
     // (shared/rolesFromChart.ts): a role the chart does not name (Executive,
     // Sales, Warehouse …) is never put back on the install by a script — the
     // user gets its rights through the throwaway copy alone.
-    if (CHART_KEYS.has(key)) {
+    if (CHART_KEYS.has(key) && opts.real !== false) {
       const title = CHART_ROLES.find((r) => r.key === key)!.title;
       const real = await prisma.role.upsert({
         where: { key },

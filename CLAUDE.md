@@ -972,10 +972,45 @@ create one, popup window so it will retain on the page".
   (`CREATE_RIGHT`); a record made this way is listed in the box that made it
   before the page refetches. Not on Incoming lines (a typed item is filed at
   save) nor on lines that list only what a shelf holds.
-- verify-foundation fails eight checks and verify-sales stops at an approval
-  on the Windows laptop with or without this change (path separators in the
-  source scan, and this database's role holders) — compare with the last
-  commit before reading a failure there as a regression.
+- (The eight foundation failures and the sales stop once noted here were
+  fixed on 2026-11-26 — see "The verify scripts on a live install".)
+
+## The verify scripts on a live install (2026-11-26)
+
+All twenty-three pass on the laptop (4,946 checks). The failures there were
+the install, not the code — its administrator renamed every step "Approved
+By" and re-routed documents, its roles hold more than the seed gives, and it
+has real people on the teams — so the scripts no longer lean on any of it:
+
+- **The SEEDED approval routes for the run**: the seed's routes live in
+  `src/shared/workflowSeeds.ts` (moved out of prisma/seed.ts, which imports
+  them), and `scripts/lib/routes.ts` — `seededRoutes()` after a script's first
+  cleanup, `ownRoutesBack()` first thing in `cleanup()` — switches the
+  install's routes off, puts a copy of each seeded route in their place
+  (`createdById` `__verify_seeded_route__`), and switches them back on after,
+  the ids parked in `approvalWorkflows.__verify__` so a run that dies is put
+  right by the next. Nine scripts use it (foundation, finance, hr,
+  aftermarket, sales, accounts, insights, insights-brief, pipeline). A check
+  of a route reads its steps' role keys and kinds, never their names.
+- **`rolesLike(prefix, keys, { real: false })`** gives a test user the seed's
+  rights alone, without the install's role — for a check about what a role
+  may NOT do (the laptop's HR Officer makes logins, its Project Engineer reads
+  every advance and budget request, its Aftermarket Manager reads projects).
+- **A team's real people are allowed for**: a Team Leader step may reach the
+  install's own leader beside the script's; a test Back Support is given
+  "Supports teams" for the team it decides for; a "key customers" list may be
+  full of the install's bigger ones; a stuck approval is dated back so it is
+  among the fifty oldest; the face re-derivation runs at a stricter threshold
+  so a real enrolled face near the demo photo does not collide.
+- **The source scans compare paths with forward slashes** and the two
+  permission-level copies with line endings set aside, so a Windows checkout
+  passes.
+- **Two code fixes came with it**: the Insights overview and the brief send
+  `budgetRequestsToRelease` (the working position subtracts it, and the
+  figures shown did not add up without it — the brief's last G-FIN figure,
+  so the CSV's earlier rows keep their places), and the pipeline report's
+  sub-industry rows round their weighted value once, the remainder on the
+  largest row, so the table adds up to the total to the centavo.
 
 ## The Incoming Report of 2026-11-25
 

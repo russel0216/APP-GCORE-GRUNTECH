@@ -28,6 +28,7 @@ import { signToken } from '../src/auth/middleware';
 import { nextNumber, previewNext } from '../src/shared/numbering';
 import { probabilityAfterMove, stageProbability } from '../src/shared/pipeline';
 import { isBold, pdfRuns, printed } from './lib/paper';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { manilaDate } from '../src/shared/day';
 
 if (env.isProduction) {
@@ -56,6 +57,8 @@ const cents = (a: number, b: number) => Math.abs(a - b) < 0.005;
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await prisma.salesActivity.deleteMany({
     where: {
       OR: [
@@ -209,6 +212,8 @@ async function putStagesBack() {
 async function main() {
   console.log('\nG-CORE sales board verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   if (!(await apiReachable())) {
     failed += 1;
@@ -1360,10 +1365,15 @@ async function main() {
     const byCustomer = await http(managerToken, 'GET', `/sales-reports/sales-matrix?from=${year}-01-01&to=${year}-12-31&by=customer`);
     const badBy = await http(managerToken, 'GET', `/sales-reports/sales-matrix?by=region`);
     const matrixPdf = await http(managerToken, 'GET', `/sales-reports/sales-matrix.pdf?from=${year}-01-01&to=${year}-12-31`);
+    // The KEY customers — the fifteen largest. The script's customer is among
+    // them unless the install has fifteen bigger ones this year (the laptop does).
+    const customerRows = ((byCustomer.body.tables as T[] | undefined)?.[0]?.rows ?? []).filter((r) => r[0] !== 'Gruntech');
+    const keyCustomers = customerRows.some((r) => r[0] === customer.name) || customerRows.length === 15;
+    const sellerSales = (await http(sellerToken, 'GET', '/gops/sales')).status;
     check(
       'by customer lists the key customers, an unknown grouping is a 400, the paper prints, and a salesperson without the dashboard is kept out',
-      byCustomer.status === 200 && ((byCustomer.body.tables as T[])[0]?.rows.some((r) => r[0] === customer.name) ?? false) && badBy.status === 400 && matrixPdf.status === 200 && (await http(sellerToken, 'GET', '/gops/sales')).status === 403,
-      `${byCustomer.status} ${badBy.status} ${matrixPdf.status}`,
+      byCustomer.status === 200 && keyCustomers && badBy.status === 400 && matrixPdf.status === 200 && sellerSales === 403,
+      `${byCustomer.status} ${badBy.status} ${matrixPdf.status} ${sellerSales} · ${customerRows.length} customers, ours ${customerRows.some((r) => r[0] === customer.name)}`,
     );
   }
 

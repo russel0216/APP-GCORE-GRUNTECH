@@ -215,6 +215,9 @@ insightRoutes.get(
         payableOverdue: position.payableOverdue,
         reimbursable: position.reimbursable,
         advancesToRelease: position.advancesToRelease,
+        // Approved budget requests not yet released: cash promised, so the
+        // working position counts them (financePosition()).
+        budgetRequestsToRelease: position.budgetRequestsToRelease,
         collectedThisMonth: cents(num(collectedThisMonth._sum.amount)),
         collectedInRange: cents(num(collectedInRange._sum.amount)),
         // Receivable less everything owed — G-FIN's definition, to the centavo.
@@ -602,6 +605,7 @@ insightRoutes.get(
       industryRow(lead.customer?.subIndustry).leads++;
     }
 
+    const weightedRaw = new Map<ReturnType<typeof industryRow>, number>();
     for (const q of quotations) {
       const person = touch(q.owner.id, q.owner.name);
       const industry = industryRow(q.customer.subIndustry);
@@ -631,7 +635,9 @@ insightRoutes.get(
       }
       if (['OPEN', 'SUBMITTED', 'NEGOTIATION'].includes(q.outcome)) {
         industry.openValue = cents(industry.openValue + value);
-        industry.weightedValue = cents(industry.weightedValue + value * (q.probability / 100));
+        // Summed unrounded and rounded once below, the remainder on the largest
+        // row, so the table adds up to the total to the centavo (2026-11-26).
+        weightedRaw.set(industry, (weightedRaw.get(industry) ?? 0) + value * (q.probability / 100));
       }
     }
     for (const person of people.values()) {
@@ -640,6 +646,16 @@ insightRoutes.get(
       person.medianDaysToDecide = median(decideDays.get(person.id) ?? []);
     }
     for (const row of industries.values()) row.winRatePct = pct(row.won, row.won + row.lost);
+    {
+      // Each row its weighted value rounded once; whatever rounding leaves
+      // between the rows and the report's total goes on the largest row.
+      const rows = [...weightedRaw.entries()];
+      for (const [row, raw] of rows) row.weightedValue = cents(raw);
+      const total = cents(rows.reduce((s, [, raw]) => s + raw, 0));
+      const short = cents(total - rows.reduce((s, [row]) => s + row.weightedValue, 0));
+      const largest = rows.sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (largest && short !== 0) largest.weightedValue = cents(largest.weightedValue + short);
+    }
     const unclassified = industries.get(UNCLASSIFIED.id) ?? industryRow(UNCLASSIFIED);
     industries.delete(UNCLASSIFIED.id);
 

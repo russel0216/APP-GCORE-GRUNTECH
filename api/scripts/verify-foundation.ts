@@ -19,6 +19,7 @@ import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor, withImpliedLevels, impliedBy } from '../src/permissions/resolve';
@@ -222,6 +223,8 @@ async function restoreArchiveMark() {
 }
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await restoreTagline();
   await restoreArchiveMark();
   await prisma.notification.deleteMany({ where: { title: { contains: SUBJECT } } });
@@ -261,6 +264,8 @@ async function makeUser(name: string, email: string, roleKeys: string[], supervi
 async function main() {
   console.log('\nG-CORE foundation verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   // ── 1. Permission resolution ───────────────────────────────────────────────
   console.log('Permissions');
@@ -319,7 +324,10 @@ async function main() {
       JSON.stringify(actionsFor(['view_all', 'export'], 'all', 'none')) === JSON.stringify(['view_all', 'export']),
     JSON.stringify(actionsFor(quotes.actions, 'none', 'own')),
   );
-  const levelSrc = (f: string) => fs.readFileSync(f, 'utf8').replace(/^\s*\(The web copy[^\n]*\n/m, '');
+  // Line endings set aside (a Windows checkout is CRLF), and `[ \t]*` rather than
+  // `\s*`, which ran back over the line break before the web copy's note.
+  const levelSrc = (f: string) =>
+    fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n').replace(/^[ \t]*\(The web copy[^\n]*\n/m, '');
   check(
     'the web\'s permission levels are the API\'s, line for line',
     levelSrc(path.resolve(__dirname, '../src/shared/permissionLevels.ts')) === levelSrc(path.resolve(__dirname, '../../web/src/lib/permissionLevels.ts')),
@@ -1195,7 +1203,9 @@ async function main() {
   const katCrew = await makeUser('Verify KAT Crew', 'katcrew@verify.local', [], katSeller.id);
   await prisma.employee.create({ data: { employeeNo: `${TAG}EMP9`, firstName: 'Verify', lastName: 'KAT Crew', userId: katCrew.id, industryId: kat.id } });
   const tlStep = { approverType: 'SUPERVISOR', roleId: tlRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
-  check('a Team Leader step goes to the team’s Team Leader, not to the crew member’s own superior', (await approversForStep(tlStep, katCrew.id)).join() === leadKat.id, JSON.stringify(await approversForStep(tlStep, katCrew.id)));
+  // The team's Team Leader(s): the install may have its own on KAT beside the script's.
+  const toTeamLeader = (ids: string[]) => ids.includes(leadKat.id) && !ids.includes(katSeller.id);
+  check('a Team Leader step goes to the team’s Team Leader, not to the crew member’s own superior', toTeamLeader(await approversForStep(tlStep, katCrew.id)), JSON.stringify(await approversForStep(tlStep, katCrew.id)));
   check('a requester with no team keeps their "Reports to"', (await approversForStep(tlStep, approverB.id)).join() === bossOf.id);
   const plainStep = { approverType: 'SUPERVISOR', roleId: null, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
   check('a step naming no role (leave, overtime) stays the direct superior’s', (await approversForStep(plainStep, katCrew.id)).join() === katSeller.id);
@@ -1211,7 +1221,7 @@ async function main() {
     const katStaff = await makeUser('Verify KAT Staff', 'katstaff@verify.local', [], mgr.id);
     await prisma.employee.create({ data: { employeeNo: `${TAG}EMP10`, firstName: 'Verify', lastName: 'KAT Staff', userId: katStaff.id, industryId: kat.id } });
     check('a "Reports to" at the Team Leader’s level decides the step, not the team’s Team Leader', (await approversForStep(tlStep, katStaff.id)).join() === mgr.id, JSON.stringify(await approversForStep(tlStep, katStaff.id)));
-    check('…while crew reporting below that level still go to the team’s Team Leader', (await approversForStep(tlStep, katCrew.id)).join() === leadKat.id);
+    check('…while crew reporting below that level still go to the team’s Team Leader', toTeamLeader(await approversForStep(tlStep, katCrew.id)));
     await prisma.userRole.deleteMany({ where: { roleId: mgrRole.id } });
     await prisma.role.delete({ where: { id: mgrRole.id } });
   }
@@ -3185,9 +3195,12 @@ async function main() {
         .split('\n')
         .map((line, i) => ({ line: i + 1, text: line }))
         .filter(({ text }) => !/^\s*(\/\/|\*|\/\*)/.test(text));
+    // Compared with forward slashes, so an exception holds on Windows too
+    // (`components\People.tsx` there).
+    const slashed = (f: string) => f.replace(/\\/g, '/');
     const offenders = (pattern: RegExp, except: string[] = []) =>
       files
-        .filter((f) => !except.some((e) => f.endsWith(e)))
+        .filter((f) => !except.some((e) => slashed(f).endsWith(e)))
         .flatMap((f) => code(f).filter(({ text }) => pattern.test(text)).map(({ line }) => `${path.relative(webSrc, f)}:${line}`));
 
     const lookups = offenders(/\.get(<[^(]*>)?\(\s*[`'"]\/users\/lookup/, ['components/People.tsx']);

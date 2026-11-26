@@ -26,6 +26,7 @@ import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -76,6 +77,8 @@ const screenDay = (at: Date) => manilaDayKey(at);
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await prisma.serviceVisit.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.quotationRevision.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
@@ -169,6 +172,8 @@ const val = (l: Line | null, key: string) => fig(l, key)?.value;
 async function main() {
   console.log('\nG-CORE insights brief verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   // ══ Arithmetic ═══════════════════════════════════════════════════════════
   console.log('The range');
@@ -599,7 +604,8 @@ async function main() {
           (val(f, 'receivable') ?? 0) -
             (val(f, 'payable') ?? 0) -
             (val(f, 'reimbursable') ?? 0) -
-            (val(f, 'advancesToRelease') ?? 0),
+            (val(f, 'advancesToRelease') ?? 0) -
+            (val(f, 'budgetRequestsToRelease') ?? 0),
         ),
       ) && money(val(f, 'advancesToRelease') ?? NaN, fd.advancesToRelease),
     );
@@ -788,6 +794,9 @@ async function main() {
         leads: [sum('leads'), pl.body.totals.leads],
         won: [sum('wonValue'), pl.body.totals.wonValue],
         open: [sum('openValue'), pl.body.totals.openValue],
+        wonCount: [sum('won'), pl.body.totals.won],
+        lost: [sum('lost'), pl.body.totals.lost],
+        weighted: [sum('weightedValue'), pl.body.totals.weightedValue],
       }),
     );
     const activeIds = (await prisma.subIndustry.findMany({ where: { isActive: true }, select: { id: true } })).map((x) => x.id);

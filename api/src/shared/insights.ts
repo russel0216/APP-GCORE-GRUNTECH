@@ -541,6 +541,7 @@ export const SUMMARY_FIGURES: Record<string, FigureDef> = {
   payableOverdue: { module: 'gfin', label: 'Payable overdue', kind: 'money', basis: 'live', to: '/g-fin/ap?overdue=true' },
   reimbursable: { module: 'gfin', label: 'Owed to staff', kind: 'money', basis: 'live', to: '/g-fin/expenses?status=APPROVED' },
   advancesToRelease: { module: 'gfin', label: 'Advances approved, not released', kind: 'money', basis: 'live', to: '/g-fin/cash-advances?status=APPROVED' },
+  budgetRequestsToRelease: { module: 'gfin', label: 'Budget requests approved, not released', kind: 'money', basis: 'live', to: '/g-fin/budget-requests?status=APPROVED' },
   workingPosition: { module: 'gfin', label: 'Working position', kind: 'money', basis: 'live', to: '/g-fin' },
   collectedInRange: { module: 'gfin', label: 'Collected', kind: 'money', basis: 'range', to: '/g-fin/payments' },
   billingsAwaitingInvoice: { module: 'gfin', label: 'Approved billings not invoiced', kind: 'count', basis: 'live', to: '/g-fin/ar' },
@@ -704,6 +705,8 @@ async function finLine(range: Range, today: Date): Promise<SummaryLine> {
     figure('workingPosition', p.workingPosition),
     figure('collectedInRange', cents(num(collected._sum.amount))),
     figure('billingsAwaitingInvoice', billingsAwaitingInvoice),
+    // Last, so the summary CSV's earlier rows keep their places.
+    figure('budgetRequestsToRelease', p.budgetRequestsToRelease),
   ]);
 }
 

@@ -17,6 +17,7 @@ import { deleteAttachment } from '../src/shared/attachments';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
@@ -250,6 +251,8 @@ async function putSeriesBack() {
 }
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   // The files the attachment checks uploaded or copied — rows AND bytes:
   // the rows would cascade with their uploader, the files on disk would not.
   for (const f of await prisma.attachment.findMany({ where: { uploadedBy: { email: { endsWith: '@verifys.local' } } }, select: { id: true } })) {
@@ -372,6 +375,8 @@ async function apiReachable(): Promise<boolean> {
 async function main() {
   console.log('\nG-CORE sales verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   const sales = await makeUser('Verify Sales', 'sales@verifys.local', ['sales']);
   const manager = await makeUser('Verify Sales Manager', 'mgr@verifys.local', ['sales_manager', 'team_leader']);
@@ -811,6 +816,10 @@ async function main() {
 
     // A sales order on the approved R1, through its four signatures.
     const bsR = await makeUser('Verify Reopen Back Support', 'bs-reopen@verifys.local', ['back_support']);
+    // Back Support decides for the teams it supports: Sales is on HIT, and an
+    // install may have its own HIT Back Support (the laptop does), so this one
+    // is set to support HIT too.
+    await prisma.userSupportTeam.create({ data: { userId: bsR.id, industryId: teamHI.id } });
     const ccR = await makeUser('Verify Reopen Cost Controller', 'cc-reopen@verifys.local', ['cost_controller']);
     const reopenOrder = await prisma.salesOrder.create({
       data: { number: `${TAG}-RSO1`, quotationId: staleQuote.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'PENDING_APPROVAL', total: d(1120) },
@@ -5055,6 +5064,9 @@ async function main() {
     // ── Approval: the owner's route (2026-10-08) — Team Leader, Back Support /
     //    Admin, Cost Controller, CEO — through the one engine ──
     const backSupport = await makeUser('Verify Back Support', 'bs@verifys.local', ['back_support']);
+    // Sales is on HIT, and an install may have its own HIT Back Support (the
+    // laptop does): this one supports HIT too, so the step reaches it.
+    await prisma.userSupportTeam.create({ data: { userId: backSupport.id, industryId: teamHI.id } });
     const costController = await makeUser('Verify Cost Controller', 'cc@verifys.local', ['cost_controller']);
     const issueRefused = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
     check('with a route active, Issue is refused — the order is submitted instead', issueRefused.status === 400 && issueRefused.text.includes('approval'), issueRefused.text.slice(0, 120));

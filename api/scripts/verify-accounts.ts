@@ -14,6 +14,7 @@ import net from 'node:net';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { addressOf, buildMessage, encodeHeader, sendMail, type SmtpConfig } from '../src/shared/mail';
@@ -53,6 +54,8 @@ const DOMAIN = '@verifya.local';
 const MOVE_MARK = 'seed.adminEmailMoved.__verify__';
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await prisma.setting.deleteMany({ where: { key: { startsWith: MOVE_MARK } } });
   await prisma.employee.deleteMany({ where: { lastName: { startsWith: TAG } } });
   const users = await prisma.user.findMany({ where: { email: { endsWith: DOMAIN } }, select: { id: true } });
@@ -69,8 +72,9 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], superAdmin = false) {
-  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
-  const roles = await rolesLike('zzacct_', roleKeys);
+  // The seed's rights for each role, and NOT the install's role (scripts/lib/roles.ts):
+  // these checks are about what HR may not do, and the install's HR role may hold more.
+  const roles = await rolesLike('zzacct_', roleKeys, { real: false });
   return prisma.user.create({
     data: {
       name,
@@ -218,6 +222,8 @@ const tokenOf = (link: unknown) => String(link ?? '').split('#token=')[1] ?? '';
 async function main() {
   console.log('\nG-CORE accounts verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
 
   // ── 1. The SMTP sender, against a fake server ──────────────────────────────
   console.log('Sending mail (a fake SMTP server on 127.0.0.1)');

@@ -30,6 +30,7 @@
  */
 
 import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -117,6 +118,8 @@ const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
   await holidaysBack();
   // Approvals route to whoever really holds the role, so real people were told
@@ -155,9 +158,10 @@ async function cleanup() {
   }
 }
 
-async function makeUser(name: string, email: string, roleKeys: string[]) {
-  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
-  const roles = await rolesLike('zzam_', roleKeys);
+async function makeUser(name: string, email: string, roleKeys: string[], opts: { real?: boolean } = {}) {
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts);
+  // `{ real: false }` the seed's rights alone, for a check about what the role may NOT see.
+  const roles = await rolesLike('zzam_', roleKeys, opts);
   return prisma.user.create({
     data: {
       name,
@@ -211,6 +215,8 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
 async function main() {
   console.log('\nG-CORE aftermarket verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
   // The dates below were chosen for a Mon–Sat week: the stored holidays
   // are set aside for the run, and the holiday checks bring their own.
   await holidaysAside();
@@ -3363,9 +3369,13 @@ async function main() {
     // The service manager does not hold the G-OPS dashboard permission by
     // role — which is the right default, and means the actor has to be given
     // it explicitly rather than the assertion being quietly weakened to match.
-    await grantKeys(manager.id, ['gops.dashboard.view_all']);
+    // A service manager with the SEED's rights alone: the install's Aftermarket
+    // Manager role may have been given projects (the laptop's was), and this is a
+    // check about what the role may NOT see.
+    const svcViewer = await makeUser('ZZ Service Manager Viewer', 'svcview@verifya.local', ['service_manager'], { real: false });
+    await grantKeys(svcViewer.id, ['gops.dashboard.view_all']);
 
-    const overview = await api(managerToken, 'GET', '/gops/overview');
+    const overview = await api(signToken(svcViewer.id, svcViewer.email), 'GET', '/gops/overview');
     check('the G-OPS overview runs', overview.status === 200, String(overview.status));
     check(
       'it reports the stretches this person works in',

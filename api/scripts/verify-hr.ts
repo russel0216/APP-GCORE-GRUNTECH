@@ -35,6 +35,7 @@ import { prisma } from '../src/prisma';
 import { scanAccountabilities } from '../src/shared/clearance';
 import { CANDIDATE_FLOW, ENTRANCE_EXAMS, examPct, hiredBenchmark, nextStatuses, weightedScore } from '../src/shared/hiring';
 import { rolesLike } from './lib/roles';
+import { ownRoutesBack, seededRoutes } from './lib/routes';
 // For its `onApprovalSettled` subscriber: an in-process act() must reach it.
 import '../src/routes/attendanceCorrections';
 import { env } from '../src/env';
@@ -183,6 +184,8 @@ async function restoreRules() {
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // The install's own approval routes back (scripts/lib/routes.ts).
+  await ownRoutesBack();
   await restoreRules();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
@@ -506,6 +509,8 @@ async function apiForm(
 async function main() {
   console.log('\nG-CORE HR verification\n');
   await cleanup();
+  // The SEEDED approval routes for the run, whatever the install's are.
+  await seededRoutes();
   // The liveness check is off until its own section (see RULES_STASH).
   await stashRules();
   await saveHrSettings({ faceLiveness: false });
@@ -1126,6 +1131,13 @@ async function main() {
     const noPhoto = await legacy(null, null);
     const fileGone = await legacy(lostPhoto.id, null);
 
+    // A stricter threshold for this section: re-derivation refuses a face within
+    // the threshold plus the margin of ANOTHER employee's samples, and on an
+    // install with real people enrolled the demo's webcam face may sit near one
+    // (the laptop's nearest is 0.62, against 0.55 + 0.05). The section's own
+    // collision — the same face on a second employee — is ~0 apart either way.
+    const rederiveThreshold = (await hrSettings()).faceThreshold;
+    await saveHrSettings({ faceThreshold: 0.5 });
     const run = await rederiveFaceSamples();
     const [recoverableAfter, crowdedAfter, noPhotoAfter, fileGoneAfter] = await Promise.all(
       [recoverable, crowded, noPhoto, fileGone].map((r) => prisma.faceEnrollment.findUnique({ where: { id: r.id } })),
@@ -1196,6 +1208,7 @@ async function main() {
         !/Zeno|Worker/.test(String(twinQuality?.rederiveFailed)),
       `${JSON.stringify(third)} ${JSON.stringify(twinAfter?.quality)}`,
     );
+    await saveHrSettings({ faceThreshold: rederiveThreshold });
     const rederiveAudits = await prisma.auditLog.findMany({
       where: { entityType: 'setting', entityId: 'hr.rules', at: { gte: rederiveStarted }, summary: { contains: 're-derived' } },
     });
