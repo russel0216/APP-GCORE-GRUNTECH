@@ -356,7 +356,7 @@ export async function approversForStep(
   // and the panel says nobody can approve it.
   if (ids.length && ids.every((id) => id === requesterId)) {
     const up = await activeSupervisor(requesterId, tx);
-    if (up && up !== requesterId) return [up];
+    if (up && up !== requesterId) return isMoney(ctx) ? bossInsteadOfCeo([up], requesterId, tx) : [up];
     return ids;
   }
   // A money document's step the requester holds goes to the person they
@@ -368,7 +368,10 @@ export async function approversForStep(
   if (!isMoney(ctx) || step.approverType === 'PROJECT_MANAGERS') return ids;
   if (!ids.includes(requesterId) && !(await holdsStep(step, requesterId, tx, ctx))) return ids;
   const up = await activeSupervisor(requesterId, tx);
-  return up && up !== requesterId ? [up] : ids;
+  if (!up || up === requesterId) return ids;
+  // For BOSS staff "up" is never the CEO (2026-11-26): the Cost Controller's
+  // own claim goes to the Finance Manager, not to the CEO she reports to.
+  return bossInsteadOfCeo([up], requesterId, tx);
 }
 
 async function stepHolders(
@@ -495,7 +498,8 @@ async function stepHolders(
       // The step's other roles, on the requester's own team only — beside
       // the "Reports to" or the fallback, never instead of them.
       const also = await teamHoldersOf(step.alsoRoleIds ?? [], requesterId, tx, ctx.teamId);
-      return also.length ? [...new Set([...base, ...also])] : base;
+      const holders = also.length ? [...new Set([...base, ...also])] : base;
+      return isMoney(ctx) && !ctx.teamId ? notTheCeo(step, holders, requesterId, supervisorId, tx) : holders;
     }
 
     case 'HR':
@@ -504,6 +508,51 @@ async function stepHolders(
     default:
       return [];
   }
+}
+
+/**
+ * Roles that manage a selling team (the organisation chart's KEY_ROLES): their
+ * holders' own money documents keep the Team Leader step as it always was.
+ */
+export const TEAM_MANAGING_ROLES = ['team_leader', 'technical_manager', 'sales_manager', 'service_manager'];
+
+/**
+ * A money document's Team Leader step never lands on the CEO for BOSS staff
+ * (2026-11-26, the owner's call: "they don't want Carter Gasiong to approve
+ * budget request, particular in BOSS"). BOSS is a requester holding no
+ * team-managing role; where the step's holders are all CEO / President
+ * holders (BOSS staff sit on SIT, whose Team Leader is the CEO, or report to
+ * him directly), it goes instead to their "Reports to" when that is not the
+ * CEO (a CAD Operator to the Design Supervisor), else to the Finance Manager.
+ * For the Finance Manager's own document, with no other to ask, it stays the
+ * CEO's — whose one Approve then also signs the Finance Manager step.
+ */
+async function notTheCeo(
+  step: ApprovalStep,
+  holders: string[],
+  requesterId: string,
+  supervisorId: string | null,
+  tx: Prisma.TransactionClient,
+): Promise<string[]> {
+  if (!holders.length || !step.roleId) return holders;
+  const role = await tx.role.findUnique({ where: { id: step.roleId }, select: { key: true } });
+  if (!role || !TEAM_FIRST_ROLES.includes(role.key)) return holders;
+  const ceo = new Set(await usersInRole('ceo', tx));
+  if (!holders.every((id) => ceo.has(id))) return holders;
+  if (supervisorId && supervisorId !== requesterId && !ceo.has(supervisorId) && !(await managesATeam(requesterId, tx))) return [supervisorId];
+  return bossInsteadOfCeo(holders, requesterId, tx);
+}
+
+const managesATeam = async (userId: string, tx: Prisma.TransactionClient) =>
+  !!(await tx.userRole.findFirst({ where: { userId, role: { key: { in: TEAM_MANAGING_ROLES } } }, select: { userId: true } }));
+
+/** CEO-only holders of a BOSS requester's money step become the Finance Manager (never the requester); anyone else's stay. */
+async function bossInsteadOfCeo(holders: string[], requesterId: string, tx: Prisma.TransactionClient): Promise<string[]> {
+  const ceo = new Set(await usersInRole('ceo', tx));
+  if (!holders.length || !holders.every((id) => ceo.has(id))) return holders;
+  if (await managesATeam(requesterId, tx)) return holders;
+  const finance = (await usersInRole('finance_manager', tx)).filter((id) => id !== requesterId && !ceo.has(id));
+  return finance.length ? finance : holders;
 }
 
 /**

@@ -671,6 +671,57 @@ four databases and four copies of "customer".
       API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
       old `?payment=` link redirects there.
 
+## The money routes without the CEO (2026-11-26)
+
+The owner's call: "they don't want Carter Gasiong to approve budget request,
+particular in BOSS", with the routes his people asked for and his answers
+(BOSS staff who report to the CEO go to Dina; Dina's own stay Carter's; the
+project's Technical Manager still agrees where a project is charged; the cash
+advance takes the reimbursement's route). `shared/moneyRoutes.ts`.
+
+- **The routes** (`workflowSeeds.ts`; the routes before are RETIRED, a
+  document pending on one finishes on it). No CEO / President step and no
+  amount band on any of them:
+  - Budget request: Team Leader › Project budget agreed › Admin Back Support ›
+    Cost Controller › Finance Checker › Finance Manager.
+  - Reimbursement: Team Leader › Project budget agreed › Cost Controller ›
+    Finance Checker › Finance Manager.
+  - **Liquidation**: Team Leader › Accounting staff (Accounting Clerk, or
+    Accountant) › Accounting Manager › Finance Manager.
+  - Cash advance: Team Leader › Cost Controller › Finance Checker › Finance
+    Manager.
+  - Travel request: its four steps at any amount (the over-₱100,000 CEO
+    route retired).
+- **A liquidation is still an `expense` claim** (one table, one approval
+  panel); its route is the second `expense` workflow, `optionLabel`
+  "Liquidation" — the stock request's pattern. `claimRouteOption(claim)`
+  gives its id for a claim naming an advance or a budget request; the
+  submit, the draft paper's slots and `GET /expense-claims/route`
+  (`?liquidation=true` for a new one, the claim editor sends it) pass it.
+  Switched off or relabelled, a liquidation takes the reimbursement route.
+- **The Finance Checker** (`finance_checker`, rank 4) is the "Erwen" step:
+  Finance Clerk has two holders. `applyMoneyRoutes()` (the seed, after the
+  chart's roles — which delete any role they do not list on a fresh install)
+  makes the role, points every ROLE step named "Finance Checker" with no role
+  at it (every deploy), and gives it ONCE to the login named Erwen … Cabal
+  (`seed.moneyRoutes20261126`). Admin › Users moves it after that.
+- **BOSS staff's money steps never land on the CEO** (`notTheCeo`,
+  `bossInsteadOfCeo` in `shared/approvals.ts`, money documents only, a
+  document for another team excluded). A requester holding no team-managing
+  role (`TEAM_MANAGING_ROLES`: Team Leader, Technical, Sales, Aftermarket
+  Manager) whose Team Leader step resolves to CEO holders alone — BOSS sits
+  on SIT, whose Team Leader is the CEO, or reports to him directly — goes to
+  their "Reports to" when that is not the CEO (a CAD Operator to the Design
+  Supervisor), else to the Finance Manager; the same for a step they hold
+  themselves that would go up to the CEO (the Cost Controller's own claim,
+  the Accounting Manager's own liquidation). With no other Finance Manager —
+  Dina's own — it stays the CEO's, whose one Approve also signs her Finance
+  Manager step. A Team Leader's own documents (Rene Rose's) still go to the
+  CEO.
+- verify-finance pins the routes, the liquidation's, the BOSS rule and the
+  Cost Controller's own claim (504); verify-delivery the budget request and
+  liquidation walks (239).
+
 ## The owner's G-HR batch of 2026-11-13 — push 1
 
 - **Overtime is charged where the SUPERIOR says.** The filing form's project

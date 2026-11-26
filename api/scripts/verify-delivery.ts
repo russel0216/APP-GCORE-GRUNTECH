@@ -8,6 +8,7 @@
  * billed. All three are easy to get subtly wrong and invisible when they are.
  */
 
+import { claimRouteOption } from '../src/shared/moneyRoutes';
 import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { PDFDocument } from 'pdf-lib';
@@ -224,6 +225,11 @@ async function main() {
   const finance = await makeUser('Verify Finance', 'fin@verifyd.local', ['finance']);
   const backSupport = await makeUser('Verify Back Support', 'backsupport@verifyd.local', ['back_support']);
   const finMgr = await makeUser('Verify Finance Manager', 'finmgr@verifyd.local', ['finance_manager']);
+  // The money routes of 2026-11-26: the Cost Controller and the Finance Checker before the Finance Manager.
+  const costCtl = await makeUser('Verify Cost Controller', 'costctl@verifyd.local', ['cost_controller']);
+  const finChecker = await makeUser('Verify Finance Checker', 'fincheck@verifyd.local', ['finance_checker']);
+  const acctClerk = await makeUser('Verify Accounting Clerk', 'acctclerk@verifyd.local', ['accounting_clerk']);
+  const acctMgr = await makeUser('Verify Accounting Manager', 'acctmgr@verifyd.local', ['accounting']);
   const ceo = await makeUser('Verify CEO', 'ceo@verifyd.local', ['ceo']);
   await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: pm.id } });
 
@@ -441,8 +447,8 @@ async function main() {
     include: { steps: { orderBy: { sequence: 'asc' } } },
   });
   check(
-    'a ₱50,000 request takes the sheet’s signatures — Team Leader, (each charged project’s Technical Manager, 2026-11-11,) Admin Back Support, Finance Manager',
-    brWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager',
+    'a ₱50,000 request takes the signatures of 2026-11-26 — Team Leader, (each charged project’s Technical Manager,) Admin Back Support, Cost Controller, Finance Checker, Finance Manager',
+    brWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Project budget agreed › Admin Back Support › Cost Controller › Finance Checker › Finance Manager',
     brWorkflow.steps.map((st) => st.name).join(' › '),
   );
   const step1 = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: job.id });
@@ -459,6 +465,10 @@ async function main() {
   position = await budgetPosition(job.id);
   check('the budget does not move after the team leader’s approval', money(mat().budgeted, 400_000), String(mat().budgeted));
   await act({ requestId: request.id, userId: backSupport.id, action: 'APPROVED' });
+  const stepCc = await approversForStep(stepNamed('Cost Controller'), engineer.id, prisma, { jobId: job.id });
+  check('then the Cost Controller, then the Finance Checker', stepCc.includes(costCtl.id), stepCc.join(','));
+  await act({ requestId: request.id, userId: costCtl.id, action: 'APPROVED' });
+  await act({ requestId: request.id, userId: finChecker.id, action: 'APPROVED' });
   const step3 = await approversForStep(stepNamed('Finance Manager'), engineer.id, prisma, { jobId: job.id });
   check('then the Finance Manager decides', step3.includes(finMgr.id) && !step3.includes(finance.id), step3.join(','));
 
@@ -472,9 +482,9 @@ async function main() {
 
   const brRoute = async (amount: number) => (await pickWorkflow('budget_request', amount))?.steps.map((st) => st.name).join(' › ');
   check(
-    'up to ₱100,000.00 it stops at the Finance Manager; above it the CEO / President signs last',
-    (await brRoute(100_000)) === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager' &&
-      (await brRoute(100_000.01)) === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager › CEO / President',
+    'any amount stops at the Finance Manager — no CEO / President band (2026-11-26)',
+    (await brRoute(100_000)) === 'Team Leader › Project budget agreed › Admin Back Support › Cost Controller › Finance Checker › Finance Manager' &&
+      (await brRoute(5_000_000)) === (await brRoute(100_000)),
     `${await brRoute(100_000)} | ${await brRoute(100_000.01)}`,
   );
   const loner = await makeUser('Verify Loner Engineer', 'loner@verifyd.local', ['project_engineer']);
@@ -525,8 +535,10 @@ async function main() {
     JSON.stringify(twoHatsNow.actions.map((a) => [a.sequence, a.coSignedWith])),
   );
   await act({ requestId: twoHats.id, userId: backSupport.id, action: 'APPROVED' });
+  await act({ requestId: twoHats.id, userId: costCtl.id, action: 'APPROVED' });
+  await act({ requestId: twoHats.id, userId: finChecker.id, action: 'APPROVED' });
   check(
-    'Back Support’s signature then settles it — nobody asks the Finance Manager again',
+    'Back Support, the Cost Controller and the Finance Checker then settle it — nobody asks the Finance Manager again',
     (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: twoHats.id } })).status === 'APPROVED' &&
       (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br2.id } })).status === 'APPROVED',
   );
@@ -582,8 +594,16 @@ async function main() {
     subject: `${TAG} liquidation`,
     amount: 42_000,
     requesterId: engineer.id,
+    // A liquidation's own route (2026-11-26), as the claim's submit picks it.
+    optionId: await claimRouteOption(liquidation),
   });
-  for (const signer of [pm, backSupport, finance, finMgr, ceo]) {
+  const liqWorkflow = await prisma.approvalWorkflow.findUniqueOrThrow({ where: { id: liqRequest.workflowId! }, include: { steps: { orderBy: { sequence: 'asc' } } } });
+  check(
+    'the liquidation takes its own route — Team Leader, Accounting staff, Accounting Manager, Finance Manager',
+    liqWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Accounting staff › Accounting Manager › Finance Manager',
+    liqWorkflow.steps.map((st) => st.name).join(' › '),
+  );
+  for (const signer of [pm, acctClerk, acctMgr, finMgr]) {
     await act({ requestId: liqRequest.id, userId: signer.id, action: 'APPROVED' });
   }
   position = await budgetPosition(job.id);
@@ -1894,7 +1914,7 @@ async function main() {
         brText.includes('Verify PM') &&
         brText.includes('Verify Back Support') &&
         brText.includes('Verify Finance Manager') &&
-        signedCount(brText) === 5 &&
+        signedCount(brText) === brSteps.length + 2 &&
         pendingCount(brText) === 0,
       `${brPdf.status} ${brSteps.join(' / ')} · ${signedCount(brText)} signed, ${pendingCount(brText)} pending`,
     );

@@ -256,12 +256,12 @@ export function ClaimEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(`/expense-claims/route${qs({ amount: String(total), claimId: id ?? '', jobIds: chargedJobIds.join(',') })}`)
+        .get<{ route: Route | null }>(`/expense-claims/route${qs({ amount: String(total), claimId: id ?? '', jobIds: chargedJobIds.join(','), liquidation: liquidating ? 'true' : '' })}`)
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [total, id, chargedJobIds.join(',')]);
+  }, [total, id, chargedJobIds.join(','), liquidating]);
 
   const dirty = (saved !== null && snapshot(header, lines) !== saved) || files.length > 0;
   useUnsavedChanges(dirty && !busy);

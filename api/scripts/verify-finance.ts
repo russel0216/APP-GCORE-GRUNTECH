@@ -31,7 +31,8 @@ import { rolesLike } from './lib/roles';
 import { ownRoutesBack, seededRoutes } from './lib/routes';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, ctxOf, heldSequences, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf, heldSequences, pendingFor, reopenApproved, mayReopen, routePreview } from '../src/shared/approvals';
+import { claimRouteOption } from '../src/shared/moneyRoutes';
 import { resolveUser } from '../src/permissions/resolve';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
 import { requestedByLine } from '../src/shared/projectBudget';
@@ -447,7 +448,14 @@ async function main() {
   const teamLeader = await makeUser('ZZ Team Leader', 'teamleader@verifyf.local', ['team_leader']);
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
   // Reimbursements and cash advances (2026-10-15) end with the CEO / President.
-  await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
+  const ceoUser = await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
+  // The money routes of 2026-11-26: the Cost Controller and the Finance
+  // Checker check budget requests, reimbursements and cash advances; the
+  // Accounting staff and the Accounting Manager check a liquidation.
+  await makeUser('ZZ Cost Controller', 'costctl@verifyf.local', ['cost_controller']);
+  await makeUser('ZZ Finance Checker', 'fincheck@verifyf.local', ['finance_checker']);
+  await makeUser('ZZ Accounting Clerk', 'acctclerk@verifyf.local', ['accounting_clerk']);
+  await makeUser('ZZ Accounting Manager', 'acctmgr@verifyf.local', ['accounting']);
   // The supplier bill routes' first step (2026-10-15); the install's own holders are nobody's business.
   await makeUser('ZZ Fin TM', 'tm@verifyf.local', ['technical_manager']);
   // Throwaway roles for the route guards: nothing at all, project access
@@ -2146,7 +2154,7 @@ async function main() {
     const raisedId = String(raised.body.id);
     const draftPage = await eng('GET', `/budget-requests/${raisedId}`);
     check(
-      'the draft names its route — the team leader, back support, the finance manager — before it is submitted',
+      'the draft names its route — the team leader, back support, the cost controller, the finance checker, the finance manager — before it is submitted',
       draftPage.status === 200 &&
         draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
         draftPage.body.approvalRoute?.steps?.some((st: { name: string; approvers: { id: string }[] }) => st.name === 'Admin Back Support' && st.approvers.some((p) => p.id === backSup.id)) &&
@@ -2159,7 +2167,7 @@ async function main() {
     check(
       'and prints it: one "APPROVED BY" per step — never the step’s own name as a heading — "Pending" under each',
       brDraftPdf.status === 200 &&
-        brSteps.length === 4 &&
+        brSteps.length === 6 &&
         approvedByCount(brDraftText) === brSteps.length &&
         noStepHeading(brDraftText, brSteps) &&
         !flat(brDraftText).includes('RECEIVED BY') &&
@@ -2167,8 +2175,9 @@ async function main() {
         flat(brDraftText).includes(pm.name) &&
         flat(brDraftText).includes(finMgr.name) &&
         signedCount(brDraftText) === 1 &&
-        // Team Leader, the project's Technical Manager (2026-11-11), Back Support, Finance Manager.
-        pendingCount(brDraftText) === 4,
+        // Team Leader, the project's Technical Manager (2026-11-11), Back Support,
+        // the Cost Controller, the Finance Checker, the Finance Manager (2026-11-26).
+        pendingCount(brDraftText) === 6,
       `${brDraftPdf.status} ${brSteps.join(' / ')} · ${approvedByCount(brDraftText)} APPROVED BY · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
@@ -2223,7 +2232,7 @@ async function main() {
         approvedByCount(brRaw) === brSteps.length &&
         noStepHeading(brRaw, brSteps) &&
         brText.includes('RECEIVED BY') &&
-        signedCount(brRaw) === 6 &&
+        signedCount(brRaw) === brSteps.length + 2 &&
         pendingCount(brRaw) === 0,
       `${brPdf.status} ${approvedByCount(brRaw)} APPROVED BY · ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
@@ -4590,12 +4599,42 @@ async function main() {
       include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
     });
     check(
-      'a reimbursement goes Team Leader › Project budget agreed › Back Support › Checking (Account Payable / Credit and Collection) › Finance Manager › CEO / President',
+      'a reimbursement goes Team Leader › Project budget agreed › Cost Controller › Finance Checker › Finance Manager — no CEO / President (2026-11-26)',
       rmbSubmit.status === 200 &&
         JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
-          JSON.stringify(['Team Leader', 'Project budget agreed', 'Back Support', 'Checking (Account Payable / Credit and Collection)', 'Finance Manager', 'CEO / President']),
+          JSON.stringify(['Team Leader', 'Project budget agreed', 'Cost Controller', 'Finance Checker', 'Finance Manager']),
       JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
     );
+    // The money routes of 2026-11-26: a liquidation takes its own route, and
+    // BOSS staff's money documents never land on the CEO.
+    const liqRoute = await eng('GET', '/expense-claims/route?amount=500&liquidation=true');
+    check(
+      'a liquidation goes Team Leader › Accounting staff › Accounting Manager › Finance Manager (its own route)',
+      JSON.stringify(liqRoute.body.route?.steps?.map((st: { name: string }) => st.name)) ===
+        JSON.stringify(['Team Leader', 'Accounting staff', 'Accounting Manager', 'Finance Manager']),
+      JSON.stringify(liqRoute.body.route?.steps?.map((st: { name: string }) => st.name)),
+    );
+    const bossStaff = await makeUser('ZZ Boss Staff', 'bossstaff@verifyf.local', ['zzfin_claimant'], ceoUser.id);
+    const costCtl = await prisma.user.findUniqueOrThrow({ where: { email: 'costctl@verifyf.local' }, select: { id: true } });
+    await prisma.user.update({ where: { id: costCtl.id }, data: { supervisorId: ceoUser.id } });
+    const ceoIds = (await prisma.userRole.findMany({ where: { role: { key: 'ceo' } }, select: { userId: true } })).map((r) => r.userId);
+    const noCeo = (r: Awaited<ReturnType<typeof routePreview>>) => !!r && r.steps.every((st) => st.approvers.every((a) => !ceoIds.includes(a.id)));
+    const bossRmb = await routePreview('expense', 500, bossStaff.id, null, { documentType: 'expense' });
+    const bossLiq = await routePreview('expense', 500, bossStaff.id, await claimRouteOption({ liquidation: true }), { documentType: 'expense' });
+    const bossCa = await routePreview('cash_advance', 500, bossStaff.id, null, { documentType: 'cash_advance' });
+    const bossBr = await routePreview('budget_request', 500, bossStaff.id, null, { documentType: 'budget_request' });
+    check(
+      'BOSS staff who report to the CEO: their Team Leader step goes to the Finance Manager, and no step of a reimbursement, liquidation, cash advance or budget request is the CEO’s',
+      bossRmb?.steps[0]?.approvers.some((a) => a.id === finMgr.id) === true && [bossRmb, bossLiq, bossCa, bossBr].every(noCeo),
+      JSON.stringify([bossRmb, bossLiq, bossCa, bossBr].map((r) => r?.steps.map((st) => `${st.name}=${st.approvers.map((a) => a.name).join('/')}`))),
+    );
+    const ccOwn = await routePreview('expense', 500, costCtl.id, null, { documentType: 'expense' });
+    check(
+      'the Cost Controller’s own claim: her step goes to the Finance Manager, never up to the CEO she reports to',
+      noCeo(ccOwn) && ccOwn!.steps.find((st) => st.name === 'Cost Controller')?.approvers.some((a) => a.id === finMgr.id) === true,
+      JSON.stringify(ccOwn?.steps.map((st) => `${st.name}=${st.approvers.map((a) => a.name).join('/')}`)),
+    );
+
     const stageOf = async () =>
       ((await fin('GET', `/expense-claims?pageSize=5&search=${encodeURIComponent(String(rmb.body.number))}`)).body.rows?.[0] as { stage?: string } | undefined)?.stage;
     const stageFirst = await stageOf();
@@ -4617,8 +4656,8 @@ async function main() {
       ordered.push((await stageOf()) ?? '?');
     }
     check(
-      'the register says where it stands in the owner’s words: TL Approval, then Back Support, Checking, FM Approval, CEO Approval',
-      stageFirst === 'TL Approval' && JSON.stringify(ordered) === JSON.stringify(['Back Support', 'Checking', 'FM Approval', 'CEO Approval']),
+      'the register says where it stands in the owner’s words: TL Approval, then Cost Controller, Finance Checker, FM Approval, For Release',
+      stageFirst === 'TL Approval' && JSON.stringify(ordered) === JSON.stringify(['Cost Controller', 'Finance Checker', 'FM Approval', 'For Release']),
       `${stageFirst} → ${JSON.stringify(ordered)}`,
     );
     await settle(rmbReq!.id);
@@ -4663,9 +4702,9 @@ async function main() {
     });
     const loanOut = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
     check(
-      'a new advance is money lent: five signatures, released, then RELEASED with no liquidation deadline',
+      'a new advance is money lent: four signatures (no CEO / President), released, then RELEASED with no liquidation deadline',
       loan.body.repayable === true &&
-        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (ACCOUNT PAYABLE / CREDIT AND COLLECTION)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
+        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'COST CONTROLLER', 'FINANCE CHECKER', 'FINANCE MANAGER']) &&
         loanRelease.status === 201 &&
         loanOut?.status === 'RELEASED' &&
         loanOut.liquidationDueDate === null,

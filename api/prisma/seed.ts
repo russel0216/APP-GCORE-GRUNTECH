@@ -52,6 +52,7 @@ import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/empl
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
 import { applyRoleRev1, refreshUserTitle } from '../src/shared/roleRev1';
+import { applyMoneyRoutes } from '../src/shared/moneyRoutes';
 import { seedSharedPosts } from '../src/shared/teamPosts';
 import { dropOverrides } from '../src/shared/overridesDrop';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
@@ -303,6 +304,17 @@ async function main() {
   // but deactivated, so they stop matching new documents while any history
   // routed through them stays readable. Deleting them would orphan that.
   const RETIRED = [
+    // The money routes of 2026-11-26 (shared/moneyRoutes.ts): no CEO /
+    // President step on a budget request, reimbursement, cash advance or
+    // travel request; the Cost Controller and the Finance Checker check the
+    // money, and a liquidation takes a route of its own. A document pending
+    // on a route before finishes on it.
+    'Budget Request — team leader, project budget agreed, back support, finance manager',
+    'Budget Request — team leader, project budget agreed, back support, finance manager, then CEO / President over ₱100,000',
+    'Reimbursement — team leader, project budget agreed, back support, checking, finance manager, CEO / President',
+    'Cash advance — team leader, back support, checking, finance manager, CEO / President',
+    'Travel request — technical manager, team leader, back support, finance manager',
+    'Travel request — technical manager, team leader, back support, finance manager, then CEO / President over ₱100,000',
     // The project budget agreement (2026-11-11): the reimbursement and the
     // budget request routes gain each charged project's Technical Manager; a
     // document pending on the route before finishes on it.
@@ -1313,6 +1325,16 @@ async function main() {
     if (retitled) console.log(`  ✓ Titles refreshed from roles: ${retitled}`);
     const posts = await seedSharedPosts();
     if (posts) console.log(`  ✓ KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT (${posts} post(s))`);
+  }
+
+  // ── The money routes of 2026-11-26: the Finance Checker role, once given ─
+  // to Erwen, and the routes' "Finance Checker" steps pointed at it (after
+  // the chart's roles, which would delete it on a fresh install).
+  {
+    const money = await applyMoneyRoutes();
+    if (money.created) console.log('  ✓ Finance Checker role created');
+    if (money.given) console.log(`  ✓ Finance Checker given to ${money.given}`);
+    if (money.steps) console.log(`  ✓ ${money.steps} "Finance Checker" approval step(s) pointed at the role`);
   }
 
   // ── The permission matrix (2026-10-19): per-person overrides go, once ─────

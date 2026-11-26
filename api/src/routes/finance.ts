@@ -1,3 +1,4 @@
+import { claimRouteOption } from '../shared/moneyRoutes';
 import { Router } from 'express';
 import { z } from 'zod';
 import {
@@ -3470,11 +3471,16 @@ expenseRoutes.get(
     const amount = Number(req.query.amount ?? 0);
     if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
     const claimId = req.query.claimId ? String(req.query.claimId) : null;
-    const row = claimId ? await prisma.expenseClaim.findUnique({ where: { id: claimId }, select: { claimedById: true } }) : null;
+    const row = claimId
+      ? await prisma.expenseClaim.findUnique({ where: { id: claimId }, select: { claimedById: true, advanceId: true, budgetRequestId: true } })
+      : null;
     if (claimId && !row) throw notFound('Claim not found');
     // The projects the page's lines charge (2026-11-11): each one's Technical Manager agrees.
     const jobIds = req.query.jobIds ? String(req.query.jobIds).split(',').filter(Boolean) : [];
-    res.json({ route: await routeBrief('expense', amount, row?.claimedById ?? me.id, null, { jobIds }) });
+    // A liquidation takes its own route (2026-11-26): a saved one by what it
+    // accounts for, a new one by the page's word.
+    const optionId = await claimRouteOption(row ?? { liquidation: req.query.liquidation === 'true' });
+    res.json({ route: await routeBrief('expense', amount, row?.claimedById ?? me.id, optionId, { jobIds }) });
   }),
 );
 
@@ -4260,6 +4266,8 @@ expenseRoutes.post(
         requesterId: claim.claimedById,
         // Every project charged: each one's Technical Manager agrees (2026-11-11).
         jobIds: jobIdsOf(claim, claim.lines),
+        // A liquidation's own route (2026-11-26, shared/moneyRoutes.ts).
+        optionId: await claimRouteOption(claim),
       });
     } catch (err) {
       // The engine refused (no workflow, a self-approval trap). The claim goes
@@ -4702,7 +4710,9 @@ expenseRoutes.get(
       'expense',
       claim.id,
       // Submitted in the claimant's name, as the submit route does.
-      claim.status === 'DRAFT' ? { amount: view.total, requesterId: claim.claimedById, jobIds: jobIdsOf(claim, claim.lines) } : undefined,
+      claim.status === 'DRAFT'
+        ? { amount: view.total, requesterId: claim.claimedById, jobIds: jobIdsOf(claim, claim.lines), optionId: await claimRouteOption(claim) }
+        : undefined,
     );
     const bare = await renderDocument({
       title: liquidated ? 'Liquidation Report' : 'Expense Claim',

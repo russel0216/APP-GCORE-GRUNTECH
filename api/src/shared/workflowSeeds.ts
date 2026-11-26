@@ -124,48 +124,33 @@ export const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
-    // BUDGET REQUEST (project cash): Team Leader, Admin Back Support (the
-    // holders supporting the preparer's team), Finance Manager, and the CEO /
-    // President above ₱100,000. The project manager's step of 2026-10-07 is
-    // not on the sheet; that route is RETIRED.
-    // Since 2026-11-11 the Technical Manager of every project its lines
-    // charge agrees after the Team Leader (the owner's call: "make sure the
-    // TM … who handles the budget monitoring agree"); passed over when it
-    // charges no project. The routes without that step are RETIRED.
+    // BUDGET REQUEST (project cash). Since 2026-11-26 (the owner's call: "they
+    // don't want Carter Gasiong to approve budget request, particular in
+    // BOSS"): Team Leader, the project budget agreed (passed over when it
+    // charges no project), Admin Back Support, the Cost Controller (Ayessa),
+    // the Finance Checker (Erwen), the Finance Manager (DBG) — any amount, no
+    // CEO / President step. The two banded routes before are RETIRED.
     documentType: 'budget_request',
-    name: 'Budget Request — team leader, project budget agreed, back support, finance manager',
-    maxAmount: 100_000,
+    name: 'Budget Request — team leader, project budget agreed, back support, cost controller, finance checker, finance manager',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Project budget agreed', approverType: 'PROJECT_MANAGERS', roleKey: 'technical_manager' },
       { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-    ],
-  },
-  {
-    documentType: 'budget_request',
-    name: 'Budget Request — team leader, project budget agreed, back support, finance manager, then CEO / President over ₱100,000',
-    minAmount: 100_000.01,
-    preparerSigns: true,
-    standIns: true,
-    steps: [
-      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 2, name: 'Project budget agreed', approverType: 'PROJECT_MANAGERS', roleKey: 'technical_manager' },
-      { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+      { sequence: 4, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 5, name: 'Finance Checker', approverType: 'ROLE', roleKey: 'finance_checker' },
+      { sequence: 6, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
     ],
   },
   {
     // TRAVEL REQUEST (2026-11-10, the owner's call: "it should be recognized
     // by the team leader also"): the Technical Manager on the preparer's
-    // team, the Team Leader, Admin Back Support, the Finance Manager — and
-    // the CEO / President above ₱100,000, as for a budget request.
+    // team, the Team Leader, Admin Back Support, the Finance Manager. Since
+    // 2026-11-26 any amount — the CEO / President band over ₱100,000 is
+    // RETIRED with the other money routes' CEO step.
     documentType: 'travel_request',
-    name: 'Travel request — technical manager, team leader, back support, finance manager',
-    maxAmount: 100_000,
+    name: 'Travel request — technical manager, team leader, back support, finance manager (any amount)',
     preparerSigns: true,
     standIns: true,
     steps: [
@@ -173,20 +158,6 @@ export const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-    ],
-  },
-  {
-    documentType: 'travel_request',
-    name: 'Travel request — technical manager, team leader, back support, finance manager, then CEO / President over ₱100,000',
-    minAmount: 100_000.01,
-    preparerSigns: true,
-    standIns: true,
-    steps: [
-      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -514,24 +485,39 @@ export const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
-    // REIMBURSEMENT (the owner's money-out sheet, 2026-10-15: "Back Support >
-    // Finance Staff > Finance Manager > CEO", after the requester's Team
-    // Leader): every expense claim and liquidation. "Checking" is Finance
-    // staff. The supervisor-then-finance route is RETIRED.
-    // Since 2026-11-11 the Technical Manager of every project its lines
-    // charge agrees after the Team Leader; passed over for an office-only or
-    // overheads claim. The route without that step is RETIRED.
+    // REIMBURSEMENT. Since 2026-11-26: the Team Leader, the project budget
+    // agreed (passed over for an office-only or overheads claim), the Cost
+    // Controller (Ayessa), the Finance Checker (Erwen), the Finance Manager
+    // (DBG) — no Back Support, no "Checking", no CEO / President. The route
+    // before is RETIRED.
     documentType: 'expense',
-    name: 'Reimbursement — team leader, project budget agreed, back support, checking, finance manager, CEO / President',
+    name: 'Reimbursement — team leader, project budget agreed, cost controller, finance checker, finance manager',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Project budget agreed', approverType: 'PROJECT_MANAGERS', roleKey: 'technical_manager' },
-      { sequence: 3, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 4, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
+      { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 4, name: 'Finance Checker', approverType: 'ROLE', roleKey: 'finance_checker' },
       { sequence: 5, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-      { sequence: 6, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    // LIQUIDATION (2026-11-26): the claim that accounts for an advance's or a
+    // budget request's released cash takes its own route — the Team Leader,
+    // the Accounting staff (Accounting Clerk or Accountant), the Accounting
+    // Manager, the Finance Manager (DBG). The same `expense` document, picked
+    // by its option label at submit (shared/moneyRoutes.ts), never unasked.
+    documentType: 'expense',
+    name: 'Liquidation — team leader, accounting staff, accounting manager, finance manager',
+    optionLabel: 'Liquidation',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Accounting staff', approverType: 'ROLE', roleKey: 'accounting_clerk', alsoRoleKeys: ['accounting_officer'] },
+      { sequence: 3, name: 'Accounting Manager', approverType: 'ROLE', roleKey: 'accounting' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
     ],
   },
   {
@@ -547,18 +533,19 @@ export const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
-    // CASH ADVANCE, money lent to an employee (the same sheet): the same five
-    // signatures; finance releases it, the employee repays it.
+    // CASH ADVANCE, money lent to an employee. Since 2026-11-26 the
+    // reimbursement's signatures without the project's agreement: the Team
+    // Leader, the Cost Controller, the Finance Checker, the Finance Manager —
+    // no CEO / President. The five-signature route before is RETIRED.
     documentType: 'cash_advance',
-    name: 'Cash advance — team leader, back support, checking, finance manager, CEO / President',
+    name: 'Cash advance — team leader, cost controller, finance checker, finance manager',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 3, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
+      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 3, name: 'Finance Checker', approverType: 'ROLE', roleKey: 'finance_checker' },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
-      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
