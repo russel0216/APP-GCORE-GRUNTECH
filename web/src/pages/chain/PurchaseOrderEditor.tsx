@@ -13,6 +13,7 @@ import { DiscountCalculator } from '../sales/editorParts';
 import { ItemCell, type BudgetLine, type Category, type Route, type Suggestion } from './PurchaseRequisitionEditor';
 import { SearchSelect } from '../../components/SearchSelect';
 import { BatchRequestsPanel } from './Orders';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
 
 /**
  * The purchase order as a PAGE (2026-10-13, the owner's call after the
@@ -121,6 +122,7 @@ interface ExistingPo {
     nature?: 'GOODS' | 'SERVICE';
     item: { id: string } | null;
     costCategory: { id: string } | null;
+    officeBudgetLine?: CurrentOfficeLine | null;
     fromRequest?: { id: string; number: string; job: { id: string; number: string; name: string } | null } | null;
   }[];
 }
@@ -141,6 +143,8 @@ interface Line {
   nature: 'GOODS' | 'SERVICE';
   /** Which request the line came from, and what it buys for — shown, never sent. */
   from?: string;
+  /** An office order with no request (2026-11-28): the line's own office budget line; empty takes the order's default. */
+  officeBudgetLineId?: string;
 }
 
 interface Header {
@@ -231,9 +235,13 @@ export function PurchaseOrderEditor() {
   const presetJob = params.get('project') ?? '';
   const presetOrder = params.get('salesOrder') ?? '';
   const presetQuotation = params.get('quotation') ?? '';
-  const [forMode, setForMode] = useState<'stock' | 'project' | 'order' | 'quotation'>(
+  const [forMode, setForMode] = useState<'stock' | 'project' | 'order' | 'quotation' | 'office'>(
     presetJob ? 'project' : presetOrder ? 'order' : presetQuotation ? 'quotation' : 'stock',
   );
+  // For the office budget (2026-11-28): the office line every line takes unless it names its own.
+  const [officeLineId, setOfficeLineId] = useState('');
+  const [savedOfficeLineId, setSavedOfficeLineId] = useState('');
+  const officeBudgets = useOfficeLines();
   const [pickedQuotationId, setPickedQuotationId] = useState(presetQuotation);
   const [quotationChoices, setQuotationChoices] = useState<{ id: string; number: string; customer: string; subject: string }[]>([]);
   const [pickedJobId, setPickedJobId] = useState(presetJob);
@@ -317,7 +325,13 @@ export function PurchaseOrderEditor() {
             unitPrice: String(i.unitPrice),
             nature: i.nature ?? 'GOODS',
             from: i.fromRequest ? `${i.fromRequest.number}${i.fromRequest.job ? ` · ${i.fromRequest.job.number}` : ''}` : '',
+            officeBudgetLineId: i.officeBudgetLine?.id ?? '',
           }));
+          if (po.kind === 'OFFICE') {
+            const first = po.items.find((i) => i.officeBudgetLine)?.officeBudgetLine?.id ?? '';
+            setOfficeLineId(first);
+            setSavedOfficeLineId(first);
+          }
         } else {
           const ship = await api.get<{ name: string; address: string }>('/purchase-orders/ship-to').catch(() => ({ name: '', address: '' }));
           const d = await api.get<Draft>(
@@ -371,12 +385,20 @@ export function PurchaseOrderEditor() {
           ? 'QUOTATION'
         : forMode === 'project' && pickedJobId
           ? 'DIRECT_TO_JOB'
-          : 'STOCK_REPLENISHMENT'
+          : forMode === 'office'
+            ? 'OFFICE'
+            : 'STOCK_REPLENISHMENT'
       : (draft?.kind ?? 'STOCK_REPLENISHMENT'));
   const job = existing?.job ?? draft?.job ?? (standalone && forMode === 'project' ? (jobChoices.find((j) => j.id === pickedJobId) ?? null) : null);
   // Only an order charged to a project asks each line for its budget line.
   const direct = kind === 'DIRECT_TO_JOB';
   const salesOrder = existing?.salesOrder ?? draft?.salesOrder ?? null;
+  // An office order with no request names each line's office budget line here;
+  // from a request, every line keeps its request line's.
+  const officePick = kind === 'OFFICE' && !request && !batch;
+  const officeOf = (l: Line) => l.officeBudgetLineId || officeLineId;
+  /** Every office line the saved order names, so a closed one stays on the list. */
+  const officeCurrent = new Map((existing?.items ?? []).flatMap((i) => (i.officeBudgetLine ? [[i.officeBudgetLine.id, i.officeBudgetLine] as const] : [])));
 
   useEffect(() => {
     if (!standalone) return;
@@ -434,7 +456,7 @@ export function PurchaseOrderEditor() {
     return () => window.clearTimeout(timer);
   }, [money.total, id, header.applyVat]);
 
-  const dirty = saved !== null && (snapshot(header, lines) !== saved || files.length > 0);
+  const dirty = saved !== null && (snapshot(header, lines) !== saved || files.length > 0 || officeLineId !== savedOfficeLineId);
   useUnsavedChanges(dirty && !busy);
   useBackLink(
     existing ? `/g-chain/purchase-orders/${existing.id}` : request ? `/g-chain/purchase-requests/${request.id}` : canvass ? `/g-chain/canvass/${canvass.id}` : null,
@@ -500,6 +522,7 @@ export function PurchaseOrderEditor() {
     if (!l.name.trim() && !l.description.trim()) return 'Say what is ordered';
     if (!(Number(l.quantity) > 0)) return 'Quantity must be more than zero';
     if (direct && !l.costCategoryId) return 'Choose its budget line';
+    if (officePick && !officeOf(l)) return 'Choose its office budget line';
     return null;
   };
   const problems: string[] = [];
@@ -542,6 +565,7 @@ export function PurchaseOrderEditor() {
         unit: l.unit.trim() || 'pcs',
         unitPrice: Number(l.unitPrice) || 0,
         nature: kind === 'STOCK_REPLENISHMENT' ? 'GOODS' : l.nature,
+        ...(officePick ? { officeBudgetLineId: officeOf(l) || null } : {}),
       })),
       ...(existing
         ? { version: existing.version }
@@ -553,6 +577,7 @@ export function PurchaseOrderEditor() {
             quotationId: standalone && forMode === 'quotation' ? pickedQuotationId || null : null,
             jobId: standalone && forMode === 'project' ? pickedJobId || null : null,
             warehouseId: standalone && forMode === 'stock' ? pickedWarehouseId || null : null,
+            ...(standalone && forMode === 'office' ? { office: true } : {}),
           }),
     };
   }
@@ -571,6 +596,7 @@ export function PurchaseOrderEditor() {
         ? (await api.put<{ id: string }>(`/purchase-orders/${existing.id}/sheet`, body())).id
         : (await api.post<{ id: string }>('/purchase-orders', body())).id;
       setSaved(snapshot(header, lines));
+      setSavedOfficeLineId(officeLineId);
       // Filed before a submit, so the approvers see them from the first step.
       if (files.length) {
         const form = new FormData();
@@ -741,7 +767,9 @@ export function PurchaseOrderEditor() {
                         ? 'Charged to the project when received; each line names its budget line'
                         : forMode === 'quotation'
                           ? 'Bought ahead for a deal not yet booked — charged to no project; the goods are held as the quotation’s own stock, and follow it to its sales order or project'
-                          : 'Bought for the deal — its spend, never a project; the goods sit as the order’s own stock when received into a warehouse'
+                          : forMode === 'office'
+                            ? 'Bought for the office — charged to the office budget line each line names; received for office use, never warehouse stock. The Office Budget monitor counts it as cash out once issued and as actual once received'
+                            : 'Bought for the deal — its spend, never a project; the goods sit as the order’s own stock when received into a warehouse'
                     : undefined
                 }
               >
@@ -752,6 +780,7 @@ export function PurchaseOrderEditor() {
                       <option value="project">A project</option>
                       <option value="order">An issued sales order</option>
                       <option value="quotation">An open quotation</option>
+                      <option value="office">The office budget (admin and overheads)</option>
                     </select>
                     {forMode === 'quotation' && (
                       <SearchSelect value={pickedQuotationId} onChange={(e) => setPickedQuotationId(e.target.value)}>
@@ -811,6 +840,8 @@ export function PurchaseOrderEditor() {
                       </Link>
                     ) : warehouse ? (
                       `Stock for ${warehouse.name}`
+                    ) : officePick ? (
+                      'Office budget — each line is charged to the office budget line it names; received for office use'
                     ) : kind === 'OFFICE' ? (
                       'Office budget — each line is charged to its request’s office budget line; received for office use'
                     ) : batch && kind === 'DIRECT_TO_JOB' ? (
@@ -823,6 +854,29 @@ export function PurchaseOrderEditor() {
                   </div>
                 )}
               </Field>
+              {officePick && (
+                <Field
+                  label="Office budget line"
+                  required
+                  error={attempted && !officeLineId && sent.some((l) => !l.officeBudgetLineId) ? 'Choose the office budget line' : null}
+                  hint={
+                    <OfficeLineAdvice
+                      budgets={officeBudgets}
+                      value={officeLineId}
+                      amount={sent.filter((l) => officeOf(l) === officeLineId).reduce((sum, l) => sum + amountOf(l), 0)}
+                      onPick={setOfficeLineId}
+                    />
+                  }
+                >
+                  <OfficeLineSelect
+                    budgets={officeBudgets}
+                    value={officeLineId}
+                    none="— choose —"
+                    current={officeCurrent.get(officeLineId) ?? null}
+                    onChange={setOfficeLineId}
+                  />
+                </Field>
+              )}
               <Field label="Delivery date">
                 <input type="date" value={header.deliveryDate} onChange={(e) => setHeader((h) => ({ ...h, deliveryDate: e.target.value }))} />
               </Field>
@@ -939,7 +993,7 @@ export function PurchaseOrderEditor() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Budget line</th>
+                    <th>{officePick ? 'Office budget line' : 'Budget line'}</th>
                     <th>Part No.</th>
                     <th>Item and description</th>
                     <th>Unit</th>
@@ -963,19 +1017,30 @@ export function PurchaseOrderEditor() {
                           )}
                         </td>
                         <td>
-                          <select
-                            aria-label={`Line ${i + 1} budget line`}
-                            aria-invalid={problem === 'Choose its budget line' || undefined}
-                            value={l.costCategoryId}
-                            onChange={(e) => setLine(l.key, { costCategoryId: e.target.value })}
-                          >
-                            <option value="">{direct ? '— choose —' : '— none —'}</option>
-                            {categories.map((c, n) => (
-                              <option key={c.id} value={c.id}>
-                                {n + 1} {c.name}
-                              </option>
-                            ))}
-                          </select>
+                          {officePick ? (
+                            <OfficeLineSelect
+                              aria-label={`Line ${i + 1} office budget line`}
+                              budgets={officeBudgets}
+                              value={l.officeBudgetLineId ?? ''}
+                              none="— as above —"
+                              current={officeCurrent.get(l.officeBudgetLineId ?? '') ?? null}
+                              onChange={(officeBudgetLineId) => setLine(l.key, { officeBudgetLineId })}
+                            />
+                          ) : (
+                            <select
+                              aria-label={`Line ${i + 1} budget line`}
+                              aria-invalid={problem === 'Choose its budget line' || undefined}
+                              value={l.costCategoryId}
+                              onChange={(e) => setLine(l.key, { costCategoryId: e.target.value })}
+                            >
+                              <option value="">{direct ? '— choose —' : '— none —'}</option>
+                              {categories.map((c, n) => (
+                                <option key={c.id} value={c.id}>
+                                  {n + 1} {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                           {/* Goods or a service (2026-10-21): a request line keeps the request's. */}
                           {kind !== 'STOCK_REPLENISHMENT' &&
                             (l.requestItemId ? (

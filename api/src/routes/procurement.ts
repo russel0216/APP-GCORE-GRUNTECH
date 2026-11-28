@@ -59,6 +59,7 @@ import { salesOrderSpend } from '../shared/orderStock';
 import { checkQuotationTarget, quotationSpend } from '../shared/quotationBuying';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { checkOfficeLines } from '../shared/officePurchases';
+import { OFFICE_LINE_SELECT } from '../shared/officeBudget';
 
 /** What a purchase is for, in words — the lists, the papers and the trail. */
 export function purchaseKindLabel(kind: string): string {
@@ -3290,6 +3291,8 @@ async function loadPo(id: string) {
         include: {
           item: { select: { id: true, code: true, name: true } },
           costCategory: { select: { id: true, name: true } },
+          // An office order's line: the office budget line it is charged to (2026-11-28).
+          officeBudgetLine: OFFICE_LINE_SELECT,
           // Its own request and project — a batch order's line names them (2026-11-10).
           requestItem: { select: { estimatedCost: true, request: { select: { id: true, number: true, job: { select: { id: true, number: true, name: true } } } } } },
         },
@@ -3691,6 +3694,14 @@ const poSchema = z.object({
    */
   jobId: z.string().optional().nullable(),
   warehouseId: z.string().optional().nullable(),
+  /**
+   * An order raised with no request FOR THE OFFICE (2026-11-28, the owner's
+   * call: "allow allocation for office budget if not related to project or
+   * quotation or sales order"): no project, warehouse, sales order or
+   * quotation — each line names its office budget line, the goods are
+   * received for office use, and the office monitor reads the order itself.
+   */
+  office: z.boolean().optional(),
   currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
   /** Pesos per one unit of a foreign currency (2026-10-23); left out, Company Settings' rate. */
   exchangeRate: z.number().positive().max(1_000_000).optional().nullable(),
@@ -4075,14 +4086,20 @@ purchaseOrderRoutes.post(
       await checkQuotationTarget(ownQuotationId);
     }
     const quotationId = batch ? batch.quotationId : pr ? pr.quotationId : ownQuotationId;
+    // … or for the office budget (2026-11-28): no other target beside it.
+    const ownOffice = !pr && !batch && body.office === true;
+    if (ownOffice && (salesOrderId || ownQuotationId || body.jobId || body.warehouseId)) {
+      throw badRequest('An order for the office budget names no project, warehouse, sales order or quotation — choose one');
+    }
     const target = batch
       ? { jobId: batch.jobId, warehouseId: batch.warehouseId }
       : pr
         ? { jobId: pr.jobId, warehouseId: pr.warehouseId }
-        : ownQuotationId
+        : ownQuotationId || ownOffice
           ? { jobId: null, warehouseId: null }
           : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
-    const kind = batch?.kind ?? pr?.kind ?? (ownQuotationId ? 'QUOTATION' : standaloneKind(salesOrderId, target.jobId));
+    const kind = batch?.kind ?? pr?.kind ?? (ownQuotationId ? 'QUOTATION' : ownOffice ? 'OFFICE' : standaloneKind(salesOrderId, target.jobId));
+    if (ownOffice && !body.lines?.length) throw badRequest('An order for the office budget needs its lines — each names the office budget line it is charged to');
     // The page sends the lines as it shows them; a caller that sends none
     // gets the source's lines, as before. Every line is checked before the
     // number is issued.
@@ -4450,7 +4467,11 @@ purchaseOrderRoutes.put(
     // sales order stays as made; a project, a warehouse or neither re-decides
     // the kind, and the lines are checked under it.
     let retarget: { kind: PurchaseKind; jobId: string | null; warehouseId: string | null } | null = null;
-    if (!po.requestId && !po.batch && !po.salesOrderId && !po.quotationId && (body.jobId !== undefined || body.warehouseId !== undefined)) {
+    if (!po.requestId && !po.batch && !po.salesOrderId && !po.quotationId && body.office === true) {
+      // … or the office budget (2026-11-28): no project and no warehouse.
+      if (body.jobId || body.warehouseId) throw badRequest('An order for the office budget names no project or warehouse — choose one');
+      retarget = { kind: 'OFFICE', jobId: null, warehouseId: null };
+    } else if (!po.requestId && !po.batch && !po.salesOrderId && !po.quotationId && (body.jobId !== undefined || body.warehouseId !== undefined)) {
       const target = await standaloneTarget(null, body.jobId ?? null, body.warehouseId ?? null);
       retarget = { kind: standaloneKind(null, target.jobId), ...target };
     }
@@ -4522,7 +4543,7 @@ purchaseOrderRoutes.post(
         documentType: 'purchase_order',
         documentId: po.id,
         documentNumber: po.number,
-        subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : po.salesOrder ? ` — ${po.salesOrder.number}` : ''}`,
+        subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : po.salesOrder ? ` — ${po.salesOrder.number}` : po.kind === 'OFFICE' ? ' — Office budget' : ''}`,
         amount: totalPesos,
         link: `/g-chain/purchase-orders/${po.id}`,
         // An importation (no VAT, 2026-10-16) goes to the Purchasing Manager

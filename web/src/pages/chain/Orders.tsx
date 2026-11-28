@@ -388,6 +388,7 @@ interface PoLine {
   outstandingQty: number;
   item: { id: string; code: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  officeBudgetLine?: { id: string; code: string; name: string; budget: { name: string } } | null;
   landedUnitCost?: number | null;
   pesoUnitCost?: number | null;
   pesoBasis?: string;
@@ -715,7 +716,16 @@ export function PurchaseOrderDetail() {
             <tbody>
               {po.items.map((i) => (
                 <tr key={i.id}>
-                  <td>{i.costCategory?.name ?? <span className="faint">—</span>}</td>
+                  <td>
+                    {i.officeBudgetLine ? (
+                      <>
+                        {i.officeBudgetLine.code} {i.officeBudgetLine.name}
+                        <div className="faint">{i.officeBudgetLine.budget.name}</div>
+                      </>
+                    ) : (
+                      (i.costCategory?.name ?? <span className="faint">—</span>)
+                    )}
+                  </td>
                   <td className="mono">{i.partNumber ?? (i.item ? i.item.code : '')}</td>
                   <td>
                     {i.name && i.name !== i.description ? (

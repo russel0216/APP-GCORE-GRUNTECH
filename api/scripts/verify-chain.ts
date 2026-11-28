@@ -7099,6 +7099,51 @@ async function officePurchasing(supplierId: string) {
     );
     await prisma.receivingItem.deleteMany({ where: { receivingId: posted.id } });
     await prisma.receiving.delete({ where: { id: posted.id } });
+
+    // An order with NO request, for the office budget (2026-11-28).
+    const line = { name: 'Printer toner', quantity: 2, unit: 'pc', unitPrice: 500 };
+    const noLine = await api(token, 'POST', '/purchase-orders', { supplierId, office: true, notes: `${TAG} office order`, lines: [line] });
+    const twoTargets = await api(token, 'POST', '/purchase-orders', {
+      supplierId,
+      office: true,
+      warehouseId: (await prisma.warehouse.findFirst({ where: { isActive: true } }))?.id,
+      notes: `${TAG} office order`,
+      lines: [{ ...line, officeBudgetLineId: expense.id }],
+    });
+    const direct = await api(token, 'POST', '/purchase-orders', {
+      supplierId,
+      office: true,
+      applyVat: false,
+      notes: `${TAG} office order`,
+      lines: [{ ...line, officeBudgetLineId: expense.id }],
+    });
+    const own = direct.status === 201 ? await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: String(direct.body.id) }, include: { items: true } }) : null;
+    const seenOwn = own ? await api(token, 'GET', `/purchase-orders/${own.id}`) : null;
+    check(
+      'a purchase order with no request may be for the office budget — every line names its office budget line, no project or warehouse beside it',
+      noLine.status === 400 &&
+        /office budget line/i.test(String(noLine.body.error ?? '')) &&
+        twoTargets.status === 400 &&
+        own?.kind === 'OFFICE' &&
+        own.jobId === null &&
+        own.warehouseId === null &&
+        own.requestId === null &&
+        own.items[0].officeBudgetLineId === expense.id &&
+        seenOwn?.body.items?.[0]?.officeBudgetLine?.code === 'Z02',
+      `${noLine.status} ${noLine.body.error}; ${twoTargets.status}; ${direct.status} ${direct.body.error ?? ''} ${own?.kind} ${own?.items[0]?.officeBudgetLineId}`,
+    );
+    if (own) {
+      const base = (await officeFigures([expense.id])).get(expense.id)!;
+      await prisma.purchaseOrder.update({ where: { id: own.id }, data: { status: 'PENDING_APPROVAL' } });
+      const waiting = (await officeFigures([expense.id])).get(expense.id)!;
+      await prisma.purchaseOrder.update({ where: { id: own.id }, data: { status: 'ISSUED' } });
+      const issued = (await officeFigures([expense.id])).get(expense.id)!;
+      check(
+        'the office monitor reads such an order itself: nothing as a draft, requested while it waits for approval, cash out once issued',
+        waiting.requested - base.requested === 1000 && waiting.released === base.released && issued.requested === base.requested && issued.released - base.released === 1000,
+        JSON.stringify({ base, waiting, issued }),
+      );
+    }
   } finally {
     await prisma.approvalWorkflow.delete({ where: { id: route.id } });
   }

@@ -710,6 +710,22 @@ never charge one.
   warehouse; the request page names each line's office line; the order and
   the Incoming say it is for the office.
 - verify-chain pins it.
+- **A purchase order with NO request may be for the office budget too**
+  (2026-11-28, the owner's call: "allow allocation for office budget if not
+  related to project or quotation or sales order"). `POST /purchase-orders
+  { office: true, lines }` — no request, project, warehouse, sales order or
+  quotation beside it (a 400), every line naming its `officeBudgetLineId`
+  (`checkPoLines` → `checkOfficeLines`); kind OFFICE. `PUT /:id/sheet
+  { office: true }` re-targets a standalone draft the same way. Nothing new
+  downstream: the Incoming receives it for office use, and
+  `officePurchaseFigures()` already reads an order line with no request —
+  requested while the order waits for approval, cash out once issued (at its
+  price in pesos), actual once received. The order takes the ordinary
+  purchase order route. The editor's "For" gains **The office budget (admin
+  and overheads)**: an "Office budget line" default with its advice, and each
+  line's own picker ("— as above —"); `GET /purchase-orders/:id` sends each
+  line's `officeBudgetLine`, which the order page shows in the Budget line
+  column. verify-chain pins it (495).
 
 ## The reimbursement page's lines, the CEO's own money, and back to draft (2026-11-26)
 
