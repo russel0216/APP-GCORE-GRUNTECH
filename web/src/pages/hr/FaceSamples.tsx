@@ -54,6 +54,19 @@ export interface FaceEnrollments {
   legacy: number;
   samplesNeeded: number;
   maxSamples: number;
+  /**
+   * HR, on somebody else's record (2026-11-28, GT-HT-2026-0046): the latest
+   * enrolment refused as the same face as a colleague's, and whether HR has
+   * said they are two people.
+   */
+  collision?: {
+    at: string;
+    otherId: string;
+    otherName: string;
+    distance: number;
+    canAllow: boolean;
+    allowedUntil: string | null;
+  } | null;
 }
 
 const SAMPLE_TONES: Record<string, Tone> = { CURRENT: 'ok', LEGACY: 'warn', FLAGGED: 'danger' };
@@ -184,6 +197,28 @@ export function FaceSamplesPanel({
     });
   }
 
+  function askAllow() {
+    const c = data!.collision!;
+    confirm.ask({
+      title: `${data!.employee.name} is not ${c.otherName}?`,
+      body: (
+        <>
+          Their last enrolment was refused because the face came {c.distance} from {c.otherName}’s enrolled samples, which
+          the clock reads as the same face. Confirm only after looking at {c.otherName}’s Face samples tab: if those photos
+          are {c.otherName}, {data!.employee.name} may enrol for the next 7 days, each sample recorded as a look-alike of{' '}
+          {c.otherName} and listed on Face health. If the photos are {data!.employee.name}, remove them from{' '}
+          {c.otherName}’s tab instead.
+        </>
+      ),
+      confirmLabel: 'They are different people',
+      onConfirm: async () => {
+        await api.post('/clock/enrollments/lookalike', { employeeId, otherEmployeeId: c.otherId });
+        toast('ok', `${data!.employee.name} may enrol now — on the Clock page`);
+        await load();
+      },
+    });
+  }
+
   function askReset() {
     confirm.ask({
       title: self ? 'Start over with your face samples?' : `Remove all of ${data!.employee.name}’s face samples?`,
@@ -216,6 +251,31 @@ export function FaceSamplesPanel({
           </>
         )}
       </p>
+
+      {!self && data.collision && (
+        <div className={`alert ${data.collision.allowedUntil ? 'ok' : 'warn'}`}>
+          {data.collision.allowedUntil ? (
+            <>
+              HR confirmed {data.employee.name} is not {data.collision.otherName}. They may enrol on the Clock page until{' '}
+              {formatDateTime(data.collision.allowedUntil)}.
+            </>
+          ) : (
+            <>
+              Enrolment refused on {formatDateTime(data.collision.at)}: the face came {data.collision.distance} from{' '}
+              {data.collision.otherName}’s enrolled samples, read as the same face.{' '}
+              {data.collision.canAllow ? (
+                editable && (
+                  <button type="button" className="btn btn-sm" onClick={askAllow} disabled={confirm.open}>
+                    They are different people…
+                  </button>
+                )
+              ) : (
+                <>That is too close to tell two people apart — check whose face is on {data.collision.otherName}’s samples.</>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {samples.length === 0 ? (
         <p className="faint hraud-flush">No face samples on file{self ? ' yet' : ''}.</p>

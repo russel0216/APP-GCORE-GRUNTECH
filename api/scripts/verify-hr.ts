@@ -40,6 +40,7 @@ import { ownRoutesBack, seededRoutes } from './lib/routes';
 import '../src/routes/attendanceCorrections';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
+import { lookalikeAllowed } from '../src/shared/faceLookalikes';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, reopenApproved, mayReopen, activeSupervisor, routeBrief } from '../src/shared/approvals';
 import { resolveUser } from '../src/permissions/resolve';
@@ -718,6 +719,59 @@ async function main() {
       enrolCollision(null, null, 0.55) === null,
     [enrolCollision(null, 0.3, 0.55), enrolCollision(null, 0.52, 0.55), enrolCollision(0.55, 0.58, 0.55)].join(' '),
   );
+
+  // HR says two faces are two people (2026-11-28, GT-HT-2026-0046): after an
+  // enrolment refused as a colleague's face, HR may let the person enrol
+  // beside that colleague for a week — never below the floor, never on
+  // one's own record, never unasked.
+  {
+    const twin = await prisma.employee.create({ data: { firstName: `${TAG} Twin`, lastName: 'Lookalike' } });
+    const refusal = (distance: number) =>
+      prisma.auditLog.create({
+        data: {
+          entityType: 'employee',
+          entityId: employee.id,
+          action: 'REJECTED',
+          summary: `${TAG} face collision`,
+          after: { faceEnrolRefusal: 'collision', nearestOther: { employeeId: twin.id, name: `${TAG} Twin`, distance } } as unknown as Prisma.InputJsonValue,
+        },
+      });
+    const hrTok = signToken(hrOfficer.id, hrOfficer.email);
+    const workerTok = signToken(worker.id, worker.email);
+    try {
+      await refusal(0.487);
+      const seen = await api(hrTok, 'GET', `/clock/enrollments?employeeId=${employee.id}`);
+      const col = seen.body.collision as { otherId?: string; canAllow?: boolean; allowedUntil?: string | null } | undefined;
+      const stranger = await api(workerTok, 'POST', '/clock/enrollments/lookalike', { employeeId: employee.id, otherEmployeeId: twin.id });
+      const wrong = await api(hrTok, 'POST', '/clock/enrollments/lookalike', { employeeId: employee.id, otherEmployeeId: employee.id });
+      const ok = await api(hrTok, 'POST', '/clock/enrollments/lookalike', { employeeId: employee.id, otherEmployeeId: twin.id });
+      const allowed = await lookalikeAllowed(employee.id, twin.id);
+      const after = await api(hrTok, 'GET', `/clock/enrollments?employeeId=${employee.id}`);
+      await refusal(0.35);
+      const tooClose = await api(hrTok, 'POST', '/clock/enrollments/lookalike', { employeeId: employee.id, otherEmployeeId: twin.id });
+      check(
+        'HR may say a face refused as a colleague’s is another person — a week’s leave to enrol beside them; nobody else may, nor for a pair under the floor',
+        seen.status === 200 &&
+          col?.otherId === twin.id &&
+          col?.canAllow === true &&
+          col?.allowedUntil === null &&
+          stranger.status === 403 &&
+          wrong.status === 400 &&
+          ok.status === 200 &&
+          !!allowed &&
+          !!(after.body.collision as { allowedUntil?: string } | undefined)?.allowedUntil &&
+          tooClose.status === 400,
+        `seen ${seen.status} ${JSON.stringify(col)} stranger ${stranger.status} wrong ${wrong.status} ok ${ok.status} allowed ${!!allowed} tooClose ${tooClose.status}`,
+      );
+    } finally {
+      await prisma.auditLog.deleteMany({ where: { entityId: employee.id, summary: { contains: TAG } } });
+      await prisma.auditLog.deleteMany({ where: { entityId: employee.id, summary: { startsWith: 'HR confirmed this face' } } });
+      const row = await prisma.setting.findUnique({ where: { key: 'face.lookalikesAllowed' } });
+      const entries = ((row?.value as { entries?: { employeeId: string }[] } | null)?.entries ?? []).filter((e) => e.employeeId !== employee.id);
+      if (row) await prisma.setting.update({ where: { key: 'face.lookalikesAllowed' }, data: { value: { entries } as unknown as Prisma.InputJsonValue } });
+      await prisma.employee.delete({ where: { id: twin.id } });
+    }
+  }
 
   await currentSample(employee.id, descriptor(1));
 

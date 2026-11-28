@@ -17,6 +17,7 @@ import {
   HttpError,
   type ListQuery,
 } from '../http/kit';
+import { allowLookalike, latestCollision, lookalikeAllowed, lookalikesFor, LOOKALIKE_FLOOR, ALLOW_DAYS } from '../shared/faceLookalikes';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
@@ -775,6 +776,8 @@ clockRoutes.post(
 
       let decision: EnrolDecision;
       let lookalike: { employeeId: string; name: string; distance: number } | null = null;
+      // HR's word that the near colleague is another person (2026-11-28, GT-HT-2026-0046).
+      let confirmedBy: string | null = null;
       try {
         decision = await prisma.$transaction(
           async (tx): Promise<EnrolDecision> => {
@@ -799,7 +802,22 @@ clockRoutes.post(
             // when it sits clearly with its owner's own samples — the clock's
             // margin rule tells the two apart capture by capture, both being
             // enrolled — and HR sees the pair on Face health.
-            const clash = enrolCollision(own, nearestOther?.distance ?? null, threshold);
+            let clash = enrolCollision(own, nearestOther?.distance ?? null, threshold);
+            // HR looked and said they are two people (shared/faceLookalikes.ts):
+            // a "same face" from the floor up is taken as a look-alike — still
+            // only while it sits the margin nearer the person's own samples.
+            if (
+              clash === 'same_face' &&
+              nearestOther &&
+              nearestOther.distance >= LOOKALIKE_FLOOR &&
+              (own == null || own + FACE_MARGIN <= nearestOther.distance + 1e-9)
+            ) {
+              const allowed = await lookalikeAllowed(target.id, nearestOther.employeeId, tx);
+              if (allowed) {
+                clash = 'lookalike';
+                confirmedBy = allowed.byName;
+              }
+            }
             if (clash === 'same_face' || clash === 'too_close') {
               return { refused: 'collision', own, nearestOther, limit, onFile: onFile.current };
             }
@@ -856,7 +874,10 @@ clockRoutes.post(
         throw badRequest(
           isHr && nearestOther
             ? `This face is already enrolled on ${nearestOther.name}'s account (distance ${fourPlaces(nearestOther.distance)}). ` +
-                `If those samples are this person's, remove them from ${nearestOther.name}'s Face samples tab first.`
+                `If those samples are this person's, remove them from ${nearestOther.name}'s Face samples tab first.` +
+                (nearestOther.distance >= LOOKALIKE_FLOOR
+                  ? ` If they are two different people, say so on ${target.firstName} ${target.lastName}'s Face samples tab, then enrol again.`
+                  : '')
             : ENROL_MESSAGES.collision,
         );
       }
@@ -875,7 +896,13 @@ clockRoutes.post(
             (resembles ? ' — it resembles another employee’s face' : ''),
           // A look-alike's name and distance in the detail only, for HR.
           after: resembles
-            ? ({ faceEnrolLookalike: { ...resembles, distance: fourPlaces(resembles.distance) } } as unknown as Prisma.InputJsonValue)
+            ? ({
+                faceEnrolLookalike: {
+                  ...resembles,
+                  distance: fourPlaces(resembles.distance),
+                  ...(confirmedBy ? { confirmedDifferentBy: confirmedBy } : {}),
+                },
+              } as unknown as Prisma.InputJsonValue)
             : undefined,
         },
         req,
@@ -928,7 +955,73 @@ clockRoutes.get(
     const owner = await sampleOwner(me, employeeId, 'ghr.employees.edit_all');
     const list = await listSamples(owner);
     if (!list) throw notFound('Employee not found');
+    // For HR on somebody else's record: the latest enrolment refused as the
+    // same face as a colleague's, and whether HR has said they are two people.
+    const mine = await myEmployee(me.id);
+    if (owner !== mine?.id && can(me, 'ghr.employees.edit_all')) {
+      const collision = await latestCollision(owner);
+      const allowed = await lookalikesFor(owner);
+      res.json({
+        ...list,
+        collision: collision
+          ? {
+              ...collision,
+              distance: fourPlaces(collision.distance),
+              canAllow: collision.distance >= LOOKALIKE_FLOOR,
+              allowedUntil: allowed.find((a) => a.otherId === collision.otherId)?.until ?? null,
+            }
+          : null,
+        lookalikesAllowed: allowed,
+      });
+      return;
+    }
     res.json(list);
+  }),
+);
+
+/**
+ * HR says two faces are two people (2026-11-28, GT-HT-2026-0046): after
+ * looking at the colleague's samples, HR lets this person enrol beside them
+ * for a week — only after an enrolment was refused as that colleague's face,
+ * and never below the floor. Never on one's own record.
+ */
+clockRoutes.post(
+  '/enrollments/lookalike',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!can(me, 'ghr.employees.edit_all')) throw forbidden('Only HR can confirm two faces are different people');
+    const body = parseBody(z.object({ employeeId: z.string(), otherEmployeeId: z.string() }), req.body);
+    const mine = await myEmployee(me.id);
+    if (body.employeeId === mine?.id || body.otherEmployeeId === mine?.id) {
+      throw forbidden('Another HR person confirms it when your own face is one of the two');
+    }
+    const target = await prisma.employee.findUnique({ where: { id: body.employeeId }, select: { id: true, firstName: true, lastName: true } });
+    if (!target) throw notFound('Employee not found');
+    const collision = await latestCollision(target.id);
+    if (!collision || collision.otherId !== body.otherEmployeeId) {
+      throw badRequest(`No recent enrolment of ${target.firstName} ${target.lastName} was refused as that colleague's face`);
+    }
+    if (collision.distance < LOOKALIKE_FLOOR) {
+      throw badRequest(`The two faces read ${fourPlaces(collision.distance)} apart — too close to tell apart, whoever they are`);
+    }
+    const entry = await allowLookalike({
+      employeeId: target.id,
+      otherId: collision.otherId,
+      otherName: collision.otherName,
+      byId: me.id,
+      byName: me.name,
+    });
+    await audit(
+      {
+        entityType: 'employee',
+        entityId: target.id,
+        action: 'UPDATED',
+        summary: `HR confirmed this face is not ${collision.otherName}'s — may enrol for ${ALLOW_DAYS} days`,
+        after: { faceLookalikeAllowed: { otherId: collision.otherId, otherName: collision.otherName, distance: fourPlaces(collision.distance), until: entry.until } } as unknown as Prisma.InputJsonValue,
+      },
+      req,
+    );
+    res.json({ until: entry.until });
   }),
 );
 

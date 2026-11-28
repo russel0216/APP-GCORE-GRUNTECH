@@ -2251,6 +2251,20 @@ launcher as the way out) — never a stale phase sentence.
   track ended or that went dark behind a hidden tab, says "in use by another
   app" and "open G-CORE through https://" in words, and counts "Hours so
   far" live.
+- **HR may say two faces are two people** (2026-11-28, help ticket
+  GT-HT-2026-0046: Paul Iver Yumul's face read 0.487 from Mark Angelo
+  Ursulom's samples — "the same face" — and HR looked: different people).
+  `shared/faceLookalikes.ts`: after an enrolment refused as a collision,
+  the person's Face samples tab (HR, `ghr.employees.edit_all`) shows who it
+  came near and how near (`GET /clock/enrollments` → `collision`) and offers
+  "They are different people…" — `POST /clock/enrollments/lookalike
+  { employeeId, otherEmployeeId }`, only for the colleague the latest
+  refusal named, never under `LOOKALIKE_FLOOR` (0.40), never on HR's own
+  record or face, audited. For `ALLOW_DAYS` (7) that person's enrolment
+  takes such a sample as a LOOK-ALIKE (still only when it sits the margin
+  nearer their own samples), its audit row's `faceEnrolLookalike` saying
+  `confirmedDifferentBy`; the clock's margin rule tells the two apart. One
+  Setting row, `face.lookalikesAllowed`. verify-hr pins it.
 - **Every face sample was flushed once** (2026-10-23, the owner's call:
   "flush all face samples so anyone can send samples again"):
   `flushFaceSamples()` in `shared/faceSamples.ts`, the seed, marked
