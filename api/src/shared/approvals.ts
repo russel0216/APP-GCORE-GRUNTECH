@@ -1384,7 +1384,10 @@ export async function resumeStranded(requestId: string, actorId: string): Promis
   if (!request) throw notFound('Approval request not found');
   if (request.status !== 'PENDING') throw badRequest('This request is no longer waiting for a decision');
   if (!request.workflow) throw badRequest('Its route was deleted — pull the document back to draft and submit it again');
-  const ctx = ctxOf(request);
+  // The CEO / President's own money document passes over the steps above
+  // finance (2026-11-28: GT-EXP-2026-0055, submitted before that rule, sat at
+  // its Team Leader step — Approval Health saw it stranded, Resume refused it).
+  const ctx = await withCeoRule(ctxOf(request), request.requesterId);
   const current = request.workflow.steps.find((s) => s.sequence === request.currentSequence);
   if (current && stepApplies(current, ctx)) throw badRequest('This request is at a step its route still has — it is waiting on its approvers, not stuck');
 
